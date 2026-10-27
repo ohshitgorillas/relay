@@ -1,4 +1,5 @@
 design /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | order /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | main e9d466a
+landed 6 | b8471fa
 section s1.1 | lead | steps: 1 | size: lead: tokens: 1010049.9 seconds: 675.1 overruns: 0 refusals: 0
   s1.1.d1 | builder | steps: 1 | writes: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s1.1.d1
@@ -45,23 +46,14 @@ section s2 | lead | steps: 3, 4 | size: lead: tokens: 971308.7 seconds: 672.0 ov
     step: 4. Errors and config: build. `builder` writes `relay/errors.py` and `relay/config.py`.
     paths: relay/errors.py, relay/config.py
     check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_config.py
-section s3 | lead | steps: 5, 6 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
-  s3.d1 | test-writer | steps: 5 | writes: tests/test_queue.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s3.d1
+section s3.1.1 | lead | steps: 5 | size: lead: tokens: 1033483.8 seconds: 679.8 overruns: 0 refusals: 0
+  s3.1.1.d1 | test-writer | steps: 5 | writes: tests/test_queue.py | size: test-writer: tokens: 548800.6 seconds: 163.2 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s3.1.1.d1
+    resume d9877a9d-6acc-4979-8d3c-f14004867d43
     red
     design: docs/superpowers/specs/relay-loop-design.md Order 5
-    behavior: `relay/queue.py`: parses the divvyer's `.md` queue into sections.
-    view: stubgen .pyi of relay/queue.py
     behavior: False when the queue itself marks the section done
     view: stubgen .pyi of relay/queue.py
-    behavior: ids that depend, transitively, on a parked id
-    view: stubgen .pyi of relay/queue.py
-  s3.d2 | builder | steps: 6 | writes: relay/queue.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s3.d2
-    design: docs/superpowers/specs/relay-loop-design.md
-    step: 6. Queue parser: build. `builder` writes `relay/queue.py`.
-    paths: relay/queue.py
-    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_queue.py
 section s4 | lead | steps: 7, 8 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
   s4.d1 | test-writer | steps: 7 | writes: tests/test_state.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s4.d1
