@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from relay.config import Config, load_config
-from relay.errors import ConfigError, ExitCode, RelayError
+from relay.errors import (
+    ConfigError,
+    ExitCode,
+    LockedError,
+    QueueFormatError,
+    RelayError,
+)
 
 DEFAULT_LEAD = [
     "claude", "-p", "--output-format", "stream-json", "--verbose",
@@ -41,6 +47,26 @@ def test_bad_config_raises_config_error_with_usage_exit(tmp_path: Path, home: Pa
     assert isinstance(excinfo.value, RelayError)
     assert excinfo.value.exit_code == 2
     assert excinfo.value.exit_code == ExitCode.USAGE
+
+
+def test_error_types_carry_documented_exit_codes() -> None:
+    assert issubclass(RelayError, Exception)
+    assert RelayError.exit_code == 1
+    assert RelayError("x").exit_code == 1
+    for cls in (ConfigError, QueueFormatError, LockedError):
+        assert issubclass(cls, RelayError)
+        assert cls.exit_code == 2
+        assert cls("x").exit_code == 2
+
+
+def test_exit_codes_have_documented_values() -> None:
+    assert ExitCode.QUEUE_EMPTY == 0
+    assert ExitCode.ERROR == 1
+    assert ExitCode.USAGE == 2
+    assert ExitCode.BUDGET == 3
+    assert ExitCode.STOP_FILE == 4
+    assert ExitCode.FAILED_TWICE == 5
+    assert ExitCode.INTERRUPTED == 130
 
 
 # Behavior 2: `relay/config.py`: loads `~/.config/relay/config.toml` and applies CLI overrides,
