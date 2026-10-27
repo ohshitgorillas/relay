@@ -1,38 +1,35 @@
 design /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | order /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | main e9d466a
-section s1 | lead | steps: 1, 2 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
-  s1.d1 | builder | steps: 1 | writes: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s1.d1
+section s1.1 | lead | steps: 1 | size: lead: tokens: 1010049.9 seconds: 675.1 overruns: 0 refusals: 0
+  s1.1.d1 | builder | steps: 1 | writes: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s1.1.d1
+    resume d42a458d-dfda-44dd-bd05-46d347ff101d
     stub
     design: docs/superpowers/specs/relay-loop-design.md
     step: 1. Skeleton and stubs. `builder` (`stub` piece) writes `pyproject.toml` (package `relay`, console script `relay = relay.cli:main`, dev dependency `pytest`), `relay/__init__.py` and every module above, with the signatures raise-only.
     paths: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py
     check: uv run python -c 'import relay.errors, relay.config, relay.queue'
-  s1.d2 | builder | steps: 1 | writes: relay/state.py, relay/ledger.py, relay/stream.py, relay/runner.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s1.d2
+  s1.1.d2 | builder | steps: 1 | writes: relay/state.py, relay/ledger.py, relay/stream.py, relay/runner.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s1.1.d2
     stub
     design: docs/superpowers/specs/relay-loop-design.md
     step: 1. Skeleton and stubs. `builder` (`stub` piece) writes `pyproject.toml` (package `relay`, console script `relay = relay.cli:main`, dev dependency `pytest`), `relay/__init__.py` and every module above, with the signatures raise-only.
     paths: relay/state.py, relay/ledger.py, relay/stream.py, relay/runner.py
     check: uv run python -c 'import relay.state, relay.ledger, relay.stream, relay.runner'
-  s1.d3 | builder | steps: 1 | writes: relay/status.py, relay/prompts.py, relay/ping.py, relay/loop.py, relay/cli.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s1.d3
+  s1.1.d3 | builder | steps: 1 | writes: relay/status.py, relay/prompts.py, relay/ping.py, relay/loop.py, relay/cli.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s1.1.d3
     stub
     design: docs/superpowers/specs/relay-loop-design.md
     step: 1. Skeleton and stubs. `builder` (`stub` piece) writes `pyproject.toml` (package `relay`, console script `relay = relay.cli:main`, dev dependency `pytest`), `relay/__init__.py` and every module above, with the signatures raise-only.
     paths: relay/status.py, relay/prompts.py, relay/ping.py, relay/loop.py, relay/cli.py
     check: uv run python -c 'import relay.status, relay.prompts, relay.ping, relay.loop, relay.cli'
-  s1.d4 | test-writer | steps: 2 | writes: tests/conftest.py, tests/fakes/fake_claude.py, tests/fixtures/ | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s1.d4
-    red
+section s1.2.1 | lead | steps: 2 | size: lead: tokens: 1014137.3 seconds: 677.4 overruns: 0 refusals: 0
+  s1.2.1.d1 | test-writer | steps: 2 | writes: tests/conftest.py, tests/fakes/fake_claude.py, tests/fixtures/m2-rest-queue.md, tests/fixtures/workboard-queue.md, tests/test_helpers.py | size: test-writer: tokens: 548027.1 seconds: 164.1 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s1.2.1.d1
+    resume d42a458d-dfda-44dd-bd05-46d347ff101d
+    port
     design: docs/superpowers/specs/relay-loop-design.md Order 2
-    behavior: `tests/fakes/fake_claude.py` is an executable that reads its prompt on stdin.
-    view: stubgen .pyi of relay/stream.py
-    behavior: It emits scripted stream-json lines taken from a scenario file named by `RELAY_FAKE_SCENARIO`.
-    view: stubgen .pyi of relay/stream.py
-    behavior: `tests/conftest.py` holds the fixtures
+    files: tests/conftest.py, tests/fakes/fake_claude.py, tests/fixtures/m2-rest-queue.md, tests/fixtures/workboard-queue.md, tests/test_helpers.py
     view: stubgen .pyi of relay/config.py
-    behavior: `tests/fixtures/` holds queue samples in the divvyer's `.md` format.
-    view: stubgen .pyi of relay/queue.py
 section s2 | lead | steps: 3, 4 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
   s2.d1 | test-writer | steps: 3 | writes: tests/test_config.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s2.d1
