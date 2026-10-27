@@ -6,7 +6,7 @@ Status: approved.
 
 Relay is a command-line loop that runs a divvyer `.md` queue with no main agent in the middle. It starts a lead on the first open section. When that lead finishes, or its context passes a token limit, it starts a fresh lead that picks up from the last one through Terminus. It acts on each lead's status line, and it stops on an empty queue, a budget, a stop file or the same section failing twice.
 
-The tree holds no copies to count. HEAD is one commit and has no files (`git ls-tree -r HEAD` lists 0 entries), so this design sets each shared concern's one home before any piece exists. Seven concerns are shared by two or more pieces: running and killing child processes, reading Claude's stream-json output, the queue format, persistent state and the spend ledger, owner pings, errors and exit codes, and config. A piece that needs one of these and finds its home lacking stops and reports. It never writes a local copy.
+The tree holds no copies to count. HEAD tracks no code: `git ls-tree -r HEAD` lists only `docs/queue.md` and this design, so this design sets each shared concern's one home before any piece exists. Seven concerns are shared by two or more pieces: running and killing child processes, reading Claude's stream-json output, the queue format, persistent state and the spend ledger, owner pings, errors and exit codes, and config. A piece that needs one of these and finds its home lacking stops and reports. It never writes a local copy.
 
 Relay is Python 3.11+ with the standard library only (`tomllib`, `subprocess`, `fcntl`, `argparse`, `json`). Tests run under `pytest`. Relay does not import or call Foreman. Relay calls only these external commands, and each is used as it stands: the `claude` CLI (for leads and the divvyer's `recut`) and `claude-ping`. Leads recall earlier sessions with `recall-session` themselves; Relay only passes them a session id.
 
@@ -37,8 +37,8 @@ class ExitCode:
 ```python
 @dataclass(frozen=True)
 class Config:
-    token_budget: int | None          # summed tokens across every run; None = no limit
-    dollar_budget: float | None       # summed total_cost_usd across every run; None = no limit
+    token_budget: int | None          # summed tokens across every run of this `relay go`; None = no limit
+    dollar_budget: float | None       # summed total_cost_usd across every run of this `relay go`; None = no limit
     context_limit: int                # lead context tokens at which Relay asks it to retire; default 100_000
     hard_ceiling: int                 # lead context tokens at which Relay kills it; default 2 * context_limit
     poll_seconds: float               # wait between checks for answers and the stop file; default 30
@@ -97,7 +97,7 @@ class State:
     def run_dir(self) -> Path: ...                            # <dir>/runs/
 ```
 
-`relay/ledger.py`: the spend ledger. It appends one JSON line per finished run (lead or recut) to `<state dir>/ledger.jsonl` and sums it against the budgets.
+`relay/ledger.py`: the spend ledger. It appends one JSON line per finished run (lead or recut), stamped with its POSIX time, to `<state dir>/ledger.jsonl`. Budgets count only the current `relay go`: the loop passes its own start time as `since`. `relay status` shows the rolling 7-day total (`since` = now minus 7 days) beside the all-time total.
 
 ```python
 @dataclass(frozen=True)
@@ -184,10 +184,10 @@ def run(queue: Path, cfg: Config) -> int: ...   # returns an ExitCode
 
 Each pass does the following, in order:
 1. If the stop file exists, stop with `STOP_FILE`.
-2. If the ledger is over budget, stop with `BUDGET`.
+2. If the ledger, summed since this `relay go` started, is over budget, stop with `BUDGET`.
 3. Re-parse the queue. Pick the first section that is open in the queue, not `done` or `parked` in state, and not blocked by a parked section.
 4. If no such section exists and nothing is parked, stop with `QUEUE_EMPTY`.
-5. If no section is runnable but some are parked, follow the parked-queue rule (Decisions, 1).
+5. If no section is runnable but some are parked, wait, holding the lock: check every `poll_seconds` for the stop file (stop with `STOP_FILE`) or a `relay answer` on a parked section (start the next pass). The ping for each parked section went out when it parked; waiting sends none.
 6. Otherwise, run a lead with `resume` set to the section's `last_session`, or else `last_session_any`. During the run, `on_event` returns:
    - `retire` once `context_tokens ≥ context_limit` or the live spend passes a budget;
    - `kill` at `hard_ceiling`.
@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> int: ...
 # relay go <queue.md> [--token-budget N] [--dollar-budget D] [--context-limit N]
 # relay stop <queue.md>                     creates the stop file
 # relay answer <queue.md> <section-id> <text>   sets the answer, reopens the section
-# relay status <queue.md>                   prints each section's state and the ledger totals
+# relay status <queue.md>                   prints each section's state and the ledger's rolling 7-day and all-time totals
 ```
 
 The lead and the recut run with `cwd` set to the git top level of the queue's directory. Relay never commits, never cleans the work tree and never edits the queue. Leads and the divvyer keep git and the queue as the record of what is finished.
@@ -249,13 +249,3 @@ Relay replaces nothing: no copy exists in the tree.
 12. Status, prompts and ping: build. `builder` writes `relay/status.py`, `relay/prompts.py` and `relay/ping.py`.
 13. Loop and CLI: red tests. `test-writer` writes `tests/test_loop.py` and `tests/test_cli.py`.
 14. Loop and CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`.
-
-## Decisions for the owner
-
-1. **When every remaining section is parked or blocked behind a parked one, does Relay wait or stop?**
-   - Recommend: wait. Relay polls every `poll_seconds` for a `relay answer` or the stop file, and goes on when an answer lands. This matches the four stop conditions as the owner listed them. Cost: `relay go` stays running, and holds its terminal and lock, until the owner answers or runs `relay stop`.
-   - Alternative: stop with a new exit code, after pinging which sections are parked. Cost: the owner must answer and then run `relay go` again by hand.
-
-2. **What spend does the budget count?**
-   - Recommend: the spend of the current `relay go` only. Each `go` sets its own budget, and `relay status` also shows the ledger's rolling 7-day total. Cost: separate `go` runs in one week can together pass the weekly allowance without any of them stopping.
-   - Alternative: a rolling 7-day total over every run in the ledger, so the budget stands in for the weekly allowance. Cost: a new `go` may stop at once on spend from earlier runs, and the ledger then covers only Relay's runs, not the owner's other Claude use.
