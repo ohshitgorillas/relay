@@ -125,13 +125,18 @@ class State:
 
         self._update(sid, change)
 
-    def set_answer(self, sid: str, answer: str) -> None:
-        def change(s: SectionState, _r: dict) -> None:
+    def set_answer(self, sid: str, answer: str) -> bool:
+        """Record `answer` and reopen `sid`; False, recording nothing, when `sid` is done."""
+
+        def change(s: SectionState, _r: dict) -> bool:
+            if s.status == "done":
+                return False
             s.answer = answer
             s.status = "open"
             s.question = None
+            return True
 
-        self._update(sid, change)
+        return self._update(sid, change)
 
     def take_answer(self, sid: str) -> str | None:
         def change(s: SectionState, _r: dict) -> str | None:

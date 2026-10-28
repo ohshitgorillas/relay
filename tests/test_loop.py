@@ -951,6 +951,22 @@ def test_a_section_marked_done_gets_no_second_lead(
     assert State.open(queue, cfg).section(first).status == "done"
 
 
+def test_an_answer_to_a_done_section_wakes_no_lead(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: `relay answer` on a done section reopens it, so `relay go` resumes its lead.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    state = State.open(queue, cfg)
+    ids = _open_ids(queue)
+    for sid in ids:
+        state.mark_done(sid)
+    state.set_answer(ids[0], "Use port 8080.")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    _untouched(queue, cfg)
+    assert State.open(queue, cfg).section(ids[0]).status == "done"
+
+
 # Behavior 2 (s7.d3): - RETIRED: run a fresh lead on the same section; this is no failure.
 
 

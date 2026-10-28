@@ -67,9 +67,11 @@ def _stop(args: argparse.Namespace) -> int:
 
 def _answer(args: argparse.Namespace) -> int:
     queue = args.queue.resolve()
-    if args.section not in {section.id for section in parse_queue(queue)}:
+    section = next((s for s in parse_queue(queue) if s.id == args.section), None)
+    if section is None:
         raise QueueFormatError(f"{queue}: no section {args.section!r}")
-    State.open(queue, _config({})).set_answer(args.section, args.text)
+    if not section.open or not State.open(queue, _config({})).set_answer(args.section, args.text):
+        print(f"relay: section {args.section} is done; answer dropped", file=sys.stderr)
     return ExitCode.QUEUE_EMPTY
 
 

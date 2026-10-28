@@ -263,6 +263,29 @@ def test_answer_never_edits_the_queue(queue: Path, fake_cfg: Config) -> None:
     assert queue.read_bytes() == before
 
 
+def test_answer_to_a_section_relay_marked_done_is_dropped_and_said(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: an answer reopens a done section, so the next `relay go` resumes its lead.
+    State.open(queue, fake_cfg).mark_done("s2")
+    assert _exit(["answer", str(queue), "s2", "Port 8080."]) == 0
+    section = State.open(queue, fake_cfg).section("s2")
+    assert section.status == "done"
+    assert section.answer is None
+    assert capsys.readouterr().err == "relay: section s2 is done; answer dropped\n"
+
+
+def test_answer_to_a_section_the_queue_marks_done_is_dropped_and_said(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = queue.read_text()
+    header = next(line for line in text.splitlines() if line.startswith("section s2 |"))
+    queue.write_text(text.replace(header, header + " | done"))
+    assert _exit(["answer", str(queue), "s2", "Port 8080."]) == 0
+    assert State.open(queue, fake_cfg).section("s2").answer is None
+    assert capsys.readouterr().err == "relay: section s2 is done; answer dropped\n"
+
+
 # Behavior 4: `relay status` shows the rolling 7-day total (`since` = now minus 7 days)
 # beside the all-time total.
 
