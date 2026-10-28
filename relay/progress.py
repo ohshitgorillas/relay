@@ -92,6 +92,8 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
 
 
 def agent_event(who: Kind, sid: str, event: Event) -> None:
+    if who == "ask":
+        return
     agent = event.agent
     if event.kind == "started":
         what = f"agent {agent.name} started"
@@ -146,12 +148,18 @@ def retired_idle(sid: str, tokens: int) -> None:
 
 
 def research_started(sid: str, cwd: Path) -> None:
-    raise NotImplementedError
+    _write(f"research {sid}: mapping in {cwd}")
 
 
 def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
-    raise NotImplementedError
+    if m is None:
+        _write(f"research {sid}: no usable map {_spend(result)}; the lead starts without one")
+        return
+    lines = len(m.body.splitlines())
+    _write(
+        f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}"
+    )
 
 
 def map_reused(sid: str, m: Map) -> None:
-    raise NotImplementedError
+    _write(f"research {sid}: map at {m.commit} still current, reused")

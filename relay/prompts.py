@@ -35,6 +35,14 @@ def lead_prompt(
             "Relay ran this section's check after your DONE and it failed. "
             "Fix the section and end with DONE again:\n" + check_feedback
         )
+    if map_block is not None:
+        parts.append(
+            "Relay's researcher mapped this section's code. "
+            "Put the block below verbatim in every brief you send for this section, the architect's included. "
+            f'When an agent reports it needs more, run `relay ask {queue} {section.id} "<question>"` '
+            "with a 600000 ms timeout or in the background, "
+            "and pass on its answer; no agent searches for it.\n\n" + map_block
+        )
     parts.append(
         "Retire contract: on reaching a safe point, after a step's commit, check whether "
         f"the file {retire_flag} exists. If it exists, stop and end with RETIRED. "
@@ -65,9 +73,29 @@ def check_feedback(result: CheckResult) -> str:
 
 def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> str:
     """The researcher's brief: queue, section, caps, MAP form and the flag rule."""
-    raise NotImplementedError
+    return (
+        f"research section {section.id} of the queue at {queue}.\n\n"
+        f"Section body:\n{section.body}\n"
+        "Map the code this section's steps touch. End your final message with the map, "
+        f"at most {cfg.map_max_lines} lines and {cfg.map_max_chars} characters, in this form "
+        "and nothing after END MAP:\n"
+        "MAP\n"
+        "<path>:<line>[-<line>] | <what it does>\n"
+        "LINKS\n"
+        "<path>:<line> -> <path>:<line> | <how>\n"
+        "END MAP\n\n"
+        f"When the file {flag} exists, send no more readers and return the map you have.\n"
+    )
 
 
 def ask_brief(question: str, flag: Path, cfg: Config) -> str:
     """The follow-up brief: question, ANSWER form, cap and the flag rule."""
-    raise NotImplementedError
+    return (
+        f"Answer this question about the code you mapped:\n{question}\n\n"
+        f"End your final message with the answer, at most {cfg.map_max_chars} characters, "
+        "in this form and nothing after END ANSWER:\n"
+        "ANSWER\n"
+        "<file:line pointers, one line each>\n"
+        "END ANSWER\n\n"
+        f"When the file {flag} exists, send no more readers and return the answer you have.\n"
+    )
