@@ -6,7 +6,9 @@ exactly one of "DONE", "RECUT: <reason>", "NEEDS-OWNER: <question>", "RETIRED".
 
 from __future__ import annotations
 
-from relay.status import KINDS, TEXT_NAMES, LeadStatus, parse_status
+from typing import get_args
+
+from relay.status import TEXT_NAMES, Kind, LeadStatus, parse_status
 
 
 # Behavior 1: `relay/status.py`: parses the lead's final status line, which is the last
@@ -134,8 +136,8 @@ def test_retired_followed_by_extra_words_gives_none() -> None:
 
 def test_design_and_waiting_are_status_words() -> None:
     # Breaks when: either word is missing from the one list of status words.
-    assert "DESIGN" in KINDS
-    assert "WAITING" in KINDS
+    assert "DESIGN" in get_args(Kind)
+    assert "WAITING" in get_args(Kind)
 
 
 def test_design_text_is_named_problem_and_waiting_text_section_id() -> None:

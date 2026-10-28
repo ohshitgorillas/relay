@@ -928,7 +928,11 @@ def test_section_spend_of_an_unknown_section_or_a_missing_ledger_is_zero(tmp_pat
 @pytest.mark.parametrize("kind", list(UNREADABLE))
 def test_section_spend_skips_each_unreadable_line_kind(tmp_path: Path, kind: str) -> None:
     # Breaks when: `section_spend` counts, or raises on, a line the recovery list calls unreadable.
-    ledger = _ledger_around(tmp_path / "ledger.jsonl", _unreadable_line(kind))
+    # Each line that is a JSON object names the section, so only its unreadability can exclude it.
+    bad = _unreadable_line(kind)
+    if bad.startswith("{"):
+        bad = '{"section": "s1", ' + bad[1:]
+    ledger = _ledger_around(tmp_path / "ledger.jsonl", bad)
     assert _call(ledger.section_spend, "s1") == Spend(tokens=42, dollars=0.75)
 
 

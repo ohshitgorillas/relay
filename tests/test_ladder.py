@@ -173,7 +173,18 @@ def test_parse_report_reads_a_brief_block() -> None:
     )
     assert report is not None
     assert report.rejected is False
+    assert report.approved is True
     assert [line.strip() for line in report.unfiled] == ["the old relay/loop.py note"]
+
+
+def test_parse_report_a_status_not_approved_is_not_approved() -> None:
+    # breaks when: approved is set whatever the STATUS line says.
+    report = parse_report(
+        _block("a gap").replace("STATUS Status: approved.", "STATUS Status: draft.")
+    )
+    assert report is not None
+    assert report.rejected is False
+    assert report.approved is False
 
 
 def test_parse_report_reads_the_last_brief_block() -> None:
@@ -233,6 +244,9 @@ def test_parse_report_unfiled_holds_each_indented_line_under_unfiled() -> None:
         "relay/cli.py prints the wrong word | a later step",
         "the ledger has no rung for asks",
     ]
+    assert [line.strip() for line in report.decisions] == [
+        "1 | which cap | recommend: per section | alternative: per queue",
+    ]
 
 
 def test_parse_report_without_unfiled_has_none() -> None:
@@ -242,11 +256,16 @@ def test_parse_report_without_unfiled_has_none() -> None:
         "STATUS Status: approved.\n"
         "DECISIONS\n"
         "  1 | which cap | recommend: per section | alternative: per queue\n"
+        "  2 | which word | recommend: WAITING | alternative: HELD\n"
         "END DESIGN\n"
     )
     report = parse_report(text)
     assert report is not None
     assert report.unfiled == ()
+    assert [line.strip() for line in report.decisions] == [
+        "1 | which cap | recommend: per section | alternative: per queue",
+        "2 | which word | recommend: WAITING | alternative: HELD",
+    ]
 
 
 # decision_numbers
