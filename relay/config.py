@@ -34,12 +34,12 @@ class Config:
     hard_ceiling: int
     poll_seconds: float
     lead_command: list[str]
-    recut_command: list[str]
     ping_command: list[str]
     state_root: Path
     idle_ceiling: int = 0  # 0 asks for the default, 13/10 of context_limit
     check_timeout: float = 1800
     check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
+    recut_command: list[str] = field(default_factory=list)  # empty asks for the default
     research_command: list[str] = field(default_factory=list)  # empty asks for the default
     map_max_lines: int = 150
     map_max_chars: int = 12_000
@@ -49,6 +49,8 @@ class Config:
             object.__setattr__(
                 self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
             )
+        if not self.recut_command:
+            object.__setattr__(self, "recut_command", [*self.lead_command, "--agent", "divvyer"])
         if not self.research_command:
             object.__setattr__(
                 self,
@@ -173,7 +175,9 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         hard_ceiling=hard_ceiling,
         poll_seconds=poll_seconds,
         lead_command=lead_command,
-        recut_command=_command(merged, "recut_command", [*lead_command, "--agent", "divvyer"]),
+        recut_command=(
+            _command(merged, "recut_command", []) if "recut_command" in merged else []
+        ),
         ping_command=_command(
             merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"]
         ),
