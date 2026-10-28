@@ -40,6 +40,20 @@ class SectionState:
     last_log: str | None = None  # the run log of the section's last lead run
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` by fsynced temp file in its directory and os.replace."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _fresh() -> SectionState:
     return SectionState(status="open", failures=0, question=None, answer=None, last_session=None)
 
@@ -78,16 +92,7 @@ class State:
             return {"sections": {}, "last_any": None}
 
     def _save(self, record: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=_RECORD + ".")
-        try:
-            with os.fdopen(fd, "w") as handle:
-                json.dump(record, handle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._dir / _RECORD)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        write_atomic(self._dir / _RECORD, json.dumps(record))
 
     @contextlib.contextmanager
     def _write_guard(self) -> Iterator[None]:
