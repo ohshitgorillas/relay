@@ -2505,3 +2505,479 @@ def test_every_ping_still_goes_out_beside_its_progress_line(
     assert QUESTION in pings[0]
     assert pings[1].startswith("relay ")
     assert not set(pings) & set(texts)
+
+
+# Check behaviors (relay-check design, Order 7): `_verify` runs a section's checks on the lead's
+# `DONE`. The fixture queue's s1 carries two check lines, each running the script that
+# `RELAY_CHECK_SCRIPT` names with the argument `first` or `second`; s2 carries none. Each test
+# writes that script: it appends "<arg> ran" to `<tmp_path>/checks-ran.txt`, prints
+# "check <arg> output", and exits as the test says.
+
+CHECK_QUEUE = "loop-check-queue.md"
+FIRST_CHECK = 'sh "$RELAY_CHECK_SCRIPT" first'
+FAIL_MARK = "assertion broke at line 7"
+FEEDBACK_INTRO = "Relay ran this section's check after your DONE and it failed."
+
+
+def _script_text(tmp_path: Path, exit: int, extra: str = "") -> str:
+    ran = tmp_path / "checks-ran.txt"
+    return f'printf "%s ran\\n" "$1" >> "{ran}"\nprintf "check %s output\\n" "$1"\n{extra}exit {exit}\n'
+
+
+def _check_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit: int, extra: str = "") -> Path:
+    """Write the check script, exiting `exit` after printing `extra`, and name it in `RELAY_CHECK_SCRIPT`."""
+    script = tmp_path / "check.sh"
+    script.write_text(_script_text(tmp_path, exit, extra))
+    monkeypatch.setenv("RELAY_CHECK_SCRIPT", str(script))
+    return script
+
+
+def _failing_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return _check_script(tmp_path, monkeypatch, 1, f'echo "{FAIL_MARK}"\n')
+
+
+def _passing_source(tmp_path: Path) -> Path:
+    """A passing check script, for a lead's plan step to copy over the check script."""
+    source = tmp_path / "check-pass.sh"
+    source.write_text(_script_text(tmp_path, 0))
+    return source
+
+
+def _checks_ran(tmp_path: Path) -> list[str]:
+    ran = tmp_path / "checks-ran.txt"
+    return ran.read_text().splitlines() if ran.exists() else []
+
+
+def _check_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
+    """The ledger's check lines, in file order."""
+    path = State.open(queue, cfg).stop_file.parent / "ledger.jsonl"
+    entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [e for e in entries if e.get("kind") == "check"]
+
+
+def _lead_logs(queue: Path, cfg: Config) -> list[Path]:
+    """Each lead's run log, `<run_dir>/<n>.jsonl`, in run order."""
+    return sorted(State.open(queue, cfg).run_dir.glob("*.jsonl"), key=lambda p: int(p.stem))
+
+
+def _done_in_state(queue: Path, cfg: Config, *sids: str) -> None:
+    state = State.open(queue, cfg)
+    for sid in sids:
+        state.mark_done(sid)
+
+
+# Check behavior 1: a check on `DONE`: pass, fail and resume with the output, the third fail
+# parking, outside parking and rerunning on the next pass with no lead, and a section with no check.
+
+
+def test_a_done_whose_checks_all_pass_marks_the_section_done_after_running_each_check(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the loop marks a DONE section done without running its check lines.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _checks_ran(tmp_path) == ["first ran", "second ran"]
+    assert len(_runs(tmp_path, "lead")) == 1
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.check_failures == 0
+    assert section.failures == 0
+
+
+def test_a_failed_check_resumes_the_lead_with_the_checks_output(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the next lead after a failed check starts fresh, or its prompt carries no
+    # check output, exit code or check log.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    script = _failing_check(tmp_path, monkeypatch)
+    leads = [_step(DONE_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 2
+    assert FEEDBACK_INTRO not in str(runs[0]["prompt"])
+    prompt = str(runs[1]["prompt"])
+    assert "resume sess-lead-1" in prompt
+    assert FEEDBACK_INTRO in prompt
+    feedback = prompt[prompt.index(FEEDBACK_INTRO) :]
+    assert FAIL_MARK in feedback
+    assert "exit 1" in feedback
+    assert str(State.open(queue, cfg).check_log(_lead_logs(queue, cfg)[0])) in feedback
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.failures == 0
+
+
+def test_the_third_failed_check_parks_the_section_with_a_ping_and_sends_it_to_no_recut(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop parks below three failed checks, never parks, counts a failed check
+    # toward FAILURE_LIMIT, or parks without a ping naming the failing check.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _failing_check(tmp_path, monkeypatch)
+    leads = [_step(DONE_LEAD), _step(DONE_LEAD), _step(DONE_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 5
+    assert all(_body(queue, "s1") in str(r["prompt"]) for r in runs[:3])
+    assert all(_body(queue, "s2") in str(r["prompt"]) for r in runs[3:])
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.check_failures == 3
+    assert section.failures == 0
+    assert section.check_pending is False
+    pings = [p[0] for p in _pings(tmp_path)]
+    assert FAIL_MARK in pings[0]
+    assert "exit 1" in pings[0]
+    assert str(State.open(queue, cfg).check_log(_lead_logs(queue, cfg)[2])) in pings[0]
+    texts = _texts(capsys.readouterr().out)
+    failed = [t for t in texts if t.startswith("section s1: check failed")]
+    assert failed == [f"section s1: check failed ({n} of 3)" for n in (1, 2, 3)], texts
+
+
+def test_a_check_failing_outside_the_code_parks_the_section_and_its_answer_reruns_the_check_with_no_lead(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: an outside verdict counts as a failed check, resumes a lead, parks with no
+    # ping, or the answered section runs a lead instead of rerunning its check.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    script = _check_script(tmp_path, monkeypatch, 127)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    state = State.open(queue, cfg)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: len(_pings(tmp_path)) == 1)
+        parked = State.open(queue, cfg).section("s1")
+        assert parked.status == "parked"
+        assert parked.check_pending is True
+        assert parked.check_failures == 0
+        assert parked.failures == 0
+        assert "exit 127" in _pings(tmp_path)[0][0]
+        assert _checks_ran(tmp_path) == ["first ran"]
+        script.write_text(_script_text(tmp_path, 0))
+        State.open(queue, cfg).set_answer("s1", "The tool is installed now.")
+        assert loop.finish() == ExitCode.QUEUE_EMPTY
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _checks_ran(tmp_path) == ["first ran", "first ran", "second ran"]
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.check_pending is False
+    assert [e["verdict"] for e in _check_entries(queue, cfg)] == ["outside", "pass"]
+
+
+def test_a_section_left_pending_on_its_check_reruns_the_check_and_no_lead(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a section with check_pending runs a lead, or is marked done without its check.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    State.open(queue, cfg).set_check_pending("s1", True)
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _runs(tmp_path, "lead") == []
+    assert _checks_ran(tmp_path) == ["first ran", "second ran"]
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.check_pending is False
+
+
+def test_a_done_on_a_section_with_no_check_marks_it_done_with_a_none_verdict(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a section with no check line is left open on DONE, or gets no ledger line
+    # and progress line saying none ran.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s1")
+    _check_script(tmp_path, monkeypatch, 1)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert State.open(queue, cfg).section("s2").status == "done"
+    assert _checks_ran(tmp_path) == []
+    entries = _check_entries(queue, cfg)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["section"] == "s2"
+    assert entry["verdict"] == "none"
+    assert entry["command"] is None
+    assert entry["exit"] is None
+    assert entry["log"] is None
+    assert "check s2: none to run" in _texts(capsys.readouterr().out)
+
+
+# Check behavior 2: the check inheriting `relay go`'s environment.
+
+
+def test_the_check_runs_with_the_environment_relay_go_started_with(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the loop or its runner gives the check a fresh or trimmed environment.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    seen = tmp_path / "mark-seen.txt"
+    _check_script(tmp_path, monkeypatch, 0, f'printf "%s" "$RELAY_CHECK_MARK" >> "{seen}"\n')
+    monkeypatch.setenv("RELAY_CHECK_MARK", "inherited from relay go")
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _checks_ran(tmp_path) == ["first ran", "second ran"]
+    assert seen.read_text() == "inherited from relay go" * 2
+
+
+# Check behavior 3: the ledger line and the check log.
+
+
+def test_each_check_run_appends_one_check_line_to_the_ledger(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the loop writes no check line, writes it with another field, or a check line
+    # that spends tokens or dollars or that the ledger cannot read.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    script = _failing_check(tmp_path, monkeypatch)
+    leads = [_step(DONE_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    state = State.open(queue, cfg)
+    logs = _lead_logs(queue, cfg)
+    assert len(logs) == 2
+    entries = _check_entries(queue, cfg)
+    assert len(entries) == 2
+    fail, ok = entries
+    keys = {"time", "kind", "section", "session", "tokens", "dollars", "command", "exit", "timed_out", "verdict", "tail", "log"}
+    assert set(fail) == keys
+    assert set(ok) == keys
+    assert fail["section"] == "s1"
+    assert fail["session"] is None
+    assert fail["tokens"] == 0
+    assert fail["dollars"] == 0.0
+    assert fail["command"] == FIRST_CHECK
+    assert fail["exit"] == 1
+    assert fail["timed_out"] is False
+    assert fail["verdict"] == "fail"
+    assert FAIL_MARK in str(fail["tail"])
+    assert fail["log"] == str(state.check_log(logs[0]))
+    assert ok["section"] == "s1"
+    assert ok["session"] is None
+    assert ok["tokens"] == 0
+    assert ok["dollars"] == 0.0
+    assert ok["exit"] == 0
+    assert ok["timed_out"] is False
+    assert ok["verdict"] == "pass"
+    assert ok["log"] == str(state.check_log(logs[1]))
+    ledger = _ledger(queue, cfg)
+    assert ledger.unreadable() == []
+    path = state.stop_file.parent / "ledger.jsonl"
+    leads_only = [json.loads(line) for line in path.read_text().splitlines()]
+    leads_only = [e for e in leads_only if e.get("kind") != "check"]
+    assert ledger.total(None).tokens == sum(int(e["tokens"]) for e in leads_only)
+
+
+def test_the_check_log_beside_the_leads_run_log_holds_every_checks_output_in_order(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the check output goes to no log, to another path than check_log of the
+    # lead's run log, or only the last check's output is kept.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    logs = _lead_logs(queue, cfg)
+    assert len(logs) == 1
+    check_log = State.open(queue, cfg).check_log(logs[0])
+    assert check_log.exists()
+    text = check_log.read_text()
+    assert "check first output" in text
+    assert "check second output" in text
+    assert text.index("check first output") < text.index("check second output")
+
+
+def test_a_pending_check_with_no_lead_run_logs_to_the_sections_own_check_log(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a check run with no lead log behind it logs nowhere, or to another path than
+    # runs/check-<sid>.check.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    State.open(queue, cfg).set_check_pending("s1", True)
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    check_log = State.open(queue, cfg).run_dir / "check-s1.check"
+    assert check_log.exists()
+    assert "check first output" in check_log.read_text()
+    assert [e["log"] for e in _check_entries(queue, cfg)] == [str(check_log)]
+
+
+# Check behavior 4: `DONE` calls `_verify` in place of `mark_done`.
+
+
+def test_a_done_whose_check_fails_leaves_the_section_open(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: DONE still calls mark_done, whatever the check says.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    _failing_check(tmp_path, monkeypatch)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _checks_ran(tmp_path) == ["first ran"]
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "open"
+    assert section.check_failures == 1
+
+
+@pytest.mark.parametrize("lead", [RETIRED_LEAD, NO_STATUS_LEAD])
+def test_the_checks_run_on_the_leads_done_and_after_no_other_status(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    lead: str,
+) -> None:
+    # Breaks when: the loop runs the checks after a lead's run whatever its status, or not on DONE.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _sequenced(cfg, tmp_path, [_step(lead), _step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert _checks_ran(tmp_path) == ["first ran", "second ran"]
+    assert [e["verdict"] for e in _check_entries(queue, cfg)] == ["pass"]
+    assert State.open(queue, cfg).section("s1").status == "done"
+
+
+# Check behavior 5: The section stays open on a fail below the limit, so the next pass resumes its lead.
+
+
+def test_failed_checks_below_the_limit_keep_the_section_open_for_its_resumed_lead(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed check below CHECK_LIMIT parks the section, moves the loop on to the
+    # next section, or stops the run.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    script = _failing_check(tmp_path, monkeypatch)
+    leads = [_step(DONE_LEAD), _step(DONE_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 4
+    for again in runs[1:3]:
+        assert _body(queue, "s1") in str(again["prompt"])
+        assert "resume sess-lead-1" in str(again["prompt"])
+    assert _body(queue, "s2") in str(runs[3]["prompt"])
+    assert _pings(tmp_path)[:-1] == []
+    state = State.open(queue, cfg)
+    assert state.section("s1").status == "done"
+    assert state.section("s1").failures == 0
+    assert state.section("s2").status == "done"
+    texts = _texts(capsys.readouterr().out)
+    failed = [t for t in texts if t.startswith("section s1: check failed")]
+    assert failed == ["section s1: check failed (1 of 3)", "section s1: check failed (2 of 3)"], texts
+
+
+# Check behavior 6: `take_check_feedback` feeds `lead_prompt`.
+
+
+def test_the_check_feedback_goes_to_the_next_lead_only(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the loop reads the feedback without taking it, so every later lead carries
+    # it, or never passes it to lead_prompt.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    script = _failing_check(tmp_path, monkeypatch)
+    leads = [_step(DONE_LEAD), _step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    prompts = [str(r["prompt"]) for r in _runs(tmp_path, "lead")]
+    assert len(prompts) == 3
+    assert FEEDBACK_INTRO not in prompts[0]
+    assert FEEDBACK_INTRO in prompts[1]
+    assert FAIL_MARK in prompts[1]
+    assert FEEDBACK_INTRO not in prompts[2]
+    assert FAIL_MARK not in prompts[2]
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.check_feedback is None
