@@ -93,10 +93,11 @@ def test_total_since_now_is_empty(tmp_path: Path) -> None:
 def test_over_token_budget_ignores_runs_before_since(tmp_path: Path, fake_cfg: Config) -> None:
     cfg = dataclasses.replace(fake_cfg, token_budget=100, dollar_budget=None)
     ledger = Ledger(tmp_path / "ledger.jsonl")
-    ledger.append("lead", "s1", "sess-old", Spend(tokens=1_000, dollars=0.0))
+    # dollar_budget is None (no limit), so heavy dollar spend never trips `over`.
+    ledger.append("lead", "s1", "sess-old", Spend(tokens=1_000, dollars=50.0))
     start = _tick()
-    ledger.append("lead", "s2", "sess-new", Spend(tokens=10, dollars=0.0))
-    idle = Spend(tokens=0, dollars=0.0)
+    ledger.append("lead", "s2", "sess-new", Spend(tokens=10, dollars=75.0))
+    idle = Spend(tokens=0, dollars=100.0)
     assert ledger.over(cfg, idle, start) is None
     assert ledger.over(cfg, idle, None) == "tokens"
     assert ledger.over(cfg, Spend(tokens=500, dollars=0.0), start) == "tokens"
@@ -105,10 +106,11 @@ def test_over_token_budget_ignores_runs_before_since(tmp_path: Path, fake_cfg: C
 def test_over_dollar_budget_ignores_runs_before_since(tmp_path: Path, fake_cfg: Config) -> None:
     cfg = dataclasses.replace(fake_cfg, token_budget=None, dollar_budget=1.0)
     ledger = Ledger(tmp_path / "ledger.jsonl")
-    ledger.append("recut", "s1", None, Spend(tokens=0, dollars=5.0))
+    # token_budget is None (no limit), so heavy token spend never trips `over`.
+    ledger.append("recut", "s1", None, Spend(tokens=1_000_000, dollars=5.0))
     start = _tick()
-    ledger.append("lead", "s2", "sess-new", Spend(tokens=0, dollars=0.25))
-    idle = Spend(tokens=0, dollars=0.0)
+    ledger.append("lead", "s2", "sess-new", Spend(tokens=500_000, dollars=0.25))
+    idle = Spend(tokens=2_000_000, dollars=0.0)
     assert ledger.over(cfg, idle, start) is None
     assert ledger.over(cfg, idle, None) == "dollars"
     assert ledger.over(cfg, Spend(tokens=0, dollars=3.0), start) == "dollars"
