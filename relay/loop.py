@@ -98,7 +98,7 @@ def _run_section(
     sid = section.id
     current = state.section(sid)
     if current.check_pending:
-        _verify(cfg, queue, state, ledger, cwd, section, state.last_lead_log(sid))
+        _verify(cfg, queue, state, ledger, cwd, section, state.pending_check_log(sid))
         return None
     resume = current.last_session or state.last_session_any
     answer = state.take_answer(sid)
@@ -126,7 +126,7 @@ def _run_section(
         if second:
             return _failed_twice(sid)
     elif status.kind == "DONE":
-        _verify(cfg, queue, state, ledger, cwd, section, result.log)
+        _verify(cfg, queue, state, ledger, cwd, section, state.check_log(result.log))
     elif status.kind == "RECUT" and current.from_recut:
         # A section a recut made gets no second recut: the owner decides what happens to it.
         question = f"a section from a recut asked to recut again: {status.text}"
@@ -154,7 +154,6 @@ def _watcher(
     cfg: Config, ledger: Ledger, since: float, who: Kind, sid: str, repo: Path
 ) -> _Watch:
     """The run_agent callback, with flags set when a budget ran out or an idle lead was killed."""
-    watch = _Watch(on_event=lambda stream: "go")
     retiring = [False]
     shown = [0]  # agent events already printed
     snapshot: list[dict[str, str]] = []  # branch heads when the retire flag first went up
@@ -190,7 +189,7 @@ def _watcher(
                     return "kill"
         return "retire"
 
-    watch.on_event = on_event
+    watch = _Watch(on_event=on_event)  # `on_event` reads `watch` when it runs, after this line
     return watch
 
 
@@ -208,13 +207,13 @@ def _verify(
     ledger: Ledger,
     cwd: Path,
     section: Section,
-    run_log: Path,
+    check_log: Path,
 ) -> None:
     """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
     sid = section.id
     where = git.section_worktree(cwd, sid) or cwd
     progress.check_started(sid, len(section.checks), where)
-    result = run_checks(cfg, section, where, state.check_log(run_log))
+    result = run_checks(cfg, section, where, check_log)
     ledger.append_check(sid, result)
     progress.check_finished(sid, result)
     if result.verdict in ("pass", "none"):
@@ -264,12 +263,14 @@ def _recut(
     progress.recut_finished(section.id, result, changed)
     known = {s.id for s in before}
     nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
+    # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
+    # A rejected nested split stays on disk, so its sections are marked too: none recuts again.
+    if (changed and not result.killed and result.exit_code == 0) or nested:
+        for made in after:
+            if made.id not in known or made.id == section.id:
+                state.mark_from_recut(made.id)
     if result.killed or result.exit_code != 0 or not changed or nested:
         second, count = _fail(state, section.id)
         progress.failed(section.id, count)
         return second
-    # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
-    for made in after:
-        if made.id not in known or made.id == section.id:
-            state.mark_from_recut(made.id)
     return False

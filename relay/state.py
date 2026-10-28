@@ -150,11 +150,13 @@ class State:
 
         self._update(sid, change)
 
-    def last_lead_log(self, sid: str) -> Path:
-        """The run log of `sid`'s last lead run; with none, runs/check-<sid>.jsonl, whose check
-        log is the section's own runs/check-<sid>.check."""
+    def pending_check_log(self, sid: str) -> Path:
+        """The check log of a pending check on `sid`: beside its last lead run's log, or with no
+        lead run recorded, the section's own runs/check-<sid>.check."""
         recorded = self.section(sid).last_log
-        return Path(recorded) if recorded else self.run_dir / f"check-{sid}.jsonl"
+        if recorded:
+            return self.check_log(Path(recorded))
+        return self.run_dir / f"check-{sid}.check"
 
     def park(self, sid: str, question: str) -> None:
         def change(s: SectionState, _r: dict) -> None:

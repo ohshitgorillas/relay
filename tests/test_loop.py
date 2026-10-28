@@ -1638,7 +1638,7 @@ _PROGRESS = [
     re.compile(r"waiting for answers on .+"),
     re.compile(r"relay go .+: ended .+: .* \(exit \d+\)"),
     # relay-check-design.md:219-220: `check_started` and `check_finished`.
-    re.compile(r"check \S+: running \d+ checks? in .+"),
+    re.compile(r"check \S+: running \d+ (?:checks?|check\(s\)) in .+"),
     re.compile(r"check \S+: (?:passed|failed: .+|timed out.*|outside the code: .+|none to run)"),
 ]
 
@@ -1714,6 +1714,14 @@ def _mark_run_agent(monkeypatch: pytest.MonkeyPatch, marker: str) -> list[inspec
 NEEDS_OWNER_SPEND = Spend(tokens=2 + 100 + 800 + 15, dollars=0.0333)
 
 
+def _running(sid: str, count: int, cwd: Path, literal: bool) -> str:
+    """A `check_started` line: relay-check-design.md:219 words it "check <sid>: running <n>
+    check(s) in <cwd>", read either as that literal "check(s)" or with the noun counted, as
+    tests/test_progress.py's check_started test reads it."""
+    noun = "check(s)" if literal else ("check" if count == 1 else "checks")
+    return f"check {sid}: running {count} {noun} in {cwd}"
+
+
 def _finished(spend: Spend) -> str:
     """The `(<tokens> tokens, $<dollars>)` tail of a finished line, for the spends used here,
     whose dollars each round to two places without a tie."""
@@ -1778,41 +1786,49 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
     # git top level (no section worktree here); the WORKBOARD fixture gives section a one
     # done-check, b none and c three, all of which `cfg` makes pass. b has no check line, so
     # `check_finished` reports "none to run"; the design does not say whether `check_started`
-    # comes before it with 0, so its "running 0 checks" line is allowed, not required.
+    # comes before it with 0, so its "running 0 checks" line is allowed, not required. Each
+    # `check_started` line takes one reading of the design's "check(s)" wording, the same in all.
     top = tmp_path.resolve()
-    head = [
-        f"relay go {name}: started; no token budget, no dollar budget",
-        f"lead {a}: started fresh",
-        f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
-        f"section {a}: failed (1 of 2)",
-        f"lead {a}: started, resuming sess-lead-2",
-        f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
-        f"check {a}: running 1 check in {top}",
-        f"check {a}: passed",
-        f"lead {b}: started, resuming sess-lead-1",
-        f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
-        f"recut {b}: started: {RECUT_REASON}",
-        f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
-        f"section {b}: failed (1 of 2)",
-        f"lead {b}: started, resuming sess-lead-4",
-        f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
-        f"section {b}: needs an answer: {QUESTION}",
-        f"lead {c}: started, resuming sess-lead-5",
-        f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
-        f"check {c}: running 3 checks in {top}",
-        f"check {c}: passed",
-        f"waiting for answers on {b}",
-        f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
-        f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
-    ]
+
+    def head(literal: bool) -> list[str]:
+        return [
+            f"relay go {name}: started; no token budget, no dollar budget",
+            f"lead {a}: started fresh",
+            f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+            f"section {a}: failed (1 of 2)",
+            f"lead {a}: started, resuming sess-lead-2",
+            f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+            _running(a, 1, top, literal),
+            f"check {a}: passed",
+            f"lead {b}: started, resuming sess-lead-1",
+            f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+            f"recut {b}: started: {RECUT_REASON}",
+            f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
+            f"section {b}: failed (1 of 2)",
+            f"lead {b}: started, resuming sess-lead-4",
+            f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+            f"section {b}: needs an answer: {QUESTION}",
+            f"lead {c}: started, resuming sess-lead-5",
+            f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+            _running(c, 3, top, literal),
+            f"check {c}: passed",
+            f"waiting for answers on {b}",
+            f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
+            f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+        ]
+
     tail = [
         "<ping.stopped>",
         f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
     ]
-    assert _texts(captured.out) in (
-        [*head, f"check {b}: running 0 checks in {top}", f"check {b}: none to run", *tail],
-        [*head, f"check {b}: none to run", *tail],
-    )
+    assert _texts(captured.out) in [
+        expected
+        for literal in (False, True)
+        for expected in (
+            [*head(literal), _running(b, 0, top, literal), f"check {b}: none to run", *tail],
+            [*head(literal), f"check {b}: none to run", *tail],
+        )
+    ]
 
 
 AGENTS_LEAD = "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents and a shell task
