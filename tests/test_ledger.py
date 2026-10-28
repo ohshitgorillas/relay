@@ -346,3 +346,101 @@ def test_append_keeps_every_existing_byte_of_a_corrupt_ledger(tmp_path: Path) ->
     after = path.read_bytes()
     assert after.startswith(original + b"\n")
     assert len(after.splitlines()) == len(original.splitlines()) + 2
+
+
+# `unreadable` (design: Modules `relay/ledger.py`, `Ledger.unreadable` and the recovery
+# list; Order 8a).
+
+
+def _mixed_ledger(path: Path) -> Ledger:
+    """Lines 1, 3, 4, 6 and 8 unreadable (8 torn, with no closing newline); 2, 5 and 7 readable."""
+    ledger = Ledger(path)
+    _raw(path, "garbage\n")
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=60, dollars=4.0))
+    _raw(path, "\n" + _unreadable_line("bool-dollars") + "\n")
+    ledger.append("recut", "s1", None, Spend(tokens=50, dollars=7.0))
+    _raw(path, "[1]\n")
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=5, dollars=0.5))
+    _raw(path, '{"time": 1, "tok')
+    return ledger
+
+
+# Behavior: 1-based numbers of the unreadable lines.
+
+
+def test_unreadable_is_empty_when_the_file_is_absent(tmp_path: Path) -> None:
+    assert Ledger(tmp_path / "ledger.jsonl").unreadable() == []
+
+
+def test_unreadable_is_empty_for_a_clean_ledger(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.25))
+    assert ledger.unreadable() == []
+
+
+@pytest.mark.parametrize("kind", list(UNREADABLE))
+def test_unreadable_names_each_unreadable_line_kind_by_its_number(tmp_path: Path, kind: str) -> None:
+    ledger = _ledger_around(tmp_path / "ledger.jsonl", _unreadable_line(kind))
+    assert ledger.unreadable() == [2]
+
+
+def test_unreadable_names_an_empty_line(tmp_path: Path) -> None:
+    ledger = _ledger_around(tmp_path / "ledger.jsonl", "")
+    assert ledger.unreadable() == [2]
+
+
+def test_unreadable_lists_one_based_numbers_in_file_order(tmp_path: Path) -> None:
+    ledger = _mixed_ledger(tmp_path / "ledger.jsonl")
+    assert ledger.unreadable() == [1, 3, 4, 6, 8]
+
+
+def test_unreadable_keeps_a_closed_off_torn_line_at_its_number(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    _raw(path, '{"time": 1, "tokens": 9')
+    ledger.append("lead", "s1", "sess-b", Spend(tokens=7, dollars=0.25))
+    ledger.append("recut", "s1", None, Spend(tokens=3, dollars=0.125))
+    assert Ledger(path).unreadable() == [2]
+
+
+# Behavior: A corrupt or torn ledger never stops Relay and never needs a hand fix; no
+# ledger method raises on the file's content.
+
+
+def test_unreadable_never_raises_on_corrupt_or_torn_content(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    for kind in UNREADABLE:
+        _raw(path, _unreadable_line(kind) + "\n")
+    _raw(path, "\n")
+    _raw(path, '{"time": 1, "tok')
+    assert _call(ledger.unreadable) == list(range(1, len(UNREADABLE) + 3))
+
+
+# Behavior: Relay never rewrites, truncates or deletes the ledger.
+
+
+def test_unreadable_leaves_every_ledger_byte_in_place(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = _mixed_ledger(path)
+    original = path.read_bytes()
+    _call(ledger.unreadable)
+    _call(ledger.unreadable)
+    assert path.read_bytes() == original
+
+
+# Behavior: If the file is non-empty and its last byte is not `\n`, `append` first writes
+# `\n`, which closes off a line torn by a crash so the new entry starts on a line of its own.
+
+
+def test_append_onto_an_empty_file_writes_no_leading_newline(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b"")
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=4, dollars=0.5))
+    text = path.read_text()
+    assert not text.startswith("\n")
+    assert len(text.splitlines()) == 1
+    assert ledger.unreadable() == []
