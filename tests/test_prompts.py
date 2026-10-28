@@ -157,6 +157,15 @@ def test_lead_prompt_with_check_feedback_says_the_check_failed() -> None:
     assert CHECK_SENTENCE in _with_feedback()
 
 
+def test_lead_prompt_without_check_feedback_leaves_the_check_sentence_out() -> None:
+    # Breaks when: the check-failed instruction is written though check_feedback is None,
+    # passed or left at its default.
+    assert CHECK_SENTENCE not in _with_feedback(None)
+    assert "check after your DONE" not in _with_feedback(None)
+    assert CHECK_SENTENCE not in _lead()
+    assert "check after your DONE" not in _lead()
+
+
 def test_lead_prompt_carries_the_check_feedback_verbatim() -> None:
     # Breaks when: the feedback is dropped, stripped, re-indented or escaped.
     assert FEEDBACK in _with_feedback()
@@ -221,7 +230,11 @@ def test_check_feedback_holds_the_tail() -> None:
 
 
 def test_check_feedback_for_a_timeout_says_timed_out() -> None:
-    # Breaks when: a timed-out check is worded "exit None" instead of "timed out".
+    # Breaks when: a timed-out check is worded "exit None" instead of "timed out", or
+    # not as outcome_text's "timed out after <s>s" with the result's timeout written %g.
     text = check_feedback(_check_result(exit_code=None, timed_out=True))
     assert "timed out" in text
     assert "exit None" not in text
+    assert "timed out after 1800s" in text
+    short = check_feedback(_check_result(exit_code=None, timed_out=True, timeout=0.5))
+    assert "timed out after 0.5s" in short

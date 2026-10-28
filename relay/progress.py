@@ -3,17 +3,14 @@
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from relay.agents import Event, duration
-from relay.check import outcome_text
+from relay.check import CheckResult, outcome_text
 from relay.config import Config
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
 from relay.status import LeadStatus
-
-if TYPE_CHECKING:
-    from relay.check import CheckResult
 
 
 def _write(text: str) -> None:
@@ -124,7 +121,7 @@ def check_started(sid: str, command_count: int, cwd: Path) -> None:
     _write(f"check {sid}: running {command_count} {noun} in {cwd}")
 
 
-def check_finished(sid: str, result: "CheckResult") -> None:
+def check_finished(sid: str, result: CheckResult) -> None:
     if result.verdict == "pass":
         what = "passed"
     elif result.verdict == "none":

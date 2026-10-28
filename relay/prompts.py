@@ -1,14 +1,10 @@
 """Builds every text Relay sends to an agent."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from relay.check import outcome_text
+from relay.check import CheckResult, outcome_text
 from relay.queue import Section
 from relay.status import KINDS, Kind, TEXT_NAMES
-
-if TYPE_CHECKING:
-    from relay.check import CheckResult
 
 
 def _status_form(kind: Kind) -> str:
@@ -61,5 +57,5 @@ def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> s
     )
 
 
-def check_feedback(result: "CheckResult") -> str:
+def check_feedback(result: CheckResult) -> str:
     return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
