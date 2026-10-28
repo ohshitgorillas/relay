@@ -326,3 +326,21 @@ def test_retire_flag_is_the_same_file_for_a_reopened_state_and_differs_per_queue
     assert first is not None
     assert first == again
     assert first != other
+
+
+def test_mark_from_recut_is_kept_for_that_section_only(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the flag is not saved, or is set on another section too.
+    State.open(queue, fake_cfg).mark_from_recut("s1.1")
+    state = State.open(queue, fake_cfg)
+    assert state.section("s1.1").from_recut
+    assert not state.section("s1").from_recut
+
+
+def test_a_record_saved_before_from_recut_existed_loads_with_it_false(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: a state.json from an older relay, without the key, no longer loads.
+    state = State.open(queue, fake_cfg)
+    old = '{"sections": {"s1": {"status": "parked", "failures": 1, "question": "q", "answer": null, "last_session": null}}, "last_any": null}'
+    (_dir(state) / "state.json").write_text(old)
+    section = state.section("s1")
+    assert section.status == "parked"
+    assert not section.from_recut

@@ -118,6 +118,12 @@ def _run_section(
             return _failed_twice(sid)
     elif status.kind == "DONE":
         state.mark_done(sid)
+    elif status.kind == "RECUT" and current.from_recut:
+        # A section a recut made gets no second recut: the owner decides what happens to it.
+        question = f"a section from a recut asked to recut again: {status.text}"
+        state.park(sid, question)
+        ping.needs_owner(cfg, queue, sid, question)
+        progress.needs_answer(sid, question)
     elif status.kind == "RECUT":
         if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, status.text, result):
             return _failed_twice(sid)
@@ -194,4 +200,8 @@ def _recut(
         second, count = _fail(state, section.id)
         progress.failed(section.id, count)
         return second
+    known = {s.id for s in before}
+    for made in parse_queue(queue):
+        if made.id not in known:
+            state.mark_from_recut(made.id)
     return False

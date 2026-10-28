@@ -31,6 +31,7 @@ class SectionState:
     question: str | None
     answer: str | None
     last_session: str | None
+    from_recut: bool = False
 
 
 def _fresh() -> SectionState:
@@ -115,6 +116,12 @@ class State:
         def change(s: SectionState, _r: dict) -> None:
             s.status = "parked"
             s.question = question
+
+        self._update(sid, change)
+
+    def mark_from_recut(self, sid: str) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.from_recut = True
 
         self._update(sid, change)
 

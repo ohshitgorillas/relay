@@ -1092,6 +1092,73 @@ def test_two_recuts_that_leave_the_queue_unchanged_stop_with_failed_twice(
     assert State.open(queue, cfg).section(first).failures == 2
 
 
+# A section a recut made that itself ends RECUT is parked for the owner with the lead's reason,
+# and gets no second recut.
+
+
+def _queue_of(path: Path, *ids: str) -> Path:
+    path.write_text("".join(f"section {sid} | lead | steps: 1\n  {sid} work\n" for sid in ids))
+    return path
+
+
+def test_a_section_from_a_recut_that_ends_recut_is_parked_with_the_reason_and_not_recut_again(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a recut section's RECUT runs the divvyer again, parks without the reason, or counts a failure.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    recut = _queue_of(tmp_path / "recut.md", "s1.1", "s1.2", "s2")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "recut")) == 1
+    state = State.open(queue, cfg)
+    parked = state.section("s1.1")
+    assert parked.status == "parked"
+    assert parked.question is not None and RECUT_REASON in parked.question
+    assert parked.failures == 0
+    assert state.section("s1.2").from_recut
+    assert not state.section("s2").from_recut
+
+
+def test_a_section_from_a_recut_that_ends_recut_pings_the_owner_with_the_reason_once_parked(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the parked recut section sends no needs-owner ping, or pings before it is parked.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    recut = _queue_of(tmp_path / "recut.md", "s1.1", "s2")
+    scenario(_lines(DONE_LEAD))
+    record = tmp_path / "pings.jsonl"
+    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), "s1.1", "{message}"]
+    cfg = dataclasses.replace(cfg, ping_command=ping)
+    leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
+    run(queue, cfg)
+    asked = [p for p in _pings(tmp_path) if RECUT_REASON in p[0]]
+    assert len(asked) == 1
+    message, status = asked[0]
+    assert "s1.1" in message and "needs the owner" in message
+    assert status == "parked"
+
+
+def test_a_section_the_recut_left_in_place_that_ends_recut_is_still_recut(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: every section of a recut queue is taken as a recut's, so an original section's RECUT is parked.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    first = _queue_of(tmp_path / "first.md", "s1.1", "s2")
+    second = _queue_of(tmp_path / "second.md", "s1.1", "s2.1")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(DONE_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    recuts = [_step(DIVVYER_RUN, write=(first, queue)), _step(DIVVYER_RUN, write=(second, queue))]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "recut")) == 2
+    state = State.open(queue, cfg)
+    assert state.section("s2").status == "open"
+    assert state.section("s2.1").from_recut
+
+
 # Behavior 4 (s7.d3): - NEEDS-OWNER: `park`, then `ping.needs_owner`.
 
 
