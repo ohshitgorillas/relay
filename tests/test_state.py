@@ -549,6 +549,8 @@ def test_each_research_write_replaces_a_file_in_the_queues_directory_from_a_temp
     # Breaks when: the research session is written other than by temp file and `os.replace`.
     state = State.open(queue, fake_cfg)
     state.set_answer("s1", "An earlier answer.")
+    # An earlier, different session, so each write below changes the section's research state.
+    state.set_research_session("s1", "research-earlier")
     calls: list[tuple[Path, Path]] = []
     real_replace = os.replace
 
