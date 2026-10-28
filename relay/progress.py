@@ -149,8 +149,10 @@ def check_failed(sid: str, failures: int) -> None:
     _write(f"section {sid}: check failed ({failures} of {CHECK_LIMIT})")
 
 
-def retired_idle(sid: str, tokens: int) -> None:
-    _write(f"lead {sid}: retired at {tokens} context tokens, no commit since the retire flag")
+def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None:
+    if who == "ask":
+        return
+    _write(f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag")
 
 
 def research_started(sid: str, cwd: Path) -> None:

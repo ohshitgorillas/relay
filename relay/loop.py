@@ -285,7 +285,7 @@ class _Watch:
 def _watcher(
     cfg: Config, ledger: Ledger, since: float | None, who: Kind, sid: str, repo: Path
 ) -> _Watch:
-    """The run_agent callback, with flags set when a budget ran out or an idle lead was killed."""
+    """The run_agent callback: `budget_hit` on a spent budget, `idle_retired` for an idle lead."""
     retiring = [False]
     shown = [0]  # agent events already printed
     snapshot: list[dict[str, str]] = []  # branch heads when the retire flag first went up
@@ -309,15 +309,16 @@ def _watcher(
         if not retiring[0]:
             retiring[0] = True
             progress.retiring(sid, why, stream.context_tokens, who)
-        if who == "lead":
+        if who != "recut":
             if not snapshot:
                 snapshot.append(git.heads(repo))
             elif stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
                 # `git.heads` is {} when git fails: an empty read proves no commit either way.
                 now = git.heads(repo)
                 if now and now == snapshot[0]:
-                    watch.idle_retired = True
-                    progress.retired_idle(sid, stream.context_tokens)
+                    if who == "lead":  # a research or ask run killed here is a failed run
+                        watch.idle_retired = True
+                    progress.retired_idle(sid, stream.context_tokens, who)
                     return "kill"
         return "retire"
 

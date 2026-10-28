@@ -743,6 +743,43 @@ def test_ask_whose_run_is_killed_at_the_hard_ceiling_exits_1_and_prints_no_answe
     assert git_repo.rev("main") != first
 
 
+def test_ask_whose_run_idles_past_the_idle_ceiling_exits_1_and_prints_no_answer(
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the idle ceiling does not watch an ask run (relay-research design, Modules,
+    # `relay/config.py`: context_limit, idle_ceiling and hard_ceiling watch a research run
+    # unchanged), or a killed run's answer is used. The run makes no commit after the retire
+    # flag goes up and its context stays below the hard ceiling; without the idle kill it runs
+    # on to its answer and exits 0. Breaks too when the idle kill's retire line (relay-check
+    # design, `_watcher` calls `progress.retired_idle`) reaches stdout or stderr: an ask's
+    # progress goes nowhere (relay-research design, `relay/progress.py`).
+    queue = repo_queue
+    no_commit = [sys.executable, "-c", "pass"]
+    research = _climbing_ask(queue, fake_cfg, asked, no_commit)
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT + 1000,
+    )
+    first = git_repo.rev("main")
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "retired at" not in captured.err
+    assert "killed at" not in captured.err
+    assert git_repo.rev("main") == first
+
+
 def test_ask_whose_result_holds_no_answer_exits_1(
     asked: Path,
     queue: Path,

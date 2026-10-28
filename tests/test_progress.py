@@ -974,3 +974,19 @@ def test_an_ask_runs_agent_events_print_nothing(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+# Research design, behavior 3: an idle-ceiling retire line is labelled with the run's kind (lead,
+# research or ask) as the retire and kill lines are, and an ask run's idle retire line goes
+# nowhere: "`relay ask` prints only the answer on stdout; its progress goes nowhere."
+
+
+def test_an_ask_runs_idle_retire_line_prints_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: retired_idle writes a line for an ask run, so `relay ask` prints more than its
+    # answer on stdout.
+    progress.retired_idle("s4", 131072, who="ask")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
