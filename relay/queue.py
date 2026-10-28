@@ -14,6 +14,8 @@ class Section:
     body: str
     depends_on: tuple[str, ...]
     open: bool
+    checks: tuple[str, ...] = ()
+    came_from: str | None = None
 
 
 _HEADER = re.compile(r"^section[ \t]+([A-Za-z0-9][A-Za-z0-9._-]*)[ \t]*\|(.*)$")

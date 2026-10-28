@@ -1,7 +1,7 @@
 """Loads the Relay config file and applies CLI overrides into one frozen Config."""
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from relay.errors import ConfigError
@@ -10,6 +10,17 @@ _DEFAULT_LEAD = [
     "claude", "-p", "--output-format", "stream-json", "--verbose",
     "--permission-mode", "bypassPermissions",
 ]
+_DEFAULT_CHECK_OUTSIDE = [
+    "command not found",
+    "(?i)credit balance",
+    "(?i)api[ _-]?key",
+    "(?i)could not resolve host",
+    "(?i)name resolution",
+    "(?i)network is unreachable",
+    "(?i)connection (refused|reset|timed out)",
+]
+
+
 @dataclass(frozen=True)
 class Config:
     token_budget: int | None
@@ -21,6 +32,9 @@ class Config:
     recut_command: list[str]
     ping_command: list[str]
     state_root: Path
+    idle_ceiling: int = 130_000
+    check_timeout: float = 1800
+    check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
 
 
 _KEYS = frozenset(
