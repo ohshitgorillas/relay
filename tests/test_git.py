@@ -225,3 +225,192 @@ def test_neither_raises_on_a_directory_that_does_not_exist(tmp_path: Path) -> No
     missing = tmp_path / "missing"
     assert section_worktree(missing, "s1") is None
     assert heads(missing) == {}
+
+
+# The research design's git queries (design: relay-research-design.md, Modules `relay/git.py`
+# (extended); Order 3). The repositories come from the `git_repo` fixture in `tests/conftest.py`.
+
+HEAD_OBJECT = "6" * 40
+
+
+def _tracked(git_repo: GitRepo, files: dict[str, str]) -> str:
+    """Write `files` into the main checkout, commit them through the fixture and return HEAD."""
+    for name, text in files.items():
+        path = git_repo.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        git_repo.git("add", name)
+    git_repo.git("commit", "-q", "-m", "tracked files")
+    return git_repo.rev("HEAD")
+
+
+# Behavior 1: `git rev-parse HEAD` in `cwd`; None when git fails.
+
+
+def test_head_is_the_commit_head_points_at(git_repo: GitRepo) -> None:
+    assert relay.git.head(git_repo.root) == git_repo.rev("HEAD")
+    made = git_repo.commit(message="second")
+    assert relay.git.head(git_repo.root) == made
+
+
+def test_head_is_taken_in_cwd_so_a_worktree_gives_its_own_commit(git_repo: GitRepo) -> None:
+    main_head = git_repo.rev("HEAD")
+    made = git_repo.commit(cwd=git_repo.worktrees["s1"], message="lead work")
+    assert relay.git.head(git_repo.worktrees["s1"]) == made
+    assert relay.git.head(git_repo.root) == main_head
+    assert made != main_head
+
+
+def test_head_runs_git_rev_parse_head_in_cwd_through_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_capture(monkeypatch, (0, HEAD_OBJECT + "\n"))
+    assert relay.git.head(tmp_path) == HEAD_OBJECT
+    assert len(calls) == 1
+    argv, cwd, _timeout = calls[0]
+    assert argv == ["git", "rev-parse", "HEAD"]
+    assert cwd == tmp_path
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [(128, ""), (None, ""), (128, HEAD_OBJECT + "\n"), (1, HEAD_OBJECT)],
+    ids=["git-error", "oserror-or-timeout", "git-error-printing-a-head", "exit-1-printing-a-head"],
+)
+def test_head_is_none_when_the_capture_fails(
+    monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo, answer: tuple[int | None, str]
+) -> None:
+    calls = _fake_capture(monkeypatch, answer)
+    # The real repository has a HEAD, so only the capture's answer can give None.
+    assert relay.git.head(git_repo.root) is None
+    assert calls
+    assert all(argv[0] == "git" and cwd == git_repo.root for argv, cwd, _t in calls)
+
+
+def test_head_is_none_outside_a_repository(tmp_path: Path) -> None:
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert relay.git.head(plain) is None
+
+
+def test_head_is_none_on_a_directory_that_does_not_exist(tmp_path: Path) -> None:
+    assert relay.git.head(tmp_path / "missing") is None
+
+
+# Behavior 2: `git diff --name-only <commit> -- <paths>` in `cwd`, which compares the working
+# tree: False on exit 0 with no output, True on exit 0 with output, None when git fails.
+
+
+def test_changed_is_false_when_the_paths_match_the_commit(git_repo: GitRepo) -> None:
+    commit = _tracked(git_repo, {"a.txt": "a\n", "src/b.py": "b\n"})
+    assert relay.git.changed(git_repo.root, commit, ("a.txt",)) is False
+    assert relay.git.changed(git_repo.root, commit, ("a.txt", "src/b.py")) is False
+    assert relay.git.changed(git_repo.root, commit, ("src",)) is False
+
+
+def test_changed_is_true_for_an_uncommitted_edit_in_the_working_tree(git_repo: GitRepo) -> None:
+    commit = _tracked(git_repo, {"a.txt": "a\n", "src/b.py": "b\n"})
+    (git_repo.root / "src" / "b.py").write_text("b edited\n")
+    assert relay.git.changed(git_repo.root, commit, ("src/b.py",)) is True
+    assert relay.git.changed(git_repo.root, commit, ("a.txt", "src/b.py")) is True
+    assert relay.git.changed(git_repo.root, commit, ("src",)) is True
+
+
+def test_changed_looks_only_at_the_paths_named(git_repo: GitRepo) -> None:
+    commit = _tracked(git_repo, {"a.txt": "a\n", "src/b.py": "b\n"})
+    (git_repo.root / "src" / "b.py").write_text("b edited\n")
+    assert relay.git.changed(git_repo.root, commit, ("a.txt",)) is False
+
+
+def test_changed_is_true_for_a_path_committed_since_the_commit(git_repo: GitRepo) -> None:
+    commit = _tracked(git_repo, {"a.txt": "a\n", "src/b.py": "b\n"})
+    _tracked(git_repo, {"a.txt": "a again\n"})
+    assert relay.git.changed(git_repo.root, commit, ("a.txt",)) is True
+    assert relay.git.changed(git_repo.root, commit, ("src/b.py",)) is False
+
+
+def test_changed_compares_the_working_tree_of_cwd(git_repo: GitRepo) -> None:
+    commit = _tracked(git_repo, {"a.txt": "a\n"})
+    git_repo.worktree("s2")
+    (git_repo.worktrees["s2"] / "a.txt").write_text("edited in s2\n")
+    assert relay.git.changed(git_repo.worktrees["s2"], commit, ("a.txt",)) is True
+    assert relay.git.changed(git_repo.root, commit, ("a.txt",)) is False
+
+
+def test_changed_runs_git_diff_name_only_in_cwd_through_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_capture(monkeypatch, (0, ""))
+    assert relay.git.changed(tmp_path, HEAD_OBJECT, ("a.txt", "src")) is False
+    assert len(calls) == 1
+    argv, cwd, _timeout = calls[0]
+    assert argv == ["git", "diff", "--name-only", HEAD_OBJECT, "--", "a.txt", "src"]
+    assert cwd == tmp_path
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ((0, ""), False),
+        ((0, "a.txt\n"), True),
+        ((0, "a.txt\nsrc/b.py\n"), True),
+    ],
+    ids=["exit-0-no-output", "exit-0-one-path", "exit-0-two-paths"],
+)
+def test_changed_reads_exit_0_output_from_the_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, answer: tuple[int, str], expected: bool
+) -> None:
+    _fake_capture(monkeypatch, answer)
+    assert relay.git.changed(tmp_path, HEAD_OBJECT, ("a.txt", "src/b.py")) is expected
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [(128, ""), (None, ""), (128, "a.txt\n"), (1, "a.txt\n")],
+    ids=["git-error", "oserror-or-timeout", "git-error-printing-a-path", "exit-1-printing-a-path"],
+)
+def test_changed_is_none_when_the_capture_fails(
+    monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo, answer: tuple[int | None, str]
+) -> None:
+    commit = git_repo.rev("HEAD")
+    calls = _fake_capture(monkeypatch, answer)
+    assert relay.git.changed(git_repo.root, commit, ("a.txt",)) is None
+    assert calls
+    assert all(argv[0] == "git" and cwd == git_repo.root for argv, cwd, _t in calls)
+
+
+def test_changed_is_none_for_a_commit_git_does_not_know(git_repo: GitRepo) -> None:
+    _tracked(git_repo, {"a.txt": "a\n"})
+    assert relay.git.changed(git_repo.root, "0" * 40, ("a.txt",)) is None
+
+
+def test_changed_is_none_outside_a_repository(tmp_path: Path) -> None:
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert relay.git.changed(plain, HEAD_OBJECT, ("a.txt",)) is None
+
+
+def test_changed_is_none_on_a_directory_that_does_not_exist(tmp_path: Path) -> None:
+    assert relay.git.changed(tmp_path / "missing", HEAD_OBJECT, ("a.txt",)) is None
+
+
+# Behavior 3: Both run git through `runner.capture`. Neither raises.
+
+
+def test_head_and_changed_run_git_only_through_capture(
+    monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo
+) -> None:
+    calls = _fake_capture(monkeypatch, (0, HEAD_OBJECT + "\n"))
+    assert relay.git.head(git_repo.root) == HEAD_OBJECT
+    assert len(calls) == 1
+    assert relay.git.changed(git_repo.root, HEAD_OBJECT, ("a.txt",)) is True
+    assert len(calls) == 2
+    assert [argv[:2] for argv, _cwd, _t in calls] == [["git", "rev-parse"], ["git", "diff"]]
+
+
+def test_neither_head_nor_changed_raises_on_any_git_failure(tmp_path: Path) -> None:
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    for cwd in (plain, tmp_path / "missing"):
+        assert relay.git.head(cwd) is None
+        assert relay.git.changed(cwd, "not-a-commit", ("a.txt",)) is None

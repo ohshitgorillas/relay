@@ -319,3 +319,147 @@ def test_all_three_check_keys_take_overrides_over_the_file(tmp_path: Path, home:
     assert cfg.idle_ceiling == 160_000
     assert cfg.check_timeout == 12.0
     assert cfg.check_outside == ["down"]
+
+
+# The research keys (design: relay-research-design.md, Modules `relay/config.py` (extended);
+# Order 3).
+
+RESEARCH_TAIL = ["--agent", "researcher", "--model", "opus[1m]"]
+RESEARCH_KEYS = (
+    'research_command = ["my-research", "-p"]\nmap_max_lines = 40\nmap_max_chars = 3000\n'
+)
+
+
+def _direct(**fields: object) -> Config:
+    """A `Config` built directly, its required fields at the documented defaults."""
+    base: dict[str, object] = {
+        "token_budget": None,
+        "dollar_budget": None,
+        "context_limit": 100_000,
+        "hard_ceiling": 200_000,
+        "poll_seconds": 30,
+        "lead_command": ["my-claude", "-p"],
+        "recut_command": ["my-recut"],
+        "ping_command": ["notify", "{message}"],
+        "state_root": Path("/nowhere/state"),
+        "idle_ceiling": 130_000,
+    }
+    base.update(fields)
+    return Config(**base)  # type: ignore[arg-type]
+
+
+# Behavior 4: All three keys join `_KEYS`.
+
+
+def test_all_three_research_keys_are_read_from_the_file(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(_toml(tmp_path, RESEARCH_KEYS), {})
+    assert cfg.research_command == ["my-research", "-p"]
+    assert cfg.map_max_lines == 40
+    assert cfg.map_max_chars == 3000
+
+
+def test_all_three_research_keys_take_overrides_over_the_file(
+    tmp_path: Path, home: Path
+) -> None:
+    cfg = _load_ok(
+        _toml(tmp_path, RESEARCH_KEYS),
+        {"research_command": ["other-research"], "map_max_lines": 7, "map_max_chars": 900},
+    )
+    assert cfg.research_command == ["other-research"]
+    assert cfg.map_max_lines == 7
+    assert cfg.map_max_chars == 900
+
+
+def test_research_overrides_apply_over_an_empty_file(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(
+        _toml(tmp_path, ""),
+        {"research_command": ["other-research"], "map_max_lines": 7, "map_max_chars": 900},
+    )
+    assert cfg.research_command == ["other-research"]
+    assert cfg.map_max_lines == 7
+    assert cfg.map_max_chars == 900
+
+
+def test_research_keys_leave_the_other_keys_alone(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(_toml(tmp_path, RESEARCH_KEYS + "poll_seconds = 4.0\n"), {})
+    assert cfg.poll_seconds == 4.0
+    assert cfg.lead_command == DEFAULT_LEAD
+    assert cfg.recut_command == DEFAULT_LEAD + ["--agent", "divvyer"]
+    assert cfg.map_max_lines == 40
+
+
+# Behavior 5: Research command, map caps and their defaults.
+
+
+def test_empty_config_gives_the_documented_research_defaults(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(_toml(tmp_path, ""), {})
+    assert cfg.research_command == DEFAULT_LEAD + RESEARCH_TAIL
+    assert cfg.map_max_lines == 150
+    assert cfg.map_max_chars == 12_000
+
+
+def test_research_command_defaults_to_the_file_lead_command_plus_researcher(
+    tmp_path: Path, home: Path
+) -> None:
+    cfg = _load_ok(_toml(tmp_path, 'lead_command = ["my-claude", "-p"]\n'), {})
+    assert cfg.research_command == ["my-claude", "-p"] + RESEARCH_TAIL
+
+
+def test_research_command_defaults_to_an_overridden_lead_command_plus_researcher(
+    tmp_path: Path, home: Path
+) -> None:
+    cfg = _load_ok(
+        _toml(tmp_path, 'lead_command = ["my-claude", "-p"]\n'),
+        {"lead_command": ["cli-claude"]},
+    )
+    assert cfg.research_command == ["cli-claude"] + RESEARCH_TAIL
+
+
+def test_research_command_from_the_file_is_not_given_the_researcher_tail(
+    tmp_path: Path, home: Path
+) -> None:
+    path = _toml(
+        tmp_path, 'lead_command = ["my-claude"]\nresearch_command = ["my-research"]\n'
+    )
+    assert _load_ok(path, {}).research_command == ["my-research"]
+
+
+def test_config_built_directly_defaults_research_command_from_its_lead_command() -> None:
+    cfg = _direct()
+    assert cfg.research_command == ["my-claude", "-p"] + RESEARCH_TAIL
+    assert cfg.map_max_lines == 150
+    assert cfg.map_max_chars == 12_000
+
+
+def test_config_built_directly_defaults_only_a_research_command_it_was_not_given() -> None:
+    assert _direct(lead_command=["cli-claude"]).research_command == ["cli-claude"] + RESEARCH_TAIL
+    assert _direct(research_command=["mine"]).research_command == ["mine"]
+
+
+@pytest.mark.parametrize("key", ["map_max_lines", "map_max_chars"])
+@pytest.mark.parametrize("value", ["0", "-1", '"many"', "2.5"])
+def test_a_map_cap_in_the_file_that_is_not_a_positive_integer_raises_config_error(
+    tmp_path: Path, home: Path, key: str, value: str
+) -> None:
+    assert getattr(_load_ok(_toml(tmp_path, f"{key} = 1\n"), {}), key) == 1
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, f"{key} = {value}\n"), {})
+
+
+@pytest.mark.parametrize("key", ["map_max_lines", "map_max_chars"])
+@pytest.mark.parametrize("value", [0, -1, "many", 2.5])
+def test_a_map_cap_override_that_is_not_a_positive_integer_raises_config_error(
+    tmp_path: Path, home: Path, key: str, value: object
+) -> None:
+    path = _toml(tmp_path, "")
+    assert getattr(_load_ok(path, {key: 1}), key) == 1
+    with pytest.raises(ConfigError):
+        load_config(path, {key: value})
+
+
+def test_research_command_of_the_wrong_type_raises_config_error(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _load_ok(_toml(tmp_path, 'research_command = ["r"]\n'), {}).research_command == ["r"]
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, 'research_command = "my-research"\n'), {})
