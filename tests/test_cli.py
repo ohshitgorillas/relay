@@ -770,14 +770,46 @@ def test_ask_whose_run_idles_past_the_idle_ceiling_exits_1_and_prints_no_answer(
         idle_ceiling=CLIMB_PAST_CONTEXT - 100,
         hard_ceiling=CLIMB_PAST_CONTEXT + 1000,
     )
-    first = git_repo.rev("main")
     assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
     assert len(_asks(asked)) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "retired at" not in captured.err
-    assert "killed at" not in captured.err
-    assert git_repo.rev("main") == first
+    progress = tuple(f"{who} {ASK_SID}:" for who in ("lead", "recut", "research", "ask"))
+    assert [line for line in captured.err.splitlines() if line.startswith(progress)] == []
+
+
+def test_ask_whose_run_commits_after_the_flag_runs_past_the_idle_ceiling_to_its_answer(
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher kills an ask run as soon as its retire flag goes up, or at the
+    # idle ceiling although the run committed after the flag (relay-check design, `_watcher`:
+    # the idle kill needs the heads unchanged since the flag; relay-research design,
+    # `relay/config.py`: the ceilings watch a research run unchanged). The run's context passes
+    # idle_ceiling and stays below hard_ceiling, so it runs on to its answer and exits 0, and
+    # its progress goes nowhere (relay-research design, `relay/progress.py`).
+    queue = repo_queue
+    research = _climbing_ask(queue, fake_cfg, asked, [*_GIT, "-C", str(git_repo.root)])
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT + 1000,
+    )
+    first = git_repo.rev("main")
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert len(_asks(asked)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ASK_ANSWER + "\n"
+    assert captured.err == ""
+    assert git_repo.rev("main") != first
 
 
 def test_ask_whose_result_holds_no_answer_exits_1(
