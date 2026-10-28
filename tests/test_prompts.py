@@ -72,6 +72,35 @@ def test_lead_prompt_holds_the_given_section_not_another() -> None:
     assert BODY not in prompt
 
 
+def test_lead_prompt_holds_resume_with_the_session_id_when_resume_is_set() -> None:
+    # Breaks when: lead_prompt ignores `resume` or words it other than "resume <session id>".
+    prompt = lead_prompt(QUEUE, _section(), resume="sess-lead-7", answer=None, retire_flag=RETIRE_FLAG)
+    assert "resume sess-lead-7" in prompt
+
+
+def test_lead_prompt_holds_the_owners_answer_verbatim_when_set() -> None:
+    # Breaks when: lead_prompt ignores `answer` or alters its text.
+    answer = "Yes: ship it as `relay`.\n  Keep the old name as an alias."
+    prompt = lead_prompt(QUEUE, _section(), resume=None, answer=answer, retire_flag=RETIRE_FLAG)
+    assert answer in prompt
+
+
+def test_lead_prompt_holds_the_retire_contract_with_the_flag_path() -> None:
+    # Breaks when: the prompt leaves out the retire flag's path or the instruction to end with RETIRED.
+    prompt = _lead()
+    assert str(RETIRE_FLAG) in prompt
+    assert "RETIRED" in prompt
+
+
+def test_lead_prompt_states_the_four_status_forms() -> None:
+    # Breaks when: the status contract is left out or a form is worded otherwise (e.g. "FINISHED").
+    prompt = _lead()
+    assert "DONE" in prompt
+    assert "RECUT: " in prompt
+    assert "NEEDS-OWNER: " in prompt
+    assert "RETIRED" in prompt
+
+
 # Behavior 5: The divvyer's `recut` brief for that section, carrying the lead's reason and
 # its run log path.
 

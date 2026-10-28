@@ -115,3 +115,13 @@ def test_needs_owner_with_an_empty_question_gives_none() -> None:
 def test_a_lowercase_status_word_gives_none() -> None:
     # Breaks when: parse_status matches the status words case-insensitively; the line must be exactly one of them.
     assert parse_status("Step committed.\ndone") is None
+
+
+def test_done_followed_by_extra_words_gives_none() -> None:
+    # Breaks when: parse_status matches a prefix, so "DONE ..." with more words still counts as DONE.
+    assert parse_status("Step committed.\nDONE except the tests still fail") is None
+
+
+def test_retired_followed_by_extra_words_gives_none() -> None:
+    # Breaks when: parse_status matches a prefix, so "RETIRED ..." with more words still counts as RETIRED.
+    assert parse_status("Context is heavy.\nRETIRED early") is None
