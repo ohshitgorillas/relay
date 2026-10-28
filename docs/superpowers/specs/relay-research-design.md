@@ -4,18 +4,19 @@ Status: approved.
 
 ## Why
 
-A lead starts with nothing but the queue section (`relay/prompts.py:17-51`), so it and every agent it dispatches read the code from scratch. Relay has no notion of a researcher, a reader or a map anywhere in `relay/` or `tests/`.
+A lead without a map starts with nothing but the queue section (`relay/prompts.py:16-60`), so it and every agent it dispatches read the code from scratch. The researcher maps the section's code once, before the lead starts, and every brief in the section carries the map.
 
-Copies and gaps this design closes:
+Shared concerns and their one copy:
 
-- **Starting an agent run**: two copies of the same sequence, `_watcher`, `run_agent`, `ledger.append`, at `relay/loop.py:101-107` (lead) and `relay/loop.py:198-201` (recut). This design adds two more runs (research, ask), so the sequence moves to one helper first.
-- **The retire flag**: one file for every run, `relay/state.py:209-210`, unlinked before each lead (`relay/loop.py:103`) and touched by `relay/runner.py:133`. A follow-up asked while the lead runs would touch the lead's flag and retire it, so a research run gets its own flag.
-- **Agent commands**: built only in `relay/config.py`; `recut_command` derives from `lead_command` at `relay/config.py:165`. The research command follows that pattern.
-- **Run kinds**: `relay/ledger.py:45` takes only `"lead"` and `"recut"`; `relay/progress.py:94` and `relay/loop.py:142` take the same two.
-- **Subagent tokens**: the stream carries each subagent's `total_tokens` (`tests/fixtures/stream-agents.jsonl:5`), folded by `relay/agents.py:60-96`, but a ledger line keeps only the run's own spend (`relay/ledger.py:50-57`). `relay status` rebuilds agents from run logs (`relay/cli.py:80-106`). Nothing records which runs had a map.
-- **Git queries**: `relay/git.py:12-39` asks for worktrees and branch heads only; nothing reads HEAD or diffs against a commit.
-- **A section's working directory**: the check design's `_verify` runs in `git.section_worktree(cwd, sid)` or else `cwd`; the researcher needs the same choice, so it becomes one helper.
-- **Section state**: `relay/state.py:29-38` keeps no per-section run besides the lead's session; `mark_done` (`relay/state.py:112-119`) clears only check fields.
+- **Starting an agent run**: one sequence, `_watcher`, `run_agent`, `ledger.append`, in `_run` (`relay/loop.py:172-196`), called by the lead (`relay/loop.py:121`), research (`relay/loop.py:226`), ask (`relay/loop.py:258`) and recut (`relay/loop.py:391`).
+- **The retire flag**: the lead's and recut's file (`relay/state.py:257`), unlinked before each lead (`relay/loop.py:119`) and touched by `relay/runner.py:230`. A follow-up asked while the lead runs must not retire the lead, so research and ask runs share their own flag, `research_flag` (`relay/state.py:234`).
+- **Atomic writes**: one `write_atomic` (`relay/state.py:43-54`), serving `State._save` (`relay/state.py:95`) and `research.save` (`relay/research.py:89`).
+- **Agent commands**: built only in `relay/config.py`; `recut_command` and `research_command` derive from `lead_command` at `relay/config.py:52-59`.
+- **Run kinds**: one `Kind` (`relay/ledger.py:20`), imported by `relay/progress.py:11` and `relay/loop.py:14`.
+- **Subagent tokens**: the stream carries each subagent's `total_tokens` (`tests/fixtures/stream-agents.jsonl:5`), folded by `relay/agents.py:60-96`; every run line keeps them with the map commit (`relay/ledger.py:47-69`). `relay status` rebuilds agents from run logs (`relay/cli.py:89-116`).
+- **Git queries**: `relay/git.py:12-55` asks for worktrees, branch heads, HEAD and a diff against a commit.
+- **A section's working directory**: `_section_cwd` (`relay/loop.py:167-169`), where the check and the researcher both run.
+- **Section state**: `relay/state.py:28-40` keeps the lead's and the researcher's sessions; `mark_done` (`relay/state.py:119-127`) also drops the map.
 
 This design builds on the approved check design (`docs/superpowers/specs/relay-check-design.md`): its `_verify`, `_park` and idle `_watcher` in `relay/loop.py` land before this design's loop step.
 
@@ -39,7 +40,8 @@ ANSWER_CLOSE = "END ANSWER"
 @dataclass(frozen=True)
 class Map:
     sid: str
-    commit: str               # the HEAD Relay read in the research cwd before the researcher ran
+    commit: str               # the HEAD Relay read in the research cwd before the researcher ran;
+                              # one whitespace-free token
     files: tuple[str, ...]    # every path an entry or link names, sorted, no repeats
     body: str                 # the lines from MAP to END MAP, both included
 
@@ -53,13 +55,14 @@ def parse_map(sid: str, commit: str, result_text: str | None, cfg: Config) -> Ma
 
 
 def save(m: Map, path: Path) -> None:
-    """Write `map <sid> at <commit>` then m.body to `path` by temp file and os.replace,
+    """Write `map <sid> at <commit>` then m.body to `path` through state.write_atomic,
     making the parent directory."""
 
 
 def load(path: Path, sid: str) -> Map | None:
     """The map saved at `path`; None when the file is missing, unreadable, names another
-    section, or its body no longer parses."""
+    section, its header's commit is not one whitespace-free token, or its body no longer
+    parses."""
 
 
 def stale(m: Map, cwd: Path) -> bool:
@@ -107,11 +110,15 @@ class Config:
     map_max_chars: int = 12_000  # positive integer
 ```
 
-All three keys join `_KEYS`. The 1M window is the default model's alone: Relay's `context_limit`, `idle_ceiling` and `hard_ceiling` watch a research run unchanged.
+All three keys join `_KEYS`. The 1M window is the default model's alone: Relay's `context_limit`, `idle_ceiling` and `hard_ceiling` watch research and ask runs unchanged.
 
-### `relay/state.py` (extended): the researcher's session, the map file, the research flag and lock
+### `relay/state.py` (extended): the researcher's session, the map file, the research flag and lock, atomic writes
 
 ```python
+def write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` by fsynced temp file in its directory and os.replace; the temp
+    file is removed when the write fails. State._save and research.save both write through it."""
+
 @dataclass
 class SectionState:
     ...                                   # existing fields
@@ -161,7 +168,8 @@ def lead_prompt(queue, section, resume, answer, retire_flag, check_feedback=None
     """As now, plus, when map_block is set: "Relay's researcher mapped this section's code.
     Put the block below verbatim in every brief you send for this section, the architect's
     included. When an agent reports it needs more, run `relay ask <queue> <sid> "<question>"`
-    and pass on its answer; no agent searches for it." and the block."""
+    with a 600000 ms timeout or in the background, and pass on its answer; on a non-zero exit
+    the agent reads for itself." and the block."""
 
 def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> str:
     """The queue path, the section id and body, the caps cfg.map_max_lines and
@@ -178,10 +186,11 @@ def ask_brief(question: str, flag: Path, cfg: Config) -> str:
 def research_started(sid: str, cwd: Path) -> None: ...                    # "research <sid>: mapping in <cwd>"
 def research_finished(sid: str, result: RunResult, m: Map | None) -> None: ...  # "research <sid>: map of <n> lines, <f> files at <commit> <spend>" | "no usable map <spend>; the lead starts without one"
 def map_reused(sid: str, m: Map) -> None: ...                             # "research <sid>: map at <commit> still current, reused"
-def agent_event(who: Literal["lead", "recut", "research", "ask"], sid: str, event: Event) -> None: ...
+def agent_event(who: Kind, sid: str, event: Event) -> None: ...
+def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None: ...  # "<who> <sid>: retired at <tokens> context tokens, no commit since the retire flag"
 ```
 
-`relay ask` prints only the answer on stdout; its progress goes nowhere.
+`relay ask` prints only the answer on stdout; its progress goes nowhere: every line labelled with a run's kind (`retiring`, `killing`, `agent_event`, `retired_idle`) is silent when `who` is `"ask"`, decided in one private writer in `relay/progress.py`.
 
 ### `relay/loop.py` (changed)
 
@@ -191,19 +200,24 @@ def _section_cwd(cwd: Path, sid: str) -> Path:
 
 def _run(cfg, state, ledger, since: float | None, kind: Kind, sid: str, argv: list[str],
          text: str, cwd: Path, flag: Path, map_commit: str | None = None
-         ) -> tuple[RunResult, list[bool]]:
+         ) -> tuple[RunResult, _Watch]:
     """_watcher, run_agent, then ledger.append(kind, sid, session, spend, map_commit,
-    result.stream.activity.agents): the one agent run. Returns the result and the budget slot."""
+    result.stream.activity.agents): the one agent run. Returns the result and its watch,
+    whose budget_hit is true when the run hit the budget."""
 
 def _watcher(cfg, ledger, since: float | None, who: Kind, sid, repo) -> _Watch:
-    """As the check design has it; since None skips the budget test."""
+    """As the check design has it; since None skips the budget test. The hard and idle
+    ceilings watch research and ask runs as they watch a lead; an idle-ceiling kill marks
+    idle_retired only for a lead, so a research or ask run killed there is a failed run."""
 
-def _research(cfg, state, ledger, since, cwd, queue, section) -> Map | None:
-    """In _section_cwd(cwd, sid): a saved map that is not stale gets map_reused and is
-    returned, the researcher kept. Otherwise drop_map, read git.head (None: no map, no run),
-    unlink research_flag(sid), run research_command with research_brief through _run (kind
-    "research"), set_research_session, parse_map, save it, progress.research_finished. A run
-    that fails, is killed or returns no usable map records no failure and returns None."""
+def _research(cfg, state, ledger, since, cwd, queue, section) -> tuple[Map | None, bool]:
+    """Under state.research_lock(sid) for its whole body, in _section_cwd(cwd, sid): a saved
+    map that is not stale gets map_reused and is returned, the researcher kept. Otherwise
+    drop_map, read git.head (None: no map, no run), unlink research_flag(sid), run
+    research_command with research_brief through _run (kind "research"),
+    set_research_session, parse_map, save it, progress.research_finished. A run that fails,
+    is killed or returns no usable map records no failure and gives no map. The bool is the
+    research run's budget_hit; false on reuse or no run."""
 
 def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
     """Under state.research_lock(sid), without the `relay go` lock: resume the section's
@@ -215,10 +229,10 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
 
 `_run_section` changes in two places:
 
-- Before a lead runs (never on the `check_pending` path), `_research` runs; its map's `block` goes to `lead_prompt` as `map_block`, and its commit to the lead's ledger line.
-- The lead run goes through `_run`, replacing `relay/loop.py:101-107`.
+- Before a lead runs (never on the `check_pending` path), `_research` runs. When its bool is true the section stops with `ExitCode.BUDGET` before a lead starts. Otherwise its map's `block` goes to `lead_prompt` as `map_block`, and its commit to the lead's ledger line.
+- The lead run goes through `_run` (`relay/loop.py:121`).
 
-`_recut` runs through `_run`, replacing `relay/loop.py:198-201`, and calls `state.drop_map(section.id)` when the recut queue no longer holds `section.id`. A recut that keeps the id keeps the map, and the next pass's `_research` reuses or refreshes it.
+`_recut` runs through `_run` (`relay/loop.py:391`) and calls `state.drop_map(section.id)` when the recut queue no longer holds `section.id`. A recut that keeps the id keeps the map, and the next pass's `_research` reuses or refreshes it.
 
 ### `relay/cli.py` (extended)
 
@@ -233,16 +247,18 @@ _COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "as
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
 | The map's form, caps check, file, staleness, the answer's form, the block every brief carries | `relay/research.py` | parsing or writing a map or an answer, or wording the map's usage rule, anywhere else |
-| Starting an agent run, ledgering it | `relay/loop.py` `_run` | `run_agent` or `ledger.append` called anywhere else; replaces `relay/loop.py:101-107`, `relay/loop.py:198-201` |
+| Starting an agent run, ledgering it | `relay/loop.py` `_run` | `run_agent` or `ledger.append` called anywhere else; serves `relay/loop.py:121`, `relay/loop.py:226`, `relay/loop.py:258`, `relay/loop.py:391` |
 | Where a section's check and research run | `relay/loop.py` `_section_cwd` | `git.section_worktree` called anywhere else in `loop.py` |
 | When research runs, is reused or refreshed | `relay/loop.py` `_research` | a research run started anywhere else |
 | Follow-up questions | `relay/loop.py` `ask`, reached by `relay ask` | resuming a researcher anywhere else |
 | Git HEAD and diff | `relay/git.py` | a `git` argv anywhere else |
 | Research command, map caps and their defaults | `relay/config.py` | a `"researcher"`, `"opus[1m]"` or cap literal anywhere else |
 | Researcher session, map path, research flag, research lock; dropping the map when the section is done | `relay/state.py` | a path joined onto the state directory or `run_dir` elsewhere |
+| Writing a file atomically | `relay/state.py` `write_atomic` | a temp file and `os.replace` anywhere else |
+| Holding off `relay ask` while a map is reused or refreshed | `relay/state.py` `research_lock`, held by `_research` and `ask` for their whole bodies | a second lock on research state |
 | Run lines with map commit and agents' tokens | `relay/ledger.py` `append` | writing `ledger.jsonl` anywhere else |
 | Lead-facing map wording, research and ask briefs | `relay/prompts.py` | brief text in `loop.py` or `research.py`, `block` excepted |
-| Progress lines for research | `relay/progress.py` | printing them anywhere else |
+| Progress lines for research; a kind-labelled line's silence for `ask` | `relay/progress.py` | printing them, or testing for `"ask"` before a progress call, anywhere else |
 | How the researcher scopes, groups, fans out and stitches; how a reader reads and hands back | `/Users/atom/.claude/agents/researcher.md`, `/Users/atom/.claude/agents/reader.md` | a second statement of either in another role file or in Relay |
 | Putting the map in every brief, routing follow-ups through `relay ask` | `/Users/atom/.claude/agents/lead.md` | the same rule in another role file |
 | Test fakes and fixtures | `tests/conftest.py`, `tests/fakes/fake_claude.py`, `tests/fixtures/` | an ad hoc map, research stream or git repo built inside a test file |
@@ -253,17 +269,19 @@ _COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "as
 2. Test helpers. `test-writer` writes `tests/conftest.py`, `tests/fakes/fake_claude.py`, `tests/fixtures/stream-research.jsonl`, `tests/fixtures/stream-ask.jsonl` and `tests/fixtures/research-map.txt`. `fake_cfg` gains the three config fields. `fake_claude.py` emits the scenario named by `RELAY_FAKE_SCENARIO_RESEARCHER` when its argv carries `--agent researcher` and that variable is set, and `RELAY_FAKE_SCENARIO` otherwise. The research stream holds reader `task_*` events and a final map; the ask stream holds an answer.
 3. Core: red tests. `test-writer` writes `tests/test_research.py`, `tests/test_git.py`, `tests/test_config.py`, `tests/test_state.py` and `tests/test_ledger.py`.
 4. Core: build. `builder` writes `relay/research.py`, `relay/git.py`, `relay/config.py`, `relay/state.py`, `relay/ledger.py` and `relay/errors.py`.
-5. Prompts, progress: red tests. `test-writer` writes `tests/test_prompts.py` and `tests/test_progress.py`.
+5. Prompts, progress: red tests. `test-writer` writes `tests/test_prompts.py` and `tests/test_progress.py`, covering `retired_idle`'s line labelled with each run's kind and silent for `ask`.
 6. Prompts, progress: build. `builder` writes `relay/prompts.py` and `relay/progress.py`.
 7. Loop, CLI: red tests. `test-writer` writes `tests/test_loop.py` and `tests/test_cli.py`. The tests cover:
    - research before a lead, its map in the lead prompt, the lead's ledger line carrying the map commit and agents;
    - no research on a `check_pending` pass;
    - reuse after a retire with the mapped files unchanged, refresh after one changed, both in the section worktree;
    - a failed, killed or over-cap research: the lead starts without a map, no failure counted;
+   - a research run that hits the budget: the section stops with BUDGET and no lead starts;
+   - a `relay ask` waits while `_research` holds the section's research lock;
    - the research run's own flag, the lead's flag untouched;
    - the map dropped on `DONE` and on a recut that removes the section;
    - `relay ask`: the answer printed, the session resumed, an `ask` ledger line, and exit 1 with no session.
-8. Loop, CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`, after the check design's loop step has landed, with `_run` replacing `relay/loop.py:101-107` and `relay/loop.py:198-201`. The step ends with the full suite green.
+8. Loop, CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`, after the check design's loop step has landed, with `_run` serving the lead, research, ask and recut runs. The step ends with the full suite green.
 9. Researcher and reader. `general-purpose` writes `/Users/atom/.claude/agents/researcher.md` and `/Users/atom/.claude/agents/reader.md`.
    - Both: read-only, never edit, never build or run tests; `effort: medium`. The reader's frontmatter sets `model: opus`; the researcher's model comes from Relay's `research_command`. Tools: researcher `Read`, `Grep`, `Glob`, `Agent` (readers only), and `Bash` for `wc`, `ls` and read-only `git`; reader `Read`, `Grep`, `Glob`.
    - Researcher scope: the section's step in its design, the step's paths and files, and the in-repository files those import.
