@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal
 
 import pytest
 
@@ -21,9 +21,11 @@ from relay.agents import Agent, Event
 from relay.check import CheckResult
 from relay.config import Config
 from relay.ledger import Spend
+from relay.research import Map
 from relay.runner import RunResult
 from relay.status import LeadStatus
 from relay.stream import StreamState
+from tests.conftest import FIXTURES
 
 PREFIX = re.compile(r"^(\d{2}):(\d{2}):(\d{2}) ")
 
@@ -82,6 +84,19 @@ def _line(capsys: pytest.CaptureFixture[str]) -> str:
     return out[match.end() : -1]
 
 
+# The researcher's map in `tests/fixtures/research-map.txt` (design: Homes, test fixtures): its
+# body is the lines from `MAP` to `END MAP`, both included; its files every path an entry or link
+# names, sorted, no repeats.
+MAP_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_MAP_TEXT = (FIXTURES / "research-map.txt").read_text()
+MAP_BODY = _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
+MAP_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
+
+
+def _map(sid: str = "s1", commit: str = MAP_COMMIT) -> Map:
+    return Map(sid=sid, commit=commit, files=MAP_FILES, body=MAP_BODY)
+
+
 def _queues(queue: Path) -> tuple[str, ...]:
     return (queue.name, queue.stem)
 
@@ -110,6 +125,9 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("check_finished", lambda: progress.check_finished("s1", _check())),
         ("check_failed", lambda: progress.check_failed("s1", 1)),
         ("retired_idle", lambda: progress.retired_idle("s1", 130_000)),
+        ("research_started", lambda: progress.research_started("s1", Path("/work/wt/s1"))),
+        ("research_finished", lambda: progress.research_finished("s1", _result(), _map())),
+        ("map_reused", lambda: progress.map_reused("s1", _map())),
     ]
 
 
@@ -130,6 +148,9 @@ NAMES = [
     "check_finished",
     "check_failed",
     "retired_idle",
+    "research_started",
+    "research_finished",
+    "map_reused",
 ]
 
 
@@ -871,3 +892,85 @@ def test_retired_idle_names_the_tokens_and_no_commit(
     assert _line(capsys) == (
         "lead s4: retired at 131072 context tokens, no commit since the retire flag"
     )
+
+
+# Research design (docs/superpowers/specs/relay-research-design.md, Modules `relay/progress.py`;
+# Order 5). Behavior 1: Progress lines for research. Each also joins NAMES above, so it starts with
+# the local time, goes to stdout flushed, writes one line and swallows a failed write.
+
+
+def test_research_started_names_the_section_and_cwd(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: the section id or the directory is missing, or the line is not
+    # "research <sid>: mapping in <cwd>".
+    progress.research_started("s4.2", Path("/work/relay-wt/s4.2"))
+    assert _line(capsys) == "research s4.2: mapping in /work/relay-wt/s4.2"
+
+
+def test_research_finished_with_a_map_counts_its_lines_and_files(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the map's line count (its body, MAP to END MAP), its file count, its commit or
+    # the run's spend is missing or misworded.
+    assert len(MAP_BODY.splitlines()) == 7
+    progress.research_finished("s4", _result(tokens=5678, dollars=0.9), _map("s4"))
+    assert _line(capsys) == (
+        f"research s4: map of 7 lines, 3 files at {MAP_COMMIT} (5678 tokens, $0.90)"
+    )
+
+
+def test_research_finished_counts_the_maps_own_files(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the file count is fixed or counted from the body's lines rather than m.files.
+    m = dataclasses.replace(_map("s4"), files=("relay/git.py",))
+    progress.research_finished("s4", _result(tokens=1, dollars=0.0), m)
+    assert _line(capsys) == f"research s4: map of 7 lines, 1 files at {MAP_COMMIT} (1 tokens, $0.00)"
+
+
+def test_research_finished_without_a_map_says_the_lead_starts_without_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a run with no usable map is not worded "no usable map", drops its spend, or
+    # omits "; the lead starts without one".
+    progress.research_finished("s4", _result(tokens=4321, dollars=1.5), None)
+    assert _line(capsys) == (
+        "research s4: no usable map (4321 tokens, $1.50); the lead starts without one"
+    )
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "killed"), [(None, True), (2, False)], ids=["killed", "exit-2"]
+)
+def test_research_finished_without_a_map_after_a_failed_run(
+    exit_code: int | None, killed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a killed or failed research run is reported other than "no usable map".
+    result = _result(exit_code=exit_code, killed=killed, tokens=9, dollars=0.25)
+    progress.research_finished("s4", result, None)
+    assert _line(capsys) == (
+        "research s4: no usable map (9 tokens, $0.25); the lead starts without one"
+    )
+
+
+def test_map_reused_names_the_section_and_commit(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: the section id or the map's commit is missing, or the line is not
+    # "research <sid>: map at <commit> still current, reused".
+    progress.map_reused("s4", _map("s4", commit="feedface" * 5))
+    assert _line(capsys) == f"research s4: map at {'feedface' * 5} still current, reused"
+
+
+# Research design, behavior 2: `agent_event(who: Literal["lead", "recut", "research", "ask"], ...)`.
+# The design's `relay/progress.py` section: "`relay ask` prints only the answer on stdout; its
+# progress goes nowhere."
+
+
+@pytest.mark.parametrize("kind", ["started", "finished"])
+def test_an_ask_runs_agent_events_print_nothing(
+    kind: Literal["started", "finished"], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: agent_event writes a line for an ask run's subagent, so `relay ask` prints more
+    # than its answer.
+    progress.agent_event("ask", "s4", Event(kind, _agent(name="reader"), 1))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
