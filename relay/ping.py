@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +10,7 @@ from relay.config import Config
 
 
 def ping(cfg: Config, message: str) -> None:
-    argv = [os.path.expanduser(a).replace("{message}", message) if a != "{message}" else message for a in cfg.ping_command]
+    argv = [arg.replace("{message}", message) for arg in cfg.ping_command]
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
     except OSError as exc:
