@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -92,9 +93,10 @@ def run_agent(
         signal.signal(signum, previous[signum])
         os.kill(os.getpid(), signum)
 
-    # Handlers go in before the child starts; off the main thread this raises ValueError.
-    for signum in (signal.SIGINT, signal.SIGTERM):
-        previous[signum] = signal.signal(signum, on_signal)
+    # Handlers go in before the child starts; only the main thread may install them.
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, on_signal)
     try:
         proc = subprocess.Popen(
             argv,
