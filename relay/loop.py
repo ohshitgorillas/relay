@@ -264,8 +264,8 @@ def _recut(
     known = {s.id for s in before}
     nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
     # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
-    # A rejected nested split stays on disk, so its sections are marked too: none recuts again.
-    if (changed and not result.killed and result.exit_code == 0) or nested:
+    # Whatever the recut wrote stays on disk, even when it failed or was rejected: mark it all.
+    if changed:
         for made in after:
             if made.id not in known or made.id == section.id:
                 state.mark_from_recut(made.id)
