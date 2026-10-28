@@ -15,7 +15,7 @@ from relay.errors import (
     QueueFormatError,
     RelayError,
 )
-from tests.conftest import DEFAULT_CHECK_OUTSIDE
+from tests.conftest import DEFAULT_CHECK_OUTSIDE, STANDING_APPROVAL
 
 DEFAULT_LEAD = [
     "claude", "-p", "--output-format", "stream-json", "--verbose",
@@ -463,3 +463,148 @@ def test_research_command_of_the_wrong_type_raises_config_error(
     assert _load_ok(_toml(tmp_path, 'research_command = ["r"]\n'), {}).research_command == ["r"]
     with pytest.raises(ConfigError):
         load_config(_toml(tmp_path, 'research_command = "my-research"\n'), {})
+
+
+# The ladder keys (design: relay-ladder-design.md, Modules `relay/config.py` (extended);
+# Order 4).
+
+ARCHITECT_TAIL = ["--agent", "architect"]
+LADDER_KEYS = (
+    'design_command = ["my-architect", "-p"]\n'
+    "section_dollar_cap = 12.5\n"
+    'design_approval = "Approved, in my own words."\n'
+)
+
+
+# Behavior 2: __post_init__ and load_config as research_command's is.
+
+
+def test_design_command_defaults_to_the_file_lead_command_plus_architect_unless_the_file_names_one(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _load_ok(_toml(tmp_path, ""), {}).design_command == DEFAULT_LEAD + ARCHITECT_TAIL
+    cfg = _load_ok(_toml(tmp_path, 'lead_command = ["my-claude", "-p"]\n'), {})
+    assert cfg.design_command == ["my-claude", "-p", "--agent", "architect"]
+    path = _toml(tmp_path, 'lead_command = ["my-claude"]\ndesign_command = ["my-architect"]\n')
+    assert _load_ok(path, {}).design_command == ["my-architect"]
+
+
+def test_design_command_defaults_to_an_overridden_lead_command_plus_architect_unless_one_is_given(
+    tmp_path: Path, home: Path
+) -> None:
+    path = _toml(tmp_path, 'lead_command = ["my-claude", "-p"]\n')
+    cfg = _load_ok(path, {"lead_command": ["cli-claude"]})
+    assert cfg.design_command == ["cli-claude", "--agent", "architect"]
+    cfg = _load_ok(path, {"lead_command": ["cli-claude"], "design_command": ["cli-architect"]})
+    assert cfg.design_command == ["cli-architect"]
+
+
+def test_config_built_directly_defaults_only_a_design_command_it_was_not_given(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _direct().design_command == ["my-claude", "-p", "--agent", "architect"]
+    assert _direct(lead_command=["cli-claude"]).design_command == [
+        "cli-claude",
+        "--agent",
+        "architect",
+    ]
+    assert _direct(design_command=["mine"]).design_command == ["mine"]
+    # load_config builds its Config the same way: a design_command it reads is kept as given.
+    path = _toml(tmp_path, 'design_command = ["mine"]\n')
+    assert _load_ok(path, {}).design_command == ["mine"]
+
+
+def test_design_command_of_the_wrong_type_raises_config_error(tmp_path: Path, home: Path) -> None:
+    assert _load_ok(_toml(tmp_path, 'design_command = ["a"]\n'), {}).design_command == ["a"]
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, 'design_command = "my-architect"\n'), {})
+
+
+# Behavior 3: positive; None is no cap.
+
+
+def test_section_dollar_cap_is_none_by_default_and_a_positive_one_is_loaded(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _direct().section_dollar_cap is None
+    assert _load_ok(_toml(tmp_path, ""), {}).section_dollar_cap is None
+    path = _toml(tmp_path, "section_dollar_cap = 0.25\n")
+    assert _load_ok(path, {}).section_dollar_cap == 0.25
+
+
+def test_a_positive_section_dollar_cap_override_is_loaded(tmp_path: Path, home: Path) -> None:
+    path = _toml(tmp_path, "")
+    assert _load_ok(path, {"section_dollar_cap": 40.0}).section_dollar_cap == 40.0
+
+
+@pytest.mark.parametrize("value", ["0.0", "-1.5", '"many"'])
+def test_a_section_dollar_cap_in_the_file_that_is_not_positive_raises_config_error(
+    tmp_path: Path, home: Path, value: str
+) -> None:
+    assert _load_ok(_toml(tmp_path, "section_dollar_cap = 2.5\n"), {}).section_dollar_cap == 2.5
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, f"section_dollar_cap = {value}\n"), {})
+
+
+@pytest.mark.parametrize("value", [0.0, -1.5, "many"])
+def test_a_section_dollar_cap_override_that_is_not_positive_raises_config_error(
+    tmp_path: Path, home: Path, value: object
+) -> None:
+    path = _toml(tmp_path, "")
+    assert _load_ok(path, {"section_dollar_cap": 2.5}).section_dollar_cap == 2.5
+    with pytest.raises(ConfigError):
+        load_config(path, {"section_dollar_cap": value})
+
+
+# Behavior 4: the owner's words Relay quotes on the architect's approve: line.
+
+
+def test_design_approval_defaults_to_the_owners_standing_words(tmp_path: Path, home: Path) -> None:
+    assert _direct().design_approval == STANDING_APPROVAL
+    assert _load_ok(_toml(tmp_path, ""), {}).design_approval == STANDING_APPROVAL
+    path = _toml(tmp_path, 'design_approval = "Approved."\n')
+    assert _load_ok(path, {}).design_approval == "Approved."
+
+
+def test_design_approval_of_the_wrong_type_raises_config_error(tmp_path: Path, home: Path) -> None:
+    assert _load_ok(_toml(tmp_path, 'design_approval = "Yes."\n'), {}).design_approval == "Yes."
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, "design_approval = 5\n"), {})
+
+
+# Behavior 5: All three keys join `_KEYS`.
+
+
+def test_all_three_ladder_keys_are_read_from_the_file(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(_toml(tmp_path, LADDER_KEYS), {})
+    assert cfg.design_command == ["my-architect", "-p"]
+    assert cfg.section_dollar_cap == 12.5
+    assert cfg.design_approval == "Approved, in my own words."
+
+
+def test_all_three_ladder_keys_take_overrides_over_the_file(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(
+        _toml(tmp_path, LADDER_KEYS),
+        {"design_command": ["other-architect"], "section_dollar_cap": 3.0, "design_approval": "Go."},
+    )
+    assert cfg.design_command == ["other-architect"]
+    assert cfg.section_dollar_cap == 3.0
+    assert cfg.design_approval == "Go."
+
+
+def test_ladder_overrides_apply_over_an_empty_file(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(
+        _toml(tmp_path, ""),
+        {"design_command": ["other-architect"], "section_dollar_cap": 3.0, "design_approval": "Go."},
+    )
+    assert cfg.design_command == ["other-architect"]
+    assert cfg.section_dollar_cap == 3.0
+    assert cfg.design_approval == "Go."
+
+
+def test_ladder_keys_leave_the_other_keys_alone(tmp_path: Path, home: Path) -> None:
+    cfg = _load_ok(_toml(tmp_path, LADDER_KEYS + "poll_seconds = 4.0\n"), {})
+    assert cfg.poll_seconds == 4.0
+    assert cfg.lead_command == DEFAULT_LEAD
+    assert cfg.research_command == DEFAULT_LEAD + RESEARCH_TAIL
+    assert cfg.section_dollar_cap == 12.5

@@ -414,3 +414,90 @@ def test_neither_head_nor_changed_raises_on_any_git_failure(tmp_path: Path) -> N
     for cwd in (plain, tmp_path / "missing"):
         assert relay.git.head(cwd) is None
         assert relay.git.changed(cwd, "not-a-commit", ("a.txt",)) is None
+
+
+# The ladder design's git query (design: relay-ladder-design.md, Modules `relay/git.py`
+# (extended); Order 4). The repositories come from the `git_repo` fixture in `tests/conftest.py`.
+# Behavior 6: `git status --porcelain` in `cwd`: True on exit 0 with no output, False with
+# output, None when git fails.
+
+
+def test_clean_is_true_for_a_worktree_with_nothing_to_report(git_repo: GitRepo) -> None:
+    _tracked(git_repo, {"a.txt": "a\n"})
+    assert relay.git.clean(git_repo.root) is True
+    assert relay.git.clean(git_repo.worktrees["s1"]) is True
+
+
+def test_clean_is_false_for_an_edited_tracked_file(git_repo: GitRepo) -> None:
+    _tracked(git_repo, {"a.txt": "a\n"})
+    (git_repo.root / "a.txt").write_text("a edited\n")
+    assert relay.git.clean(git_repo.root) is False
+
+
+def test_clean_is_false_for_an_untracked_file(git_repo: GitRepo) -> None:
+    (git_repo.root / "new.txt").write_text("new\n")
+    assert relay.git.clean(git_repo.root) is False
+
+
+def test_clean_is_false_for_a_staged_change(git_repo: GitRepo) -> None:
+    (git_repo.root / "staged.txt").write_text("staged\n")
+    git_repo.git("add", "staged.txt")
+    assert relay.git.clean(git_repo.root) is False
+
+
+def test_clean_is_taken_in_cwd_so_each_worktree_answers_for_itself(git_repo: GitRepo) -> None:
+    (git_repo.worktrees["s1"] / "dirty.txt").write_text("dirty\n")
+    assert relay.git.clean(git_repo.worktrees["s1"]) is False
+    assert relay.git.clean(git_repo.root) is True
+
+
+def test_clean_runs_git_status_porcelain_in_cwd_through_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _fake_capture(monkeypatch, (0, ""))
+    assert relay.git.clean(tmp_path) is True
+    assert len(calls) == 1
+    argv, cwd, _timeout = calls[0]
+    assert argv == ["git", "status", "--porcelain"]
+    assert cwd == tmp_path
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ((0, ""), True),
+        ((0, " M a.txt\n"), False),
+        ((0, "?? new.txt\nA  staged.txt\n"), False),
+    ],
+    ids=["exit-0-no-output", "exit-0-one-line", "exit-0-two-lines"],
+)
+def test_clean_reads_exit_0_output_from_the_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, answer: tuple[int, str], expected: bool
+) -> None:
+    _fake_capture(monkeypatch, answer)
+    assert relay.git.clean(tmp_path) is expected
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [(128, ""), (None, ""), (128, " M a.txt\n"), (1, "")],
+    ids=["git-error", "oserror-or-timeout", "git-error-printing-a-line", "exit-1-no-output"],
+)
+def test_clean_is_none_when_the_capture_fails(
+    monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo, answer: tuple[int | None, str]
+) -> None:
+    calls = _fake_capture(monkeypatch, answer)
+    # The real main checkout is clean, so only the capture's answer can give None.
+    assert relay.git.clean(git_repo.root) is None
+    assert calls
+    assert all(argv[0] == "git" and cwd == git_repo.root for argv, cwd, _t in calls)
+
+
+def test_clean_is_none_outside_a_repository(tmp_path: Path) -> None:
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert relay.git.clean(plain) is None
+
+
+def test_clean_is_none_on_a_directory_that_does_not_exist(tmp_path: Path) -> None:
+    assert relay.git.clean(tmp_path / "missing") is None
