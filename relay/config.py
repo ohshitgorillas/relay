@@ -115,6 +115,15 @@ def _number(merged: dict[str, object], key: str, default: float | None) -> float
     return value
 
 
+def _string(merged: dict[str, object], key: str, default: str | None) -> str | None:
+    value = merged.get(key, default)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"config value {key!r} must be a non-empty string: {value!r}")
+    return value
+
+
 def _command(merged: dict[str, object], key: str, default: list[str]) -> list[str]:
     value = merged.get(key, default)
     if not isinstance(value, list) or not value or not all(isinstance(v, str) for v in value):
@@ -169,21 +178,17 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     assert poll_seconds is not None
     lead_command = _command(merged, "lead_command", list(_DEFAULT_LEAD))
 
-    state_value = merged.get("state_root")
-    if state_value is None:
-        state_root = home / ".local" / "state" / "relay"
-    elif isinstance(state_value, str) and state_value.strip():
-        state_root = Path(state_value).expanduser()
-    else:
-        raise ConfigError(f"config value 'state_root' must be a non-empty string: {state_value!r}")
+    state_value = _string(merged, "state_root", None)
+    state_root = (
+        home / ".local" / "state" / "relay" if state_value is None else Path(state_value).expanduser()
+    )
 
     map_max_lines = _int(merged, "map_max_lines", Config.map_max_lines)
     map_max_chars = _int(merged, "map_max_chars", Config.map_max_chars)
     assert map_max_lines is not None and map_max_chars is not None
 
-    approval = merged.get("design_approval", _STANDING_APPROVAL)
-    if not isinstance(approval, str) or not approval.strip():
-        raise ConfigError(f"config value 'design_approval' must be a non-empty string: {approval!r}")
+    approval = _string(merged, "design_approval", _STANDING_APPROVAL)
+    assert approval is not None
 
     cfg = Config(
         token_budget=_int(merged, "token_budget", None),
