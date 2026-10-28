@@ -376,6 +376,12 @@ def test_unreadable_is_empty_for_a_clean_ledger(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "ledger.jsonl")
     ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
     ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.25))
+    # Hand-written lines the recovery list calls readable, in shapes `append` itself may not write:
+    # integer `dollars`, float `tokens`, integer `time`, and an object with no keys but the three.
+    now = time.time()
+    _raw(tmp_path / "ledger.jsonl", json.dumps({"time": now, "tokens": 5, "dollars": 1}) + "\n")
+    _raw(tmp_path / "ledger.jsonl", json.dumps({"time": now, "tokens": 2.5, "dollars": 0.125}) + "\n")
+    _raw(tmp_path / "ledger.jsonl", json.dumps({"time": int(now), "tokens": 1, "dollars": 0}) + "\n")
     assert ledger.unreadable() == []
 
 
@@ -402,6 +408,9 @@ def test_unreadable_keeps_a_closed_off_torn_line_at_its_number(tmp_path: Path) -
     _raw(path, '{"time": 1, "tokens": 9')
     ledger.append("lead", "s1", "sess-b", Spend(tokens=7, dollars=0.25))
     ledger.append("recut", "s1", None, Spend(tokens=3, dollars=0.125))
+    # The `sess-b` entry starts a line of its own after the torn one, so it is counted.
+    assert len(path.read_text().splitlines()) == 4
+    assert _call(Ledger(path).total, None) == Spend(tokens=50, dollars=0.875)
     assert Ledger(path).unreadable() == [2]
 
 
