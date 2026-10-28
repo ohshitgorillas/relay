@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "session_id": "sess-research-1", "cwd": "/work", "model": "claude-opus", "tools": ["Read", "Grep", "Glob", "Agent"]}
+{"type": "assistant", "message": {"id": "msg_c1", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Looking up the follow-up."}], "usage": {"input_tokens": 3, "cache_creation_input_tokens": 1200, "cache_read_input_tokens": 5000, "output_tokens": 40}}, "session_id": "sess-research-1"}

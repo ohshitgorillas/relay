@@ -18,6 +18,7 @@ from relay.config import Config
 from relay.errors import ExitCode, LockedError, QueueFormatError, RelayError
 from relay.ledger import Ledger, Spend
 from relay.state import State
+from tests.conftest import _GIT, GitRepo
 
 QUEUE = "workboard-queue.md"
 DAY = 24 * 60 * 60
@@ -478,7 +479,8 @@ ASK_ANSWER = (
 )
 ASK_CONTEXT = 3 + 1200 + 5000  # the ask stream's one assistant message's context
 ASK_SPEND = Spend(tokens=3 + 1200 + 5000 + 40, dollars=0.125)
-NO_ANSWER_STREAM = "stream-error.jsonl"  # a result with no ANSWER block
+# Session "sess-research-1", a successful result (is_error false) whose text holds no ANSWER block.
+NO_ANSWER_STREAM = "stream-ask-no-answer.jsonl"
 ASK_SID = "s2"
 QUESTION = "Where does the ask command resume the researcher?"
 
@@ -496,10 +498,50 @@ sys.exit(code)
 """
 
 
-def _ask_config(home: Path, cfg: Config, record: Path, exit_code: int = 0, **overrides: int) -> None:
+# Two phases of one ask run whose context climbs, both in session "sess-research-1": the first an
+# init and one message at CLIMB_FLAG_CONTEXT, the second one message at CLIMB_PAST_CONTEXT and a
+# successful result holding ASK_ANSWER's block.
+CLIMB_FLAG_STREAM = "stream-ask-climb-flag.jsonl"
+CLIMB_PAST_STREAM = "stream-ask-climb-past.jsonl"
+CLIMB_FLAG_CONTEXT = 3 + 1200 + 5000
+CLIMB_PAST_CONTEXT = 3 + 1200 + 8000
+
+# A research command that records its run as `_ASK_SHIM` does (argv after its own six arguments),
+# runs the fake `claude` on the first stream, waits for the flag file, makes an empty commit with
+# the given git argv, then runs the fake on the second stream.
+_ASK_CLIMB_SHIM = """\
+import json, os, subprocess, sys, time
+record, fake, flag, first, second = sys.argv[1:6]
+git = json.loads(sys.argv[6])
+prompt = sys.stdin.read()
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[7:], "prompt": prompt}) + chr(10))
+def emit(stream):
+    sys.stdout.flush()
+    env = dict(os.environ, RELAY_FAKE_SCENARIO=stream)
+    subprocess.run([fake], input="", text=True, env=env, check=True)
+emit(first)
+end = time.time() + 10
+while time.time() < end and not os.path.exists(flag):
+    time.sleep(0.02)
+time.sleep(0.2)
+subprocess.run([*git, "commit", "--allow-empty", "-q", "-m", "ask step"], stdin=subprocess.DEVNULL, check=True)
+emit(second)
+"""
+
+
+def _ask_config(
+    home: Path,
+    cfg: Config,
+    record: Path,
+    exit_code: int = 0,
+    research: list[str] | None = None,
+    **overrides: int,
+) -> None:
     """Rewrite the fake home's config file with `cfg`'s values, `overrides` on top, and a
-    research command that records each run to `record` and exits `exit_code`."""
-    research = [sys.executable, "-c", _ASK_SHIM, str(record), cfg.lead_command[0], str(exit_code)]
+    research command that records each run to `record` and exits `exit_code` (or `research`)."""
+    if research is None:
+        research = [sys.executable, "-c", _ASK_SHIM, str(record), cfg.lead_command[0], str(exit_code)]
     values: dict[str, object] = {
         "context_limit": cfg.context_limit,
         "hard_ceiling": cfg.hard_ceiling,
@@ -643,21 +685,62 @@ def test_ask_whose_run_exits_non_zero_exits_1_and_prints_no_answer(
     assert capsys.readouterr().out == ""
 
 
+@pytest.fixture
+def repo_queue(
+    asked: Path, queue: Path, fake_cfg: Config, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The queue copied into `git_repo`'s main checkout, the git top level its runs take as cwd,
+    with s2's researcher session set as `asked` sets it; the test's cwd is that checkout."""
+    path = git_repo.root / queue.name
+    path.write_bytes(queue.read_bytes())
+    State.open(path, fake_cfg).set_research_session(ASK_SID, ASK_SESSION)
+    monkeypatch.chdir(git_repo.root)
+    return path
+
+
+def _climbing_ask(queue: Path, cfg: Config, record: Path, git: list[str]) -> list[str]:
+    """A research command running `_ASK_CLIMB_SHIM` on the two climbing streams, waiting for the
+    queue's research flag for s2, then committing with `git`."""
+    return [
+        sys.executable,
+        "-c",
+        _ASK_CLIMB_SHIM,
+        str(record),
+        cfg.lead_command[0],
+        str(State.open(queue, cfg).research_flag(ASK_SID)),
+        str(FIXTURES_DIR / CLIMB_FLAG_STREAM),
+        str(FIXTURES_DIR / CLIMB_PAST_STREAM),
+        json.dumps(git),
+    ]
+
+
 def test_ask_whose_run_is_killed_at_the_hard_ceiling_exits_1_and_prints_no_answer(
-    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: the context ceilings do not watch an ask run, or a killed run's answer is used.
+    # Breaks when: the hard ceiling does not watch an ask run, or a killed run's answer is used.
+    # The run commits after the retire flag goes up, so the idle ceiling cannot kill it; without
+    # the hard-ceiling kill it runs on to its answer and exits 0.
+    queue = repo_queue
+    research = _climbing_ask(queue, fake_cfg, asked, [*_GIT, "-C", str(git_repo.root)])
     _ask_config(
         home,
         fake_cfg,
         asked,
-        context_limit=ASK_CONTEXT - 200,
-        idle_ceiling=ASK_CONTEXT - 100,
-        hard_ceiling=ASK_CONTEXT,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT,
     )
+    first = git_repo.rev("main")
     assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
     assert len(_asks(asked)) == 1
     assert capsys.readouterr().out == ""
+    assert git_repo.rev("main") != first
 
 
 def test_ask_whose_result_holds_no_answer_exits_1(
@@ -667,6 +750,7 @@ def test_ask_whose_result_holds_no_answer_exits_1(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: a result with no ANSWER block exits 0, or prints its prose as the answer.
+    # The result is a success (is_error false), so the run itself does not fail.
     scenario((FIXTURES_DIR / NO_ANSWER_STREAM).read_text().splitlines())
     assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
     assert len(_asks(asked)) == 1
