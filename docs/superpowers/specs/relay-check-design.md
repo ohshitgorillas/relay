@@ -9,13 +9,13 @@ Relay takes a lead's `DONE` on its word: `relay/loop.py:119-120` marks the secti
 Copies and gaps this design closes:
 
 - **Parking a section with a ping**: two copies of the same three calls, `state.park`, `ping.needs_owner`, `progress.needs_answer`, at `relay/loop.py:124-126` and `relay/loop.py:131-133`. This design adds three more parks (a check failing outside the code, a third failed check, a nested recut id), so the copy moves to one helper first.
-- **Failure limits**: one limit, `FAILURE_LIMIT = 2` at `relay/state.py:19`, read at `relay/loop.py:176` and `relay/progress.py:107`. A second failure of any kind stops the whole run (`relay/loop.py:117-118`, `relay/loop.py:179-180`), so a three-failed-checks rule needs its own count beside it.
-- **Retire and kill**: one decision point, the watcher at `relay/loop.py:153-168`, which sets the retire flag at `context_limit` and kills at `hard_ceiling`. The defaults are 100k and 2 × 100k (`relay/config.py:90-92`). The lead is told to look for the flag only "after a step's commit" (`relay/prompts.py:30-31`). A kill counts as a failure (`relay/loop.py:113`).
-- **Process running**: `relay/runner.py:72-154` is the one place a child starts, and it has no timeout and no captured-output mode. `relay/ping.py:15` is the one allowed exception. Relay runs no `git` command today: it finds the repository by walking up for `.git` (`relay/loop.py:23-29`) and runs every lead and recut there (`relay/loop.py:50`).
-- **Section worktrees**: the queue carries no worktree field (`relay/queue.py:51-58` reads only `depends:` and `done` from a header). Leads put each section on its own worktree, branch `lead/<id>`: `git worktree list` shows `/Users/atom/dev/relay-wt/s1` on `lead/s1` through `relay-wt/s8` on `lead/s8`.
+- **Failure limits**: one limit, `FAILURE_LIMIT = 2` at `relay/state.py:19`, read at `relay/loop.py:176` and `relay/progress.py:110`. A second failure of any kind stops the whole run (`relay/loop.py:117-118`, `relay/loop.py:179-180`), so a three-failed-checks rule needs its own count beside it.
+- **Retire and kill**: one decision point, the watcher at `relay/loop.py:153-168`, which sets the retire flag at `context_limit` and kills at `hard_ceiling`. The defaults are 100k and 2 × 100k (`relay/config.py:128-130`). The lead is told to look for the flag only "after a step's commit" (`relay/prompts.py:40`). A kill counts as a failure (`relay/loop.py:113`).
+- **Process running**: `relay/runner.py:85-152` is the one place a child starts, and it has no timeout and no captured-output mode. `relay/ping.py:15` is the one allowed exception. Relay runs no `git` command today: it finds the repository by walking up for `.git` (`relay/loop.py:23-29`) and runs every lead and recut there (`relay/loop.py:50`).
+- **Section worktrees**: the queue carries no worktree field (`relay/queue.py:63-74` reads only `depends:`, `from:` and `done` from a header). Leads put each section on its own worktree, branch `lead/<id>`: `git worktree list` shows `/Users/atom/dev/relay-wt/s1` on `lead/s1` through `relay-wt/s8` on `lead/s8`.
 - **Recut ids**: `relay/loop.py:208-212` marks a kept id and each new id `from_recut`. Nothing checks how new ids are named, and the queue already carries nested ids from earlier recuts (`docs/queue.md:29` `s1.2.1`, `docs/queue.md:217` `s8.1.1`).
-- **Effort**: Relay sets no effort. `relay/config.py:9-12` launches leads with no effort or model flag, so the effort rule lives in `lead.md` alone.
-- **Ledger kinds**: `relay/ledger.py:42` takes only `"lead"` and `"recut"`. `_parse` at `relay/ledger.py:22-33` needs `time`, `tokens` and `dollars` on every line.
+- **Effort**: Relay sets no effort. `relay/config.py:10-13` launches leads with no effort or model flag, so the effort rule lives in `lead.md` alone.
+- **Ledger kinds**: `relay/ledger.py:45` takes only `"lead"` and `"recut"`. `_parse` at `relay/ledger.py:25-36` needs `time`, `tokens` and `dollars` on every line.
 
 Nothing from Baley is installed or copied.
 
@@ -45,12 +45,18 @@ class CheckResult:
     tail: str                # the end of that command's output, TAIL_LINES / TAIL_CHARS
     log: Path | None         # the check log; None when none ran
     verdict: Verdict
+    timeout: float | None = None  # the seconds limit the failing command ran under
+                                  # (cfg.check_timeout) when it timed out; None when none timed out
+
+    def __post_init__(self) -> None:
+        """ValueError when timed_out is true and timeout is None."""
 
 
 def run_checks(cfg: Config, section: Section, cwd: Path, log: Path) -> CheckResult:
     """Run each of section.checks in order in `cwd` through runner.run_command, appending all
-    output to `log`, and stop at the first non-zero exit. verdict "none" when section.checks is
-    empty; "pass" when all exit 0; otherwise classify() of the failing command."""
+    output to `log`, and stop at the first non-zero exit or timeout. verdict "none" when
+    section.checks is empty; "pass" when all exit 0; otherwise classify() of the failing
+    command. timeout is cfg.check_timeout on a timed-out command and None on every other result."""
 
 
 def classify(cfg: Config, exit_code: int | None, timed_out: bool, tail: str) -> Literal["fail", "outside"]:
@@ -58,10 +64,17 @@ def classify(cfg: Config, exit_code: int | None, timed_out: bool, tail: str) -> 
     (re.search); "fail" otherwise. A timeout with no pattern match is "fail"."""
 
 
+def outcome_text(result: CheckResult) -> str:
+    """The one wording of how a check ended: "timed out after <s>s" (s is result.timeout, %g)
+    when result.timed_out, else "exit <n>"."""
+
+
 def owner_text(result: CheckResult, failures: int) -> str:
-    """The question parked for the owner and pinged: the command, "exit <n>" or "timed out after
-    <s>s", the failure count when verdict is "fail", the log path, then the tail."""
+    """The question parked for the owner and pinged: the command, outcome_text(result), the
+    failure count when verdict is "fail", the log path, then the tail."""
 ```
+
+`outcome_text` is the only wording of a check's ending. `owner_text`, `prompts.check_feedback` and `progress.check_finished` call it; `relay/prompts.py` and `relay/progress.py` import it from `relay.check` at run time.
 
 It replaces nothing. Checks have never run in Relay.
 
@@ -162,14 +175,30 @@ def append_check(self, section: str, result: "CheckResult") -> None:
 ### `relay/config.py` (extended): three keys
 
 ```python
+def _default_idle_ceiling(context_limit: int, hard_ceiling: int) -> int:
+    """min(context_limit * 13 // 10, hard_ceiling - 1): the one idle-ceiling default."""
+
+
 @dataclass(frozen=True)
 class Config:
-    ...                       # existing fields, in their order
-    idle_ceiling: int         # default context_limit * 13 // 10 (130_000 at the default);
-                              # ConfigError unless context_limit < idle_ceiling < hard_ceiling
-    check_timeout: float      # seconds per check command; default 1800
-    check_outside: list[str]  # regexes; default below; ConfigError on a pattern re.compile rejects
+    ...                         # existing fields, in their order
+    idle_ceiling: int = 0       # always an int; 0 means unset
+    check_timeout: float = 1800 # seconds per check command
+    check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
+
+    def __post_init__(self) -> None:
+        """When idle_ceiling is 0, set it to _default_idle_ceiling(context_limit, hard_ceiling).
+        No range check: a Config built in code is not range-checked."""
+
+
+def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
+    """As now. An unset idle_ceiling reaches Config as 0 (a set one is a positive int, as _int
+    requires). After the Config is built, ConfigError unless
+    context_limit < cfg.idle_ceiling < hard_ceiling; load_config is the only range check.
+    ConfigError on a check_outside pattern re.compile rejects."""
 ```
+
+With context_limit 100000 and hard_ceiling 120000 and no idle_ceiling, idle_ceiling is 119999 and the config loads. At the defaults (100000, 200000) it is 130000.
 
 Default `check_outside`: `command not found`, `(?i)credit balance`, `(?i)api[ _-]?key`, `(?i)could not resolve host`, `(?i)name resolution`, `(?i)network is unreachable`, `(?i)connection (refused|reset|timed out)`. All three keys join `_KEYS`. `relay go` gains `--idle-ceiling`.
 
@@ -181,14 +210,14 @@ def lead_prompt(queue, section, resume, answer, retire_flag, check_feedback: str
     and it failed. Fix the section and end with DONE again:" and the feedback verbatim."""
 
 def check_feedback(result: "CheckResult") -> str:
-    """The command, "exit <n>" or "timed out", the log path and the tail, for the lead."""
+    """The command, check.outcome_text(result), the log path and the tail, for the lead."""
 ```
 
 ### `relay/progress.py` (extended)
 
 ```python
 def check_started(sid: str, command_count: int, cwd: Path) -> None: ...   # "check <sid>: running <n> check(s) in <cwd>"
-def check_finished(sid: str, result: CheckResult) -> None: ...            # "check <sid>: passed" | "failed: exit <n>" | "timed out" | "outside the code: exit <n>" | "none to run"
+def check_finished(sid: str, result: CheckResult) -> None: ...            # "check <sid>: passed" | "failed: <outcome_text>" | "<outcome_text>" on a timeout | "outside the code: <outcome_text>" | "none to run"
 def check_failed(sid: str, failures: int) -> None: ...                    # "section <sid>: check failed (<n> of 3)"
 def retired_idle(sid: str, tokens: int) -> None: ...                      # "lead <sid>: retired at <tokens> context tokens, no commit since the retire flag"
 ```
@@ -234,13 +263,13 @@ def _verify(cfg, queue, state, ledger, cwd, section, run_log: Path) -> None:
 
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
-| Choosing, running and judging a section's checks; the outside-the-code rule; the owner's check text | `relay/check.py` | running a check, matching `check_outside` or reading an exit code as pass or fail in any other module |
+| Choosing, running and judging a section's checks; the outside-the-code rule; the owner's check text; how a check ended (`outcome_text`) | `relay/check.py` | running a check, matching `check_outside` or reading an exit code as pass or fail in any other module; wording a check's exit or timeout ("exit <n>", "timed out ...") anywhere but `outcome_text` |
 | Git queries: section worktree, branch heads | `relay/git.py` | a `git` argv anywhere else; finding a worktree by path convention |
 | Child processes, timeouts, output capture | `relay/runner.py` | `subprocess`, `os.kill`, `signal` elsewhere (`ping.py:15` keeps its one call) |
 | `check:` / `done-check:` lines and the `from:` note | `relay/queue.py` | regex-matching a section body for check lines anywhere else |
 | Check count, feedback, pending flag, check log path | `relay/state.py` | `CHECK_LIMIT` written elsewhere; a path joined onto `run_dir` elsewhere |
 | Check lines in the ledger | `relay/ledger.py` (`append_check`) | writing a check result to `ledger.jsonl` anywhere else |
-| Idle ceiling, check timeout, outside patterns, and their defaults | `relay/config.py` | a 130k, a timeout or a pattern literal anywhere else |
+| Idle ceiling, check timeout, outside patterns, and their defaults; the idle-ceiling default (`_default_idle_ceiling`) and its range check (`load_config`) | `relay/config.py` | a 130k, a 13/10, a timeout or a pattern literal anywhere else; a second idle-ceiling default; a range check in `Config.__post_init__` or outside `load_config` |
 | Parking with a ping | `relay/loop.py` `_park` | `state.park` called anywhere but `_park`; replaces `relay/loop.py:124-126` and `relay/loop.py:131-133` |
 | Retire, idle retire and kill | `relay/loop.py` `_watcher` | a retire or kill verdict decided anywhere else |
 | Check text for the lead | `relay/prompts.py` | lead-facing check wording in `loop.py` or `check.py` |
