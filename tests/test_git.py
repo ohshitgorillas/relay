@@ -41,6 +41,16 @@ FOR_EACH_REF = (
     "refs/heads/main 1111111111111111111111111111111111111111\n"
 )
 
+# What git may still print before exiting non-zero: a worktree on lead/s1 and its head, so
+# an implementation that parses stdout whatever the exit status finds a worktree and heads.
+S1_PORCELAIN = (
+    "worktree /nowhere/wt-s1\n"
+    "HEAD 5555555555555555555555555555555555555555\n"
+    "branch refs/heads/lead/s1\n"
+    "\n"
+)
+S1_FOR_EACH_REF = "refs/heads/lead/s1 5555555555555555555555555555555555555555\n"
+
 
 def _fake_capture(
     monkeypatch: pytest.MonkeyPatch, answer: tuple[int | None, str]
@@ -170,7 +180,23 @@ def test_heads_is_the_same_run_in_any_worktree(git_repo: GitRepo) -> None:
 # Behavior 8: Both run git through `runner.capture`. Neither raises on a git failure.
 
 
-@pytest.mark.parametrize("answer", [(128, ""), (None, "")], ids=["git-error", "oserror-or-timeout"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (128, ""),
+        (None, ""),
+        (128, S1_PORCELAIN),
+        (1, S1_FOR_EACH_REF),
+        (128, S1_PORCELAIN + S1_FOR_EACH_REF),
+    ],
+    ids=[
+        "git-error",
+        "oserror-or-timeout",
+        "git-error-printing-a-worktree",
+        "git-error-printing-a-head",
+        "git-error-printing-both",
+    ],
+)
 def test_a_failed_capture_gives_none_and_empty_heads(
     monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo, answer: tuple[int | None, str]
 ) -> None:

@@ -137,9 +137,6 @@ def run_agent(
                 else:
                     exit_code = proc.wait()
                     _kill_and_reap(proc)  # sweep stragglers in the group
-            except BaseException:
-                _kill_and_reap(proc)
-                raise
             finally:
                 if proc.stdout is not None:
                     proc.stdout.close()
@@ -151,7 +148,10 @@ def run_agent(
 
 @contextmanager
 def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
-    """While active, SIGINT/SIGTERM kill the live child's group first, then re-raise the signal."""
+    """While active, SIGINT/SIGTERM kill the live child's group first, then re-raise the signal.
+
+    An exception leaving the block also kills and reaps the live child's group.
+    """
     previous: dict[int, object] = {}
 
     def on_signal(signum: int, _frame: object) -> None:
@@ -165,6 +165,10 @@ def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
             previous[signum] = signal.signal(signum, on_signal)
     try:
         yield
+    except BaseException:
+        if live:
+            _kill_and_reap(live[0])
+        raise
     finally:
         live.clear()
         for signum, handler in previous.items():
@@ -185,15 +189,11 @@ def run_command(command: str, cwd: Path, log: Path, timeout: float) -> CommandRe
         )
         live.append(proc)
         try:
-            try:
-                exit_code: int | None = proc.wait(timeout=timeout)
-                timed_out = False
-            except subprocess.TimeoutExpired:
-                exit_code, timed_out = None, True
-            _kill_and_reap(proc)  # the group dies with the shell, or at the timeout
-        except BaseException:
-            _kill_and_reap(proc)
-            raise
+            exit_code: int | None = proc.wait(timeout=timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            exit_code, timed_out = None, True
+        _kill_and_reap(proc)  # the group dies with the shell, or at the timeout
     return CommandResult(exit_code=exit_code, timed_out=timed_out)
 
 
@@ -221,7 +221,7 @@ def capture(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str
             except subprocess.TimeoutExpired:
                 result = (None, "")
             _kill_and_reap(proc)
-        except BaseException:
-            _kill_and_reap(proc)
-            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
     return result
