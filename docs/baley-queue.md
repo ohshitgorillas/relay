@@ -1,14 +1,14 @@
 design docs/superpowers/specs/relay-check-design.md | order docs/superpowers/specs/relay-check-design.md | main 6566796
-section s1 | lead | steps: 1, 2, 3, 4 | size: lead: tokens: 1136706.6 seconds: 687.7 overruns: 0 refusals: 0
-  s1.d1 | builder | steps: 1 | writes: relay/runner.py, relay/git.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d1
+section s1 | lead | steps: 1, 2, 3, 4, 5, 6 | size: lead: tokens: 1141064.1 seconds: 687.3 overruns: 0 refusals: 0
+  s1.d1 | builder | steps: 1 | writes: relay/runner.py, relay/git.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d1
     stub
     design: docs/superpowers/specs/relay-check-design.md
     step: every new signature above, raise-only. New fields go in with their defaults.
     paths: relay/runner.py, relay/git.py
     check: uv run python -c 'import relay.runner, relay.git'
-  s1.d2 | test-writer | steps: 2, 3 | writes: tests/test_runner.py, tests/test_git.py, tests/conftest.py | size: test-writer: tokens: 615500.8 seconds: 188.7 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d2
+  s1.d2 | test-writer | steps: 2, 3 | writes: tests/test_runner.py, tests/test_git.py, tests/conftest.py | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d2
     red
     design: docs/superpowers/specs/relay-check-design.md Order steps 2, 3
     behavior: Run `/bin/sh -c command` in its own session in `cwd`, stdout and stderr both appended to
@@ -19,67 +19,71 @@ section s1 | lead | steps: 1, 2, 3, 4 | size: lead: tokens: 1136706.6 seconds: 6
     view: stubgen .pyi of relay/runner.py
     behavior: Run argv in `cwd`, return (exit code, stdout)
     view: stubgen .pyi of relay/runner.py
+    behavior: the group killed and reaped.
+    view: stubgen .pyi of relay/runner.py
     behavior: The worktree `git worktree list --porcelain` (run in `repo`) shows on branch
     view: stubgen .pyi of relay/git.py
-    behavior: {ref: object} from `git for-each-ref --format=%(refname) %(objectname) refs/heads` in
+    behavior: from `git for-each-ref --format=%(refname) %(objectname) refs/heads` in
     view: stubgen .pyi of relay/git.py
     behavior: Covers every worktree's branch, since worktrees share refs.
     view: stubgen .pyi of relay/git.py
     behavior: Both run git through `runner.capture`. Neither raises on a git failure.
     view: stubgen .pyi of relay/git.py
     check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_runner.py tests/test_git.py
-  s1.d3 | builder | steps: 4 | writes: relay/runner.py, relay/git.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d3
+  s1.d3 | builder | steps: 4 | writes: relay/runner.py, relay/git.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d3
     design: docs/superpowers/specs/relay-check-design.md
     step: 4. Core: build. `builder` writes `relay/config.py`, `relay/queue.py`, `relay/runner.py`, `relay/git.py`, `relay/state.py`, `relay/ledger.py` and `relay/cli.py` (`--idle-ceiling`).
     paths: relay/runner.py, relay/git.py
     check: uv run python -m pytest tests/test_runner.py tests/test_git.py
-  s1.d4 | builder | steps: 1 | writes: relay/config.py, relay/queue.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d4
+  s1.d4 | builder | steps: 1 | writes: relay/config.py, relay/queue.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d4
     stub
     design: docs/superpowers/specs/relay-check-design.md
     step: every new signature above, raise-only. New fields go in with their defaults.
     paths: relay/config.py, relay/queue.py
     check: uv run python -c 'import relay.config, relay.queue'
-  s1.d5 | test-writer | steps: 2, 3 | writes: tests/test_config.py, tests/test_queue.py, tests/conftest.py, tests/fixtures/check-queue.md | size: test-writer: tokens: 615500.8 seconds: 188.7 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d5
+  s1.d5 | test-writer | steps: 2, 3 | writes: tests/test_config.py, tests/test_queue.py, tests/conftest.py, tests/fixtures/check-queue.md | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d5
     red
     design: docs/superpowers/specs/relay-check-design.md Order steps 2, 3
-    behavior: # ConfigError unless context_limit < idle_ceiling < hard_ceiling
+    behavior: ConfigError unless context_limit < idle_ceiling < hard_ceiling
     view: stubgen .pyi of relay/config.py
     behavior: seconds per check command
     view: stubgen .pyi of relay/config.py
-    behavior: # regexes; default below; ConfigError on a pattern re.compile rejects
+    behavior: regexes; default below; ConfigError on a pattern re.compile rejects
     view: stubgen .pyi of relay/config.py
     behavior: All three keys join `_KEYS`.
     view: stubgen .pyi of relay/config.py
     behavior: each `check:` or `done-check:` line's command, in body order,
     view: stubgen .pyi of relay/queue.py
-    behavior: # leading whitespace allowed, fenced blocks skipped
+    behavior: leading whitespace allowed, fenced blocks skipped
     view: stubgen .pyi of relay/queue.py
     behavior: the header field `from: <id>`, removed from the title
     view: stubgen .pyi of relay/queue.py
     behavior: A `from:` id must match `_ID`. It need not name a section still in the queue.
     view: stubgen .pyi of relay/queue.py
     check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_config.py tests/test_queue.py
-  s1.d6 | builder | steps: 4 | writes: relay/config.py, relay/queue.py, relay/cli.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d6
+  s1.d6 | builder | steps: 4 | writes: relay/config.py, relay/queue.py, relay/cli.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d6
     design: docs/superpowers/specs/relay-check-design.md
     step: 4. Core: build. `builder` writes `relay/config.py`, `relay/queue.py`, `relay/runner.py`, `relay/git.py`, `relay/state.py`, `relay/ledger.py` and `relay/cli.py` (`--idle-ceiling`).
     paths: relay/config.py, relay/queue.py, relay/cli.py
     check: uv run python -m pytest tests/test_config.py tests/test_queue.py
-  s1.d7 | builder | steps: 1 | writes: relay/state.py, relay/ledger.py, relay/check.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d7
+  s1.d7 | builder | steps: 1 | writes: relay/state.py, relay/ledger.py, relay/check.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d7
     stub
     design: docs/superpowers/specs/relay-check-design.md
     step: every new signature above, raise-only. New fields go in with their defaults.
     paths: relay/state.py, relay/ledger.py, relay/check.py
     check: uv run python -c 'import relay.state, relay.ledger, relay.check'
-  s1.d8 | test-writer | steps: 3 | writes: tests/test_state.py, tests/test_ledger.py | size: test-writer: tokens: 615500.8 seconds: 188.7 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d8
+  s1.d8 | test-writer | steps: 3 | writes: tests/test_state.py, tests/test_ledger.py | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d8
     red
     design: docs/superpowers/specs/relay-check-design.md Order step 3
     behavior: failed checks (verdict "fail"); never counts toward FAILURE_LIMIT
+    view: stubgen .pyi of relay/state.py
+    behavior: the failing check text the next lead prompt carries
     view: stubgen .pyi of relay/state.py
     behavior: +1, sets check_feedback, returns the count
     view: stubgen .pyi of relay/state.py
@@ -92,27 +96,28 @@ section s1 | lead | steps: 1, 2, 3, 4 | size: lead: tokens: 1136706.6 seconds: 6
     behavior: `sessions()` skips them because their session is null.
     view: stubgen .pyi of relay/ledger.py
     check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_state.py tests/test_ledger.py
-  s1.d9 | builder | steps: 4 | writes: relay/state.py, relay/ledger.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s1.d9
+  s1.d9 | builder | steps: 4 | writes: relay/state.py, relay/ledger.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d9
     design: docs/superpowers/specs/relay-check-design.md
     step: 4. Core: build. `builder` writes `relay/config.py`, `relay/queue.py`, `relay/runner.py`, `relay/git.py`, `relay/state.py`, `relay/ledger.py` and `relay/cli.py` (`--idle-ceiling`).
     paths: relay/state.py, relay/ledger.py
     check: uv run python -m pytest tests/test_state.py tests/test_ledger.py
-section s2 | lead | steps: 5, 6 | size: lead: tokens: 1136706.6 seconds: 687.7 overruns: 0 refusals: 0
-  s2.d1 | builder | steps: 5 | writes: relay/prompts.py, relay/progress.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s2.d1
+  s1.d10 | builder | steps: 1 | writes: relay/prompts.py, relay/progress.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d10
     stub
     design: docs/superpowers/specs/relay-check-design.md
     step: every new signature above, raise-only. New fields go in with their defaults.
     paths: relay/prompts.py, relay/progress.py
     check: uv run python -c 'import relay.prompts, relay.progress'
-  s2.d2 | test-writer | steps: 5 | writes: tests/test_check.py, tests/test_prompts.py, tests/test_progress.py | size: test-writer: tokens: 615500.8 seconds: 188.7 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s2.d2
+  s1.d11 | test-writer | steps: 5 | writes: tests/test_check.py, tests/test_prompts.py, tests/test_progress.py | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d11
     red
     design: docs/superpowers/specs/relay-check-design.md Order step 5
     behavior: Run each of section.checks in order in `cwd` through runner.run_command, appending all
     view: stubgen .pyi of relay/check.py
     behavior: output to `log`, and stop at the first non-zero exit.
+    view: stubgen .pyi of relay/check.py
+    behavior: otherwise classify() of the failing command.
     view: stubgen .pyi of relay/check.py
     behavior: or any pattern in cfg.check_outside matches tail
     view: stubgen .pyi of relay/check.py
@@ -127,9 +132,48 @@ section s2 | lead | steps: 5, 6 | size: lead: tokens: 1136706.6 seconds: 687.7 o
     behavior: Progress lines for checks and idle retire
     view: stubgen .pyi of relay/progress.py
     check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_check.py tests/test_prompts.py tests/test_progress.py
-  s2.d3 | builder | steps: 6 | writes: relay/check.py, relay/prompts.py, relay/progress.py | size: builder: tokens: 291159.3 seconds: 157.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a5622a58b2d54d4b0/docs/baley-queue.md s2.d3
+  s1.d12 | builder | steps: 6 | writes: relay/check.py, relay/prompts.py, relay/progress.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s1.d12
     design: docs/superpowers/specs/relay-check-design.md
     step: 6. Check, prompts, progress: build. `builder` writes `relay/check.py`, `relay/prompts.py` and `relay/progress.py`.
     paths: relay/check.py, relay/prompts.py, relay/progress.py
     check: uv run python -m pytest tests/test_check.py tests/test_prompts.py tests/test_progress.py
+section s2 | lead | steps: 7, 8 | size: lead: tokens: 1141064.1 seconds: 687.3 overruns: 0 refusals: 0
+  s2.d1 | test-writer | steps: 7 | writes: tests/test_loop.py, tests/conftest.py, tests/fakes/fake_claude.py | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s2.d1
+    red
+    design: docs/superpowers/specs/relay-check-design.md Order step 7
+    behavior: a check on `DONE`: pass, fail and resume with the output, the third fail parking, outside parking and rerunning on the next pass with no lead, and a section with no check;
+    view: stubgen .pyi of relay/loop.py
+    behavior: the check inheriting `relay go`'s environment;
+    view: stubgen .pyi of relay/loop.py
+    behavior: the ledger line and the check log;
+    view: stubgen .pyi of relay/loop.py
+    behavior: `DONE` calls `_verify` in place of `mark_done`.
+    view: stubgen .pyi of relay/loop.py
+    behavior: The section stays open on a fail below the limit, so the next pass resumes its lead.
+    view: stubgen .pyi of relay/loop.py
+    behavior: `take_check_feedback` feeds `lead_prompt`.
+    view: stubgen .pyi of relay/loop.py
+    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_loop.py
+  s2.d2 | test-writer | steps: 7 | writes: tests/test_loop.py, tests/test_cli.py, tests/conftest.py, tests/fakes/fake_claude.py | size: test-writer: tokens: 611683.2 seconds: 188.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s2.d2
+    red
+    design: docs/superpowers/specs/relay-check-design.md Order step 7
+    behavior: idle retire with and without a commit
+    view: stubgen .pyi of relay/loop.py
+    behavior: A run with `idle_retired` set is handled as `RETIRED`. It records no failure.
+    view: stubgen .pyi of relay/loop.py
+    behavior: The hard_ceiling kill keeps its order and meaning.
+    view: stubgen .pyi of relay/loop.py
+    behavior: a nested recut id failing the recut.
+    view: stubgen .pyi of relay/loop.py
+    behavior: `relay go` gains `--idle-ceiling`.
+    view: stubgen .pyi of relay/cli.py
+    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA -vv --assert=plain tests/test_loop.py tests/test_cli.py
+  s2.d3 | builder | steps: 8 | writes: relay/loop.py | size: builder: tokens: 290328.7 seconds: 155.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ad0ce764b584e37a0/docs/baley-queue.md s2.d3
+    design: docs/superpowers/specs/relay-check-design.md
+    step: 8. Loop: build. `builder` writes `relay/loop.py`, with `_park` replacing `relay/loop.py:124-126` and `relay/loop.py:131-133`. The step ends with the full suite green.
+    paths: relay/loop.py
+    check: uv run python -m pytest

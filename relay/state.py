@@ -113,20 +113,34 @@ class State:
         def change(s: SectionState, _r: dict) -> None:
             s.status = "done"
             s.question = None
+            s.check_feedback = None
+            s.check_pending = False
 
         self._update(sid, change)
 
     def record_check_failure(self, sid: str, feedback: str) -> int:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> int:
+            s.check_failures += 1
+            s.check_feedback = feedback
+            return s.check_failures
+
+        return self._update(sid, change)
 
     def take_check_feedback(self, sid: str) -> str | None:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> str | None:
+            taken, s.check_feedback = s.check_feedback, None
+            return taken
+
+        return self._update(sid, change)
 
     def set_check_pending(self, sid: str, pending: bool) -> None:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> None:
+            s.check_pending = pending
+
+        self._update(sid, change)
 
     def check_log(self, run_log: Path) -> Path:
-        raise NotImplementedError
+        return run_log.with_suffix(".check")
 
     def park(self, sid: str, question: str) -> None:
         def change(s: SectionState, _r: dict) -> None:

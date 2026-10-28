@@ -344,3 +344,89 @@ def test_a_record_saved_before_from_recut_existed_loads_with_it_false(queue: Pat
     section = state.section("s1")
     assert section.status == "parked"
     assert not section.from_recut
+
+
+# Relay's check (design: docs/superpowers/specs/relay-check-design.md, Modules `relay/state.py`; Order 3).
+# Behavior 1: failed checks (verdict "fail"); never counts toward FAILURE_LIMIT
+
+
+def test_failed_checks_leave_the_failure_count_alone(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `record_check_failure` also bumps `failures`, the count FAILURE_LIMIT reads.
+    state = State.open(queue, fake_cfg)
+    for _ in range(state_module.FAILURE_LIMIT + 1):
+        state.record_check_failure("s1", "exit 1")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.failures == 0
+    assert section.check_failures == state_module.FAILURE_LIMIT + 1
+
+
+def test_a_failure_after_failed_checks_counts_from_zero(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `record_failure` adds the failed checks into the count it returns.
+    state = State.open(queue, fake_cfg)
+    state.record_check_failure("s1", "exit 1")
+    state.record_check_failure("s1", "exit 1")
+    assert state.record_failure("s1") == 1
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.failures == 1
+    assert section.check_failures == 2
+
+
+# Behavior 2: +1, sets check_feedback, returns the count
+
+
+def test_record_check_failure_returns_the_count_after_adding_one(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the count is not raised by one per call, or the old count is returned.
+    state = State.open(queue, fake_cfg)
+    assert state.record_check_failure("s2", "first") == 1
+    assert state.record_check_failure("s2", "second") == 2
+    assert State.open(queue, fake_cfg).record_check_failure("s2", "third") == 3
+
+
+def test_record_check_failure_is_kept_per_section_across_reopening(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the count is not saved, or is shared between sections.
+    state = State.open(queue, fake_cfg)
+    state.record_check_failure("s2", "exit 1")
+    state.record_check_failure("s2", "exit 1")
+    state.record_check_failure("s3", "exit 2")
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s2").check_failures == 2
+    assert reopened.section("s3").check_failures == 1
+    assert reopened.section("s4").check_failures == 0
+
+
+def test_record_check_failure_sets_check_feedback_to_the_latest_text(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the feedback is not saved, or an older failure's text is kept.
+    state = State.open(queue, fake_cfg)
+    state.record_check_failure("s2", "make test: exit 1\nFAILED test_a")
+    assert State.open(queue, fake_cfg).section("s2").check_feedback == "make test: exit 1\nFAILED test_a"
+    state.record_check_failure("s2", "make test: exit 2\nFAILED test_b")
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s2").check_feedback == "make test: exit 2\nFAILED test_b"
+    assert reopened.section("s3").check_feedback is None
+
+
+# Behavior 3: `mark_done` also clears `check_feedback` and `check_pending`.
+# `set_answer` leaves `check_pending` as it is.
+
+
+def test_mark_done_clears_check_feedback_and_check_pending(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `mark_done` leaves either the feedback or the pending flag set.
+    state = State.open(queue, fake_cfg)
+    state.record_check_failure("s5", "exit 1")
+    state.set_check_pending("s5", True)
+    state.mark_done("s5")
+    section = State.open(queue, fake_cfg).section("s5")
+    assert section.status == "done"
+    assert section.check_feedback is None
+    assert section.check_pending is False
+
+
+def test_set_answer_leaves_a_pending_check_pending(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `set_answer` clears `check_pending` on the parked section it reopens.
+    state = State.open(queue, fake_cfg)
+    state.set_check_pending("s6", True)
+    state.park("s6", "make test: exit 127")
+    state.set_answer("s6", "Installed the tool.")
+    section = State.open(queue, fake_cfg).section("s6")
+    assert section.status == "open"
+    assert section.check_pending is True

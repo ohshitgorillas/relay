@@ -55,6 +55,9 @@ class Ledger:
             "tokens": spend.tokens,
             "dollars": spend.dollars,
         }
+        self._write(entry)
+
+    def _write(self, entry: dict) -> None:
         data = (json.dumps(entry) + "\n").encode()
         fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
@@ -66,7 +69,21 @@ class Ledger:
             os.close(fd)
 
     def append_check(self, section: str, result: "CheckResult") -> None:
-        raise NotImplementedError
+        entry = {
+            "time": time.time(),
+            "kind": "check",
+            "section": section,
+            "session": None,
+            "tokens": 0,
+            "dollars": 0.0,
+            "command": result.command,
+            "exit": result.exit_code,
+            "timed_out": result.timed_out,
+            "verdict": result.verdict,
+            "tail": result.tail,
+            "log": str(result.log) if result.log is not None else None,
+        }
+        self._write(entry)
 
     def _ends_with_newline(self) -> bool:
         with open(self._path, "rb") as handle:
