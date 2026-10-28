@@ -1,9 +1,11 @@
 """One home for `relay go` progress lines."""
 
+from __future__ import annotations
+
 import sys
 import time
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from relay.agents import Event, duration
 from relay.check import CheckResult, outcome_text
@@ -13,6 +15,9 @@ from relay.research import Map
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
 from relay.status import LeadStatus
+
+if TYPE_CHECKING:
+    from relay.ladder import DesignReport
 
 
 def _write(text: str) -> None:
@@ -71,7 +76,7 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
 
 
 def retiring(
-    sid: str, why: Literal["context", "budget"], tokens: int, who: Kind = "lead"
+    sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead"
 ) -> None:
     if why == "context":
         _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
@@ -173,3 +178,19 @@ def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
 
 def map_reused(sid: str, m: Map) -> None:
     _write(f"research {sid}: map at {m.commit} still current, reused")
+
+
+def design_started(sid: str, design: Path, steps: tuple[str, ...], problem: str) -> None:
+    raise NotImplementedError
+
+
+def design_finished(sid: str, result: RunResult, report: DesignReport | None) -> None:
+    raise NotImplementedError
+
+
+def section_waiting(sid: str, blocker: str) -> None:
+    raise NotImplementedError
+
+
+def woken(sid: str, blocker: str) -> None:
+    raise NotImplementedError

@@ -19,7 +19,7 @@ from relay.errors import LockedError
 FAILURE_LIMIT = 2
 CHECK_LIMIT = 3
 
-SectionStatus = Literal["open", "done", "parked"]
+SectionStatus = Literal["open", "done", "parked", "waiting"]
 
 _RECORD = "state.json"
 _T = TypeVar("_T")
@@ -38,6 +38,9 @@ class SectionState:
     check_pending: bool = False
     research_session: str | None = None  # the researcher a follow-up resumes
     last_log: str | None = None  # the run log of the section's last lead run
+    design_changed: bool = False  # this section had a design change, or a design-change recut made it
+    design_open: str | None = None  # the design path whose product decision awaits the owner's answer
+    waits_on: str | None = None  # the section id a waiting section waits for
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -170,6 +173,20 @@ class State:
             s.question = question
 
         self._update(sid, change)
+
+    def mark_design_changed(self, sid: str) -> None:
+        raise NotImplementedError
+
+    def set_design_open(self, sid: str, design: str | None) -> None:
+        raise NotImplementedError
+
+    def wait(self, sid: str, blocker: str) -> None:
+        """Status "waiting", waits_on blocker; no question."""
+        raise NotImplementedError
+
+    def wake(self, sid: str) -> None:
+        """Status "open", waits_on None."""
+        raise NotImplementedError
 
     def mark_from_recut(self, sid: str) -> None:
         def change(s: SectionState, _r: dict) -> None:

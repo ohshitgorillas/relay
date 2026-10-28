@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from relay.check import CheckResult
 
 
-Kind = Literal["lead", "recut", "research", "ask"]
+Kind = Literal["lead", "recut", "research", "ask", "design"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class Ledger:
         spend: Spend,
         map_commit: str | None = None,  # the map the run's prompt carried; null when none
         agents: tuple["Agent", ...] = (),  # each subagent: {"name", "task_id", "total_tokens"}
+        rung: int | None = None,  # the ladder rung; a line gains "rung" only when set
     ) -> None:
         entry = {
             "time": time.time(),
@@ -148,6 +149,10 @@ class Ledger:
         if cfg.dollar_budget is not None and past.dollars + live.dollars > cfg.dollar_budget:
             return "dollars"
         return None
+
+    def section_spend(self, section: str) -> Spend:
+        """Every readable line whose "section" is `section`, summed, across all time."""
+        raise NotImplementedError
 
     def unreadable(self) -> list[int]:
         return [number for number, fields in self._lines() if fields is None]

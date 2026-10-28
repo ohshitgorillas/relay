@@ -26,6 +26,11 @@ def _default_idle_ceiling(context_limit: int, hard_ceiling: int) -> int:
     return min(context_limit * 13 // 10, hard_ceiling - 1)
 
 
+_STANDING_APPROVAL = (
+    "I am sick and tired of this paperwork bullshit make it stop for the 5th fucking time"
+)
+
+
 @dataclass(frozen=True)
 class Config:
     token_budget: int | None
@@ -43,8 +48,13 @@ class Config:
     research_command: list[str] = field(default_factory=list)  # empty asks for the default
     map_max_lines: int = 150
     map_max_chars: int = 12_000
+    design_command: list[str] | None = None  # None asks for the default, set in __post_init__
+    section_dollar_cap: float | None = None  # positive; None is no cap
+    design_approval: str = _STANDING_APPROVAL  # quoted on the architect's approve: line
 
     def __post_init__(self) -> None:
+        if self.design_command is None:
+            object.__setattr__(self, "design_command", [*self.lead_command, "--agent", "architect"])
         if self.idle_ceiling == 0:
             object.__setattr__(
                 self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
@@ -76,6 +86,9 @@ _KEYS = frozenset(
         "research_command",
         "map_max_lines",
         "map_max_chars",
+        "design_command",
+        "section_dollar_cap",
+        "design_approval",
     }
 )
 

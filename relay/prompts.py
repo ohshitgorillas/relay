@@ -59,13 +59,32 @@ def lead_prompt(
     return "\n\n".join(parts) + "\n"
 
 
-def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> str:
+def recut_brief(
+    queue: Path, section: Section, reason: str, lead_log: Path, design: Path | None = None
+) -> str:
     return (
         f"recut section {section.id} of the queue at {queue}.\n\n"
         f"A lead asked for this recut. Its reason: {reason}\n"
         f"The lead's run log: {lead_log}\n\n"
         f"Section body:\n{section.body}\n"
     )
+
+
+def design_brief(
+    design: Path,
+    queue: Path,
+    section: Section,
+    problem: str,
+    evidence: list[Path],
+    approval: str,
+) -> str:
+    """Three lines: rulings, lead new, approve."""
+    raise NotImplementedError
+
+
+def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, approval: str) -> str:
+    """The rulings line, the answer lines, the approve line."""
+    raise NotImplementedError
 
 
 def check_feedback(result: CheckResult) -> str:

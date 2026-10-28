@@ -53,3 +53,8 @@ def changed(cwd: Path, commit: str, paths: tuple[str, ...]) -> bool | None:
     if code != 0:
         return None
     return bool(out.strip())
+
+
+def clean(cwd: Path) -> bool | None:
+    """`git status --porcelain` in `cwd`: True on exit 0 with no output, False with output, None when git fails."""
+    raise NotImplementedError
