@@ -13,7 +13,7 @@ from relay.ledger import Ledger, Spend
 from relay.prompts import lead_prompt, recut_brief
 from relay.queue import Section, blocked_by, parse_queue
 from relay.runner import RunResult, run_agent
-from relay.state import State
+from relay.state import FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
@@ -139,7 +139,7 @@ def _watcher(
 
 def _fail(state: State, sid: str) -> bool:
     """Record a failure of `sid`; True when it is the second."""
-    return state.record_failure(sid) >= 2
+    return state.record_failure(sid) >= FAILURE_LIMIT
 
 
 def _failed_twice(sid: str) -> _Stop:

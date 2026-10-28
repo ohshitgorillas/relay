@@ -16,6 +16,8 @@ from typing import IO, Callable, Iterator, Literal, TypeVar
 from relay.config import Config
 from relay.errors import LockedError
 
+FAILURE_LIMIT = 2
+
 SectionStatus = Literal["open", "done", "parked"]
 
 _RECORD = "state.json"
