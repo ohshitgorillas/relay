@@ -3535,3 +3535,194 @@ def test_a_fresh_lead_after_a_retire_that_changed_a_mapped_file_gets_a_fresh_map
     texts = _texts(capsys.readouterr().out)
     assert not any(t.endswith("still current, reused") for t in texts), texts
     assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "research", "lead"]
+
+
+# Research behavior 4: a failed, killed or over-cap research: the lead starts without a map, no
+# failure counted (relay-research-design.md:205-206). The research stream's one assistant
+# message leaves context_tokens at 2 + 150 + 800; DONE_SMALL_LEAD's stays at 1 + 50 + 400. The
+# map body runs 7 lines from `MAP` to `END MAP`, 5 between them.
+RESEARCH_CONTEXT = 2 + 150 + 800
+
+
+def _without_map(cfg: Config, how: str) -> tuple[Config, int]:
+    """`cfg` changed so the research run fails `how`, and the exit code of its plan step."""
+    if how == "killed":
+        return dataclasses.replace(cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT), 0
+    if how == "over-lines":
+        return dataclasses.replace(cfg, map_max_lines=4), 0
+    if how == "over-chars":
+        return dataclasses.replace(cfg, map_max_chars=len(MAP_BODY) - 20), 0
+    return cfg, 1
+
+
+@pytest.mark.parametrize("how", ["failed", "killed", "over-lines", "over-chars"])
+def test_a_research_that_fails_is_killed_or_is_over_a_cap_leaves_the_lead_to_start_without_a_map_and_counts_no_failure(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a research run that exits non-zero, is killed at hard_ceiling, or returns a map
+    # over map_max_lines or map_max_chars hands its map to the lead, records a failure on the
+    # section, or stops the lead from starting.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg, exit = _without_map(cfg, how)
+    fake = cfg.lead_command[0]
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
+    research = _plan(tmp_path, fake, "research", [_step(RESEARCH_RUN, exit=exit)], False)
+    cfg = dataclasses.replace(cfg, research_command=research)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_research_runs(tmp_path)) == 1
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 1
+    prompt = str(leads[0]["prompt"])
+    assert "map s1 at" not in prompt
+    assert "END MAP" not in prompt
+    section = State.open(queue, cfg).section("s1")
+    assert section.failures == 0
+    assert section.status == "done"
+    entries = _run_entries(queue, cfg)
+    assert [(e["kind"], e["section"]) for e in entries] == [("research", "s1"), ("lead", "s1")]
+    assert "map" in entries[1] and entries[1]["map"] is None
+    texts = _texts(capsys.readouterr().out)
+    finished = [t for t in texts if t.startswith("research s1: no usable map ")]
+    assert len(finished) == 1, texts
+    assert finished[0].endswith("; the lead starts without one"), texts
+    assert not any(t.startswith("research s1: map of ") for t in texts), texts
+
+
+# Research behavior 5: the research run's own flag, the lead's flag untouched
+# (relay-research-design.md:12, 162, 203).
+
+
+def test_the_research_brief_names_the_research_flag_and_the_lead_prompt_names_the_leads_flag(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the research brief names the lead's retire flag, or the lead's prompt names the
+    # research flag in its place.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    state = State.open(queue, cfg)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    research = _research_runs(tmp_path)
+    assert len(research) == 1
+    brief = str(research[0]["prompt"])
+    assert str(state.research_flag("s1")) in brief
+    assert str(state.retire_flag) not in brief
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 1
+    assert str(state.retire_flag) in str(leads[0]["prompt"])
+    assert str(state.research_flag("s1")) not in str(leads[0]["prompt"])
+
+
+def test_a_research_run_asked_to_retire_touches_its_own_flag_and_leaves_the_leads_flag_alone(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the research run's retire touches the lead's retire flag instead of
+    # `research_flag(sid)`, so the lead's flag is up and the research flag never appears.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    state = State.open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=RESEARCH_CONTEXT)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_research_runs(tmp_path)) == 1
+    assert state.research_flag("s1").exists()
+    assert not state.retire_flag.exists()
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 1
+    assert f"map s1 at {commit}" in str(leads[0]["prompt"])
+    assert State.open(queue, cfg).section("s1").status == "done"
+
+
+# Research behavior 6: the map dropped on `DONE` and on a recut that removes the section
+# (relay-research-design.md:166, 220). Each lead plan step that copies the section's map file
+# aside proves the map was saved while that lead ran; a missing map fails the copy, and the lead.
+
+
+def test_a_done_section_has_its_map_dropped_and_its_researcher_cleared(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `mark_done` on the lead's DONE leaves the section's map file or its
+    # research_session in place.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    state = State.open(queue, cfg)
+    seen = tmp_path / "seen.map"
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD, write=(state.map_path("s1"), seen))])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert MAP_BODY in seen.read_text()
+    assert not state.map_path("s1").exists()
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.research_session is None
+
+
+def test_a_recut_that_removes_the_section_drops_its_map_and_its_researcher(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_recut` leaves the map file or research_session of a section the recut
+    # queue no longer holds.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    state = State.open(queue, cfg)
+    seen = tmp_path / "seen.map"
+    # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`.
+    split = _queue_of(tmp_path / "split.md", "s1a", "s2")
+    leads = [_step(RECUT_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD)]
+    fake = cfg.lead_command[0]
+    cfg = _researched(cfg, tmp_path, leads)
+    recut = _plan(tmp_path, fake, "recut", [_step(DIVVYER_RUN, write=(split, queue))], False)
+    cfg = dataclasses.replace(cfg, recut_command=recut)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert MAP_BODY in seen.read_text()
+    assert not state.map_path("s1").exists()
+    assert State.open(queue, cfg).section("s1").research_session is None
+
+
+def test_a_recut_that_keeps_the_section_id_keeps_its_map_for_the_next_pass(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: `_recut` drops the map of a section the recut queue still holds, so the next
+    # pass runs the researcher again instead of reusing the current map.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    widened = tmp_path / "widened.md"
+    widened.write_text(
+        "section s1 | lead | steps: 1\n  s1 work, paths widened\nsection s2 | lead | steps: 1\n  s2 work\n"
+    )
+    fake = cfg.lead_command[0]
+    cfg = _researched(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)])
+    recut = _plan(tmp_path, fake, "recut", [_step(DIVVYER_RUN, write=(widened, queue))], False)
+    cfg = dataclasses.replace(cfg, recut_command=recut)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert len(_research_runs(tmp_path)) == 1
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 2
+    assert "s1 work, paths widened" in str(leads[1]["prompt"])
+    assert f"map s1 at {commit}" in str(leads[1]["prompt"])
+    assert MAP_BODY in str(leads[1]["prompt"])
+    texts = _texts(capsys.readouterr().out)
+    assert f"research s1: map at {commit} still current, reused" in texts, texts
