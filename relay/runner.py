@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from relay.stream import StreamState
+from relay.ledger import Spend
+from relay.stream import StreamState, feed
+
+_GRACE_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -18,6 +25,49 @@ class RunResult:
     log: Path
 
 
+def _next_number(run_dir: Path) -> int:
+    numbers = [int(p.stem) for p in run_dir.glob("*.jsonl") if p.stem.isdigit()]
+    return max(numbers, default=0) + 1
+
+
+def _signal_group(pgid: int, signum: int) -> None:
+    try:
+        os.killpg(pgid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _reap(pid: int) -> None:
+    """Reap the child with `os.waitpid`, whether or not it has already been reaped."""
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+
+
+def _kill_and_reap(proc: subprocess.Popen) -> None:
+    """Kill the child's whole process group, reap the child, and check the group is gone."""
+    pgid = proc.pid
+    _signal_group(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + _GRACE_SECONDS
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    _signal_group(pgid, signal.SIGKILL)
+    _reap(pgid)
+    deadline = time.monotonic() + _GRACE_SECONDS
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"process group {pgid} survived its kill")
+        _signal_group(pgid, signal.SIGKILL)
+        time.sleep(0.02)
+
+
 def run_agent(
     argv: list[str],
     stdin_text: str,
@@ -26,4 +76,71 @@ def run_agent(
     on_event: Callable[[StreamState], Literal["go", "retire", "kill"]],
     retire_flag: Path,
 ) -> RunResult:
-    raise NotImplementedError
+    number = _next_number(run_dir)
+    log_path = run_dir / f"{number}.jsonl"
+    pid_path = run_dir / f"{number}.pid"
+    state = StreamState(None, 0, Spend(0, 0.0), None, False)
+    killed = False
+    retired = False
+
+    live: list[subprocess.Popen] = []
+    previous: dict[int, object] = {}
+
+    def on_signal(signum: int, _frame: object) -> None:
+        if live:
+            _kill_and_reap(live[0])
+        signal.signal(signum, previous[signum])
+        os.kill(os.getpid(), signum)
+
+    # Handlers go in before the child starts; off the main thread this raises ValueError.
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        previous[signum] = signal.signal(signum, on_signal)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        live.append(proc)
+        try:
+            pid_path.write_text(f"{proc.pid}\n")
+            try:
+                assert proc.stdin is not None
+                proc.stdin.write(stdin_text)
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            assert proc.stdout is not None
+            with log_path.open("w") as log:
+                for raw in proc.stdout:
+                    line = raw.rstrip("\n")
+                    log.write(line + "\n")
+                    log.flush()
+                    state = feed(state, line)
+                    verdict = on_event(state)
+                    if verdict == "kill":
+                        killed = True
+                        break
+                    if verdict == "retire" and not retired:
+                        retired = True
+                        retire_flag.touch()
+            if killed:
+                _kill_and_reap(proc)
+                exit_code = None
+            else:
+                exit_code = proc.wait()
+                _kill_and_reap(proc)  # sweep stragglers in the group
+        except BaseException:
+            _kill_and_reap(proc)
+            raise
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+    finally:
+        live.clear()
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return RunResult(exit_code=exit_code, killed=killed, stream=state, log=log_path)
