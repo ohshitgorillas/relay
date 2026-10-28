@@ -15,7 +15,6 @@ from typing import Callable
 
 import pytest
 
-import relay.loop
 import relay.ping
 import relay.runner
 from relay.config import Config
@@ -1758,7 +1757,7 @@ def test_a_crash_in_a_leads_run_writes_ended_crashed_with_exit_error_just_after_
 # Progress behavior 3: `_run_section` calls `progress.lead_started` just before `run_agent`.
 
 
-def test_lead_started_is_written_just_before_each_lead_runs(
+def test_lead_started_naming_each_section_is_written_just_before_its_leads_run_however_the_loop_reaches_run_agent(
     cfg: Config,
     tmp_path: Path,
     queue_file: Callable[[str], Path],
@@ -1766,21 +1765,23 @@ def test_lead_started_is_written_just_before_each_lead_runs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: a lead runs with no lead_started line just before it, or the line names
-    # another section or session.
-    queue = queue_file(WORKBOARD)
+    # Breaks when: the lead_started line is written once per go or per pass instead of just
+    # before each section's run_agent, names the section of an earlier or later lead, or is
+    # missing when loop.py calls run_agent through relay.runner rather than its own name.
+    queue = queue_file(M2)
     scenario(_lines(DONE_LEAD))
-    first = _only_first_open(queue, cfg)
-    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
-    runs = _mark(monkeypatch, relay.loop, "run_agent", "<run_agent>", before=True)
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
-    assert len(runs) == 2
+    assert len(runs) == len(ids)
+    assert len(_runs(tmp_path, "lead")) == len(ids)
     at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
-    assert len(at) == 2, texts
-    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
-    assert texts[at[1] - 1] == f"lead {first}: started, resuming sess-lead-3", texts
-    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
+    assert len(at) == len(ids), texts
+    expected = [f"lead {ids[0]}: started fresh"] + [f"lead {sid}: started, resuming sess-lead-1" for sid in ids[1:]]
+    assert [texts[n - 1] for n in at] == expected, texts
+    assert [t for t in texts if t.startswith("lead ") and ": started" in t] == expected, texts
 
 
 def test_lead_started_is_written_just_before_each_lead_runs_however_the_loop_reaches_run_agent(
@@ -2049,24 +2050,29 @@ def test_each_run_that_retires_writes_its_own_asked_to_retire_line_and_a_run_tha
     assert starts[0] < retires[0] < starts[1] < retires[1] < starts[2], texts
 
 
-def test_a_kill_writes_one_killed_line_for_its_run(
+def test_a_run_killed_at_the_hard_ceiling_writes_its_killed_line_and_no_asked_to_retire_line(
     cfg: Config,
     tmp_path: Path,
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: the watcher writes no killed line on kill, repeats it, writes it for a run
-    # that stays below hard_ceiling, or names another section or context.
+    # Breaks when: the watcher writes an asked-to-retire line for a run it kills (the context
+    # being past context_limit too), writes no killed line on kill, repeats it, writes it for
+    # a run that stays below hard_ceiling, or names another section or context.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
+    # DONE_LEAD's first assistant message takes context_tokens to FIRST_CONTEXT: past
+    # context_limit and at hard_ceiling at once.
     cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT)
     cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(DONE_SMALL_LEAD)])
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 2
     texts = _texts(capsys.readouterr().out)
     line = f"lead {first}: killed at {FIRST_CONTEXT} context tokens, past the hard ceiling"
-    assert [t for t in texts if ": killed at " in t] == [line], texts
+    watched = [t for t in texts if ": killed at " in t or ": asked to retire" in t]
+    assert watched == [line], texts
     _between(texts, line, first)
 
 
@@ -2166,16 +2172,23 @@ def test_a_wait_that_goes_on_writes_one_waiting_line_naming_the_parked_section(
     assert [t for t in texts if t.startswith(_WAITING)] == [f"{_WAITING}{parked}"], texts
 
 
-def test_a_wait_names_every_parked_section(
+def test_a_wait_writes_one_waiting_line_naming_each_parked_section_exactly_once(
     cfg: Config,
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: the waiting line names only one of several parked sections.
+    # Breaks when: the waiting line names only some of several parked sections, names one
+    # twice, names a section that is not parked, or the wait writes no waiting line.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
-    state, a, b = _park_two(queue, cfg)
+    parked = _open_ids(queue)[:3]
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid not in parked:
+            state.mark_done(sid)
+    for sid in parked:
+        state.park(sid, QUESTION)
     loop = _Background(queue, cfg)
     try:
         time.sleep(SETTLE)
@@ -2185,7 +2198,10 @@ def test_a_wait_names_every_parked_section(
     finally:
         state.stop_file.touch()
         loop.thread.join(15)
-    assert _waits(_texts(capsys.readouterr().out)) == [{a, b}]
+    texts = _texts(capsys.readouterr().out)
+    waiting = [t for t in texts if t.startswith(_WAITING)]
+    assert len(waiting) == 1, texts
+    assert sorted(waiting[0][len(_WAITING) :].split(", ")) == sorted(parked), waiting
 
 
 def test_a_new_wait_on_a_changed_parked_set_writes_a_new_waiting_line(
