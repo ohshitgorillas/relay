@@ -233,12 +233,14 @@ def test_idle_ceiling_override_at_a_bound_raises_config_error(
         load_config(path, {"idle_ceiling": idle})
 
 
-def test_default_idle_ceiling_not_below_hard_ceiling_raises_config_error(
+def test_default_idle_ceiling_is_capped_one_below_hard_ceiling(
     tmp_path: Path, home: Path
 ) -> None:
+    # relay-check-design.md, `relay/config.py` (extended): the default is
+    # min(context_limit * 13 // 10, hard_ceiling - 1); with context_limit 100000,
+    # hard_ceiling 120000 and no idle_ceiling, idle_ceiling is 119999 and the config loads.
     path = _toml(tmp_path, "context_limit = 100000\nhard_ceiling = 120000\n")
-    with pytest.raises(ConfigError):
-        load_config(path, {})
+    assert _load_ok(path, {}).idle_ceiling == 119_999
 
 
 # Behavior: seconds per check command.

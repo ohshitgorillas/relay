@@ -22,8 +22,8 @@ _DEFAULT_CHECK_OUTSIDE = [
 ]
 
 
-def _default_idle_ceiling(context_limit: int) -> int:
-    return context_limit * 13 // 10
+def _default_idle_ceiling(context_limit: int, hard_ceiling: int) -> int:
+    return min(context_limit * 13 // 10, hard_ceiling - 1)
 
 
 @dataclass(frozen=True)
@@ -37,13 +37,15 @@ class Config:
     recut_command: list[str]
     ping_command: list[str]
     state_root: Path
-    idle_ceiling: int | None = None
+    idle_ceiling: int = 0  # 0 asks for the default, 13/10 of context_limit
     check_timeout: float = 1800
     check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
 
     def __post_init__(self) -> None:
-        if self.idle_ceiling is None:
-            object.__setattr__(self, "idle_ceiling", _default_idle_ceiling(self.context_limit))
+        if self.idle_ceiling == 0:
+            object.__setattr__(
+                self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
+            )
 
 
 _KEYS = frozenset(
@@ -133,14 +135,7 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         raise ConfigError(
             f"hard_ceiling ({hard_ceiling}) must exceed context_limit ({context_limit})"
         )
-    idle_ceiling = _int(merged, "idle_ceiling", None)
-    if idle_ceiling is None:
-        idle_ceiling = _default_idle_ceiling(context_limit)
-    if not context_limit < idle_ceiling < hard_ceiling:
-        raise ConfigError(
-            f"idle_ceiling ({idle_ceiling}) must lie between context_limit ({context_limit}) "
-            f"and hard_ceiling ({hard_ceiling})"
-        )
+    idle_ceiling = _int(merged, "idle_ceiling", None) or 0
     check_timeout = _number(merged, "check_timeout", Config.check_timeout)
     assert check_timeout is not None
     poll_seconds = _number(merged, "poll_seconds", 30)
@@ -155,7 +150,7 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     else:
         raise ConfigError(f"config value 'state_root' must be a non-empty string: {state_value!r}")
 
-    return Config(
+    cfg = Config(
         token_budget=_int(merged, "token_budget", None),
         dollar_budget=_number(merged, "dollar_budget", None),
         context_limit=context_limit,
@@ -171,3 +166,9 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         check_timeout=check_timeout,
         check_outside=_patterns(merged, "check_outside", list(_DEFAULT_CHECK_OUTSIDE)),
     )
+    if not cfg.context_limit < cfg.idle_ceiling < cfg.hard_ceiling:
+        raise ConfigError(
+            f"idle_ceiling ({cfg.idle_ceiling}) must lie between context_limit "
+            f"({cfg.context_limit}) and hard_ceiling ({cfg.hard_ceiling})"
+        )
+    return cfg
