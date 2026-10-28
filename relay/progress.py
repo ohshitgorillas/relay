@@ -3,13 +3,16 @@
 import sys
 import time
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from relay.agents import Event, duration
 from relay.config import Config
 from relay.runner import RunResult
 from relay.state import FAILURE_LIMIT
 from relay.status import LeadStatus
+
+if TYPE_CHECKING:
+    from relay.check import CheckResult
 
 
 def _write(text: str) -> None:
@@ -113,3 +116,19 @@ def waiting(parked: list[str]) -> None:
 
 def ended(queue: Path, code: int, reason: str, detail: str) -> None:
     _write(f"relay go {queue.name}: ended {reason}: {_cut(detail)} (exit {code})")
+
+
+def check_started(sid: str, command_count: int, cwd: Path) -> None:
+    raise NotImplementedError
+
+
+def check_finished(sid: str, result: "CheckResult") -> None:
+    raise NotImplementedError
+
+
+def check_failed(sid: str, failures: int) -> None:
+    raise NotImplementedError
+
+
+def retired_idle(sid: str, tokens: int) -> None:
+    raise NotImplementedError

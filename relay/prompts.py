@@ -1,9 +1,13 @@
 """Builds every text Relay sends to an agent."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from relay.queue import Section
 from relay.status import KINDS, Kind, TEXT_NAMES
+
+if TYPE_CHECKING:
+    from relay.check import CheckResult
 
 
 def _status_form(kind: Kind) -> str:
@@ -16,6 +20,7 @@ def lead_prompt(
     resume: str | None,
     answer: str | None,
     retire_flag: Path,
+    check_feedback: str | None = None,
 ) -> str:
     parts = [
         "You are a lead. Carry the queue section below through development until it is done.",
@@ -48,3 +53,7 @@ def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> s
         f"The lead's run log: {lead_log}\n\n"
         f"Section body:\n{section.body}\n"
     )
+
+
+def check_feedback(result: "CheckResult") -> str:
+    raise NotImplementedError
