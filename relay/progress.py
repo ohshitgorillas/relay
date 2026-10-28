@@ -64,14 +64,20 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
     _write(f"lead {sid}: finished {outcome} {_spend(result)}")
 
 
-def retiring(sid: str, why: Literal["context", "budget"], tokens: int) -> None:
+def retiring(
+    sid: str, why: Literal["context", "budget"], tokens: int, who: Kind = "lead"
+) -> None:
+    if who == "ask":
+        return
     if why == "context":
         _write(f"lead {sid}: asked to retire at {tokens} context tokens")
     else:
         _write(f"lead {sid}: asked to retire, budget spent")
 
 
-def killing(sid: str, tokens: int) -> None:
+def killing(sid: str, tokens: int, who: Kind = "lead") -> None:
+    if who == "ask":
+        return
     _write(f"lead {sid}: killed at {tokens} context tokens, past the hard ceiling")
 
 

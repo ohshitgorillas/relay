@@ -296,7 +296,7 @@ def _watcher(
             progress.agent_event(who, sid, event)
         shown[0] = len(events)
         if stream.context_tokens >= cfg.hard_ceiling:
-            progress.killing(sid, stream.context_tokens)
+            progress.killing(sid, stream.context_tokens, who)
             return "kill"
         why: Literal["context", "budget"] | None = None
         if since is not None and ledger.over(cfg, stream.spend, since) is not None:
@@ -308,7 +308,7 @@ def _watcher(
             return "go"
         if not retiring[0]:
             retiring[0] = True
-            progress.retiring(sid, why, stream.context_tokens)
+            progress.retiring(sid, why, stream.context_tokens, who)
         if who == "lead":
             if not snapshot:
                 snapshot.append(git.heads(repo))
