@@ -14,6 +14,7 @@ def lead_prompt(
     queue: Path,
     section: Section,
     resume: str | None,
+    report: str | None,
     answer: str | None,
     retire_flag: Path,
 ) -> str:
@@ -24,6 +25,11 @@ def lead_prompt(
     ]
     if resume is not None:
         parts.append(f"resume {resume}")
+    if report is not None:
+        parts.append(
+            "The previous lead's final report (that session's last reply, so you need "
+            f"not recall it):\n{report}"
+        )
     if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
     parts.append(

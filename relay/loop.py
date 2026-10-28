@@ -97,7 +97,7 @@ def _run_section(
     current = state.section(sid)
     resume = current.last_session or state.last_session_any
     answer = state.take_answer(sid)
-    prompt = lead_prompt(queue, section, resume, answer, retire_flag)
+    prompt = lead_prompt(queue, section, resume, current.last_report, answer, retire_flag)
     on_event, budget_hit = _watcher(cfg, ledger, since, "lead", sid)
 
     retire_flag.unlink(missing_ok=True)
@@ -107,6 +107,7 @@ def _run_section(
     ledger.append("lead", sid, session, result.stream.spend)
     if session is not None:
         state.set_last_session(sid, session)
+        state.set_last_report(sid, result.stream.result_text or None)
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)

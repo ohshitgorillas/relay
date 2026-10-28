@@ -32,6 +32,7 @@ class SectionState:
     answer: str | None
     last_session: str | None
     from_recut: bool = False
+    last_report: str | None = None
 
 
 def _fresh() -> SectionState:
@@ -156,6 +157,12 @@ class State:
         def change(s: SectionState, r: dict) -> None:
             s.last_session = session
             r["last_any"] = session
+
+        self._update(sid, change)
+
+    def set_last_report(self, sid: str, report: str | None) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.last_report = report
 
         self._update(sid, change)
 
