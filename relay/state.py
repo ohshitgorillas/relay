@@ -125,6 +125,8 @@ class State:
             s.question = None
             s.check_feedback = None
             s.check_pending = False
+            s.design_open = None
+            s.waits_on = None
 
         self._update(sid, change)
         self.drop_map(sid)
@@ -175,18 +177,35 @@ class State:
         self._update(sid, change)
 
     def mark_design_changed(self, sid: str) -> None:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_changed = True
+
+        self._update(sid, change)
 
     def set_design_open(self, sid: str, design: str | None) -> None:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_open = design
+
+        self._update(sid, change)
 
     def wait(self, sid: str, blocker: str) -> None:
         """Status "waiting", waits_on blocker; no question."""
-        raise NotImplementedError
+
+        def change(s: SectionState, _r: dict) -> None:
+            s.status = "waiting"
+            s.waits_on = blocker
+            s.question = None
+
+        self._update(sid, change)
 
     def wake(self, sid: str) -> None:
         """Status "open", waits_on None."""
-        raise NotImplementedError
+
+        def change(s: SectionState, _r: dict) -> None:
+            s.status = "open"
+            s.waits_on = None
+
+        self._update(sid, change)
 
     def mark_from_recut(self, sid: str) -> None:
         def change(s: SectionState, _r: dict) -> None:
@@ -203,6 +222,7 @@ class State:
             s.answer = answer
             s.status = "open"
             s.question = None
+            s.waits_on = None
             return True
 
         return self._update(sid, change)

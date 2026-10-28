@@ -6,6 +6,7 @@ import json
 import math
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -26,7 +27,8 @@ class Spend:
     dollars: float
 
 
-def _parse(chunk: bytes) -> tuple[float, float, float] | None:
+def _parse(chunk: bytes) -> tuple[dict, tuple[float, float, float]] | None:
+    """The decoded line and its (time, tokens, dollars), or None when the line is unreadable."""
     try:
         entry = json.loads(chunk.decode())
         values = (entry["time"], entry["tokens"], entry["dollars"])
@@ -37,7 +39,7 @@ def _parse(chunk: bytes) -> tuple[float, float, float] | None:
             return None
         if isinstance(value, float) and not math.isfinite(value):
             return None
-    return values
+    return entry, values
 
 
 class Ledger:
@@ -66,6 +68,8 @@ class Ledger:
                 {"name": a.name, "task_id": a.task_id, "total_tokens": a.context} for a in agents
             ],
         }
+        if rung is not None:
+            entry["rung"] = rung
         self._write(entry)
 
     def _write(self, entry: dict) -> None:
@@ -103,7 +107,31 @@ class Ledger:
 
     def _lines(self) -> list[tuple[int, tuple[float, float, float] | None]]:
         """Every line as (1-based number, (time, tokens, dollars) or None when unreadable)."""
-        return [(number, _parse(chunk)) for number, chunk in enumerate(self._chunks(), 1)]
+        return [
+            (number, None if parsed is None else parsed[1])
+            for number, parsed in ((n, _parse(c)) for n, c in enumerate(self._chunks(), 1))
+        ]
+
+    def _entries(self, since: float | None = None) -> Iterator[tuple[dict, int, float]]:
+        """Each readable line once, as (entry, tokens, dollars); a `since` skips lines at or
+        before it. The one place that decides which lines count toward a spend."""
+        for chunk in self._chunks():
+            parsed = _parse(chunk)
+            if parsed is None:
+                continue
+            entry, (stamp, tokens, dollars) = parsed
+            if since is not None and stamp <= since:
+                continue
+            yield entry, int(tokens), float(dollars)
+
+    @staticmethod
+    def _sum(entries: Iterator[tuple[dict, int, float]]) -> Spend:
+        tokens = 0
+        dollars = 0.0
+        for _, add_tokens, add_dollars in entries:
+            tokens += add_tokens
+            dollars += add_dollars
+        return Spend(tokens=tokens, dollars=dollars)
 
     def _chunks(self) -> list[bytes]:
         try:
@@ -118,27 +146,14 @@ class Ledger:
     def sessions(self) -> list[tuple[str, str]]:
         """(section, session) of each readable line naming both, in the order written."""
         found = []
-        for chunk in self._chunks():
-            if _parse(chunk) is None:
-                continue
-            entry = json.loads(chunk.decode())
+        for entry, _, _ in self._entries():
             section, session = entry.get("section"), entry.get("session")
             if isinstance(section, str) and isinstance(session, str):
                 found.append((section, session))
         return found
 
     def total(self, since: float | None) -> Spend:
-        tokens = 0
-        dollars = 0.0
-        for _, fields in self._lines():
-            if fields is None:
-                continue
-            stamp, add_tokens, add_dollars = fields
-            if since is not None and stamp <= since:
-                continue
-            tokens += int(add_tokens)
-            dollars += float(add_dollars)
-        return Spend(tokens=tokens, dollars=dollars)
+        return self._sum(self._entries(since))
 
     def over(
         self, cfg: Config, live: Spend, since: float | None
@@ -152,7 +167,7 @@ class Ledger:
 
     def section_spend(self, section: str) -> Spend:
         """Every readable line whose "section" is `section`, summed, across all time."""
-        raise NotImplementedError
+        return self._sum(e for e in self._entries() if e[0].get("section") == section)
 
     def unreadable(self) -> list[int]:
         return [number for number, fields in self._lines() if fields is None]

@@ -181,6 +181,10 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     map_max_chars = _int(merged, "map_max_chars", Config.map_max_chars)
     assert map_max_lines is not None and map_max_chars is not None
 
+    approval = merged.get("design_approval", _STANDING_APPROVAL)
+    if not isinstance(approval, str) or not approval.strip():
+        raise ConfigError(f"config value 'design_approval' must be a non-empty string: {approval!r}")
+
     cfg = Config(
         token_budget=_int(merged, "token_budget", None),
         dollar_budget=_number(merged, "dollar_budget", None),
@@ -203,6 +207,11 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         ),
         map_max_lines=map_max_lines,
         map_max_chars=map_max_chars,
+        design_command=(
+            _command(merged, "design_command", []) if "design_command" in merged else None
+        ),
+        section_dollar_cap=_number(merged, "section_dollar_cap", None),
+        design_approval=approval,
     )
     if not cfg.context_limit < cfg.idle_ceiling < cfg.hard_ceiling:
         raise ConfigError(

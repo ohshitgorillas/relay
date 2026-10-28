@@ -57,4 +57,7 @@ def changed(cwd: Path, commit: str, paths: tuple[str, ...]) -> bool | None:
 
 def clean(cwd: Path) -> bool | None:
     """`git status --porcelain` in `cwd`: True on exit 0 with no output, False with output, None when git fails."""
-    raise NotImplementedError
+    code, out = runner.capture(["git", "status", "--porcelain"], cwd, _TIMEOUT)
+    if code != 0:
+        return None
+    return not out.strip()
