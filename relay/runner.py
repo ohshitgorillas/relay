@@ -121,19 +121,19 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
             alive = _group_alive(pgid)
             if _stage[proc] >= _REAPED:
                 return
-            if not alive or proc.poll() is not None or time.monotonic() >= deadline:
+            if not alive or _leader_reaped(proc) or time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
     if _stage[proc] >= _REAPED:
         return
-    if not _leader_reaped(proc):
-        _signal_group(pgid, signal.SIGKILL)
+    leader_reaped = _leader_reaped(proc)
+    if leader_reaped:
+        # Only stragglers can still be in the group; mark the reap before signalling them.
+        _stage[proc] = _REAPED
+    _signal_held(proc, signal.SIGKILL)
+    if not leader_reaped:
         _reap(proc)
         _stage[proc] = _REAPED
-    else:
-        # The leader is already reaped; only stragglers can still be in the group.
-        _stage[proc] = _REAPED
-        _signal_held(proc, signal.SIGKILL)
     deadline = time.monotonic() + _GRACE_SECONDS
     while _group_alive(pgid):
         if time.monotonic() >= deadline:
