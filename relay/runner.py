@@ -46,16 +46,33 @@ def _signal_group(pgid: int, signum: int) -> None:
         pass
 
 
+@contextmanager
+def _signals_deferred() -> Iterator[None]:
+    """Hold SIGINT and SIGTERM back, so a guard's handler runs only before or after the block,
+    never between its steps. A handler left pending runs as the block ends. Off the main
+    thread, where no guard handler is installed, it holds nothing."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    held = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, held)
+
+
 def _reap(proc: subprocess.Popen) -> None:
     """Reap the child with `os.waitpid` and record that on `proc`, so `Popen` never waits on
-    the reaped pid again. Whether or not it has already been reaped is harmless."""
-    try:
-        _, status = os.waitpid(proc.pid, 0)
-        code = os.waitstatus_to_exitcode(status)
-    except ChildProcessError:
-        code = 0  # reaped elsewhere; `Popen` records the same
-    if proc.returncode is None:
-        proc.returncode = code
+    the reaped pid again. Whether or not it has already been reaped is harmless. The reap and
+    its record are one step: no guard's handler sees the pid reaped but unrecorded."""
+    with _signals_deferred():
+        try:
+            _, status = os.waitpid(proc.pid, 0)
+            code = os.waitstatus_to_exitcode(status)
+        except ChildProcessError:
+            code = 0  # reaped elsewhere; `Popen` records the same
+        if proc.returncode is None:
+            proc.returncode = code
 
 
 def _leader_reaped(proc: subprocess.Popen) -> bool:
@@ -64,17 +81,19 @@ def _leader_reaped(proc: subprocess.Popen) -> bool:
     `Popen` sets `returncode` only after its own `waitpid` returns, so a signal guard that fires
     in between sees `None` for a leader already gone. A non-blocking `waitpid` cannot be fooled:
     a leader still running yields nothing, a zombie is reaped here and recorded, and a leader
-    reaped elsewhere raises `ChildProcessError`."""
-    if proc.returncode is not None:
+    reaped elsewhere raises `ChildProcessError`. The reap and its record are one step: no
+    guard's handler sees the pid reaped but unrecorded."""
+    with _signals_deferred():
+        if proc.returncode is not None:
+            return True
+        try:
+            pid, status = os.waitpid(proc.pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        if pid == 0:
+            return False
+        proc.returncode = os.waitstatus_to_exitcode(status)
         return True
-    try:
-        pid, status = os.waitpid(proc.pid, os.WNOHANG)
-    except ChildProcessError:
-        return True
-    if pid == 0:
-        return False
-    proc.returncode = os.waitstatus_to_exitcode(status)
-    return True
 
 
 def _signal_held(proc: subprocess.Popen, signum: int) -> None:
@@ -109,7 +128,7 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
     while stragglers still hold it. A call that finds the SIGTERM already sent (a kill under
     way, interrupted by a signal) skips straight to the SIGKILL, the reap and the check; a
     call that finds the child reaped returns at once, and so does an interrupted call that
-    resumes to find it reaped.
+    resumes to find it reaped. The SIGKILL and the reap run with SIGINT and SIGTERM held.
     """
     pgid = proc.pid
     if _stage.get(proc, 0) < _TERMED:
@@ -124,15 +143,16 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
             if not alive or _leader_reaped(proc) or time.monotonic() >= deadline:
                 break
             time.sleep(0.02)
-    if _stage[proc] >= _REAPED:
-        return
-    leader_reaped = _leader_reaped(proc)
-    if leader_reaped:
-        # Only stragglers can still be in the group; mark the reap before signalling them.
-        _stage[proc] = _REAPED
-    _signal_held(proc, signal.SIGKILL)
-    if not leader_reaped:
-        _reap(proc)
+    # The SIGKILL, the reap and the record of both are one step: a guard's handler runs before
+    # it (and finishes the kill, which this call then finds) or after it (and finds it done),
+    # so neither signal nor reap is repeated. The record is read once the signals are held.
+    with _signals_deferred():
+        if _stage[proc] >= _REAPED:
+            return
+        leader_reaped = _leader_reaped(proc)
+        _signal_held(proc, signal.SIGKILL)
+        if not leader_reaped:
+            _reap(proc)
         _stage[proc] = _REAPED
     deadline = time.monotonic() + _GRACE_SECONDS
     while _group_alive(pgid):
