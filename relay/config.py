@@ -40,7 +40,7 @@ class Config:
     idle_ceiling: int = 0  # 0 asks for the default, 13/10 of context_limit
     check_timeout: float = 1800
     check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
-    research_command: list[str] | None = None  # default set in __post_init__ and load_config
+    research_command: list[str] = field(default_factory=list)  # empty asks for the default
     map_max_lines: int = 150
     map_max_chars: int = 12_000
 
@@ -49,7 +49,7 @@ class Config:
             object.__setattr__(
                 self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
             )
-        if self.research_command is None:
+        if not self.research_command:
             object.__setattr__(
                 self,
                 "research_command",
@@ -181,10 +181,8 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         idle_ceiling=idle_ceiling,
         check_timeout=check_timeout,
         check_outside=_patterns(merged, "check_outside", list(_DEFAULT_CHECK_OUTSIDE)),
-        research_command=_command(
-            merged,
-            "research_command",
-            [*lead_command, "--agent", "researcher", "--model", "opus[1m]"],
+        research_command=(
+            _command(merged, "research_command", []) if "research_command" in merged else []
         ),
         map_max_lines=map_max_lines,
         map_max_chars=map_max_chars,
