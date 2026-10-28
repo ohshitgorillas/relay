@@ -52,6 +52,12 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config: ...
 
 `relay/queue.py`: parses the divvyer's `.md` queue into sections. This is the only code that knows the queue's format. Relay never writes the queue; the divvyer's `recut` writes it.
 
+The queue format, as `relay/queue.py` parses it:
+- A section starts at a column-0 header line `section <id> | <title> | <field> | ...` outside a code fence and runs to the next header (`relay/queue.py:19`, `relay/queue.py:33`).
+- Dependencies are a `|` field of the header line, `depends: <id>, <id>`. The marker is case-insensitive, and `depends on:`, `depends_on:` and `depends-on:` are accepted the same (`relay/queue.py:20`, `relay/queue.py:52`). Each id must name a section in the same queue, or the parse raises `QueueFormatError` (`relay/queue.py:66`).
+- A `done` field in the same header marks the section closed, `open: False` (`relay/queue.py:55`).
+- Every other header field is kept in `title`, joined by ` | `.
+
 ```python
 @dataclass(frozen=True)
 class Section:
@@ -95,9 +101,15 @@ class State:
     def stop_file(self) -> Path: ...                          # <dir>/STOP
     @property
     def run_dir(self) -> Path: ...                            # <dir>/runs/
+    @property
+    def ledger_path(self) -> Path: ...                        # <dir>/ledger.jsonl
+    @property
+    def retire_flag(self) -> Path: ...                        # <dir>/runs/retire
 ```
 
-`relay/ledger.py`: the spend ledger. It appends one JSON line per finished run (lead or recut), stamped with its POSIX time, to `<state dir>/ledger.jsonl`. Budgets count only the current `relay go`: the loop passes its own start time as `since`. `relay status` shows the rolling 7-day total (`since` = now minus 7 days) beside the all-time total.
+`relay/loop.py` and `relay/cli.py` take the ledger path and the retire-flag path only from `State.ledger_path` and `State.retire_flag`; no module but `state.py` joins a name onto a `State` path.
+
+`relay/ledger.py`: the spend ledger. It appends one JSON line per finished run (lead or recut), stamped with its POSIX time, to `State.ledger_path`. Budgets count only the current `relay go`: the loop passes its own start time as `since`. `relay status` shows the rolling 7-day total (`since` = now minus 7 days) beside the all-time total.
 
 A corrupt or torn ledger never stops Relay and never needs a hand fix; no ledger method raises on the file's content. Recovery works as follows:
 - `append` opens the file with `O_APPEND`. If the file is non-empty and its last byte is not `\n`, `append` first writes `\n`, which closes off a line torn by a crash so the new entry starts on a line of its own. It then writes the whole entry, `\n` included, in one `os.write` and calls `os.fsync`.
@@ -147,6 +159,7 @@ def run_agent(argv: list[str], stdin_text: str, cwd: Path, run_dir: Path,
               on_event: Callable[[StreamState], Literal["go", "retire", "kill"]],
               retire_flag: Path) -> RunResult: ...
 # on_event returning "retire" creates retire_flag once; "kill" kills the group.
+# The loop passes State.run_dir and State.retire_flag.
 ```
 
 `relay/status.py`: parses the lead's final status line, which is the last non-empty line of the result text.
@@ -232,7 +245,7 @@ Relay replaces nothing: no copy exists in the tree.
 | Starting, streaming, killing and reaping child processes; PID records; signal cleanup | `relay/runner.py` | `subprocess`, `os.kill`, `signal` in any other module (`ping.py` may call `subprocess.run` for the ping only) |
 | Claude stream-json schema, token and cost counting | `relay/stream.py` | parsing stream-json events or reading `usage` / `total_cost_usd` anywhere else |
 | Divvyer queue format | `relay/queue.py` | reading or regex-matching the queue file anywhere else; writing the queue anywhere |
-| Relay state, stop file, lock, run dirs | `relay/state.py` | paths under `state_root` built anywhere else; any non-atomic state write |
+| Relay state, stop file, lock, run dirs, ledger path, retire flag | `relay/state.py` | paths under `state_root` built anywhere else, a name joined onto `State.stop_file` or `State.run_dir` included; any non-atomic state write |
 | Spend summing, budget checks, ledger reading, writing and recovery | `relay/ledger.py` | summing tokens or dollars, opening `ledger.jsonl`, or judging a ledger line readable anywhere else; any rewrite, truncation or deletion of the ledger anywhere |
 | Lead status-line contract | `relay/status.py` (parse) and `relay/prompts.py` (wording) | the status words or their regex written in any other module |
 | Agent prompt and brief text | `relay/prompts.py` | prompt strings in `loop.py` or `cli.py` |
@@ -259,3 +272,5 @@ Relay replaces nothing: no copy exists in the tree.
 12. Status, prompts and ping: build. `builder` writes `relay/status.py`, `relay/prompts.py` and `relay/ping.py`.
 13. Loop and CLI: red tests. `test-writer` writes `tests/test_loop.py` and `tests/test_cli.py`.
 14. Loop and CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`.
+15. State path accessors: red tests. `test-writer` writes `tests/test_state.py`, covering `State.ledger_path` and `State.retire_flag`.
+16. State path accessors: build. `builder` writes `relay/state.py` (`ledger_path`, `retire_flag`), `relay/loop.py` and `relay/cli.py`, replacing the paths built at `relay/loop.py:46`, `relay/loop.py:49` and `relay/cli.py:81` with those accessors.
