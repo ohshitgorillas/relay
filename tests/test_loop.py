@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import re
 import subprocess
@@ -14,6 +15,8 @@ from typing import Callable
 
 import pytest
 
+import relay.loop
+import relay.ping
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
@@ -1360,3 +1363,388 @@ def test_each_kind_of_stop_sends_a_stopped_ping_unlike_every_other_kinds(
         for other, theirs in messages.items():
             if other != kind:
                 assert not set(mine) & set(theirs), (kind, mine, other, theirs)
+
+
+# Progress lines (design `relay-progress-design.md`, Modules: `relay/loop.py` calls these).
+# Each test reads what `run` wrote with `capsys` and matches each line after its `HH:MM:SS `
+# prefix. A test that must see where a call falls among the lines wraps that call so it writes
+# a marker line of its own, which carries no such prefix.
+
+_STAMP = re.compile(r"(\d{2}):(\d{2}):(\d{2}) (.*)")
+_STARTED = r"relay go .+: started; .+"
+
+# Every line `relay/progress.py` words, as the design gives it.
+_PROGRESS = [
+    re.compile(_STARTED),
+    re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
+    re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
+    re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
+    re.compile(r"recut \S+: started: .+"),
+    re.compile(r"recut \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"section \S+: needs an answer: .+"),
+    re.compile(r"section \S+: failed \(\d+ of 2\)"),
+    re.compile(r"waiting for answers on .+"),
+    re.compile(r"relay go .+: ended .+: .* \(exit \d+\)"),
+]
+
+
+def _texts(out: str) -> list[str]:
+    """Each line of `out`: a progress line cut to what follows its `HH:MM:SS ` prefix, a marker kept whole."""
+    texts = []
+    for line in out.splitlines():
+        stamped = _STAMP.fullmatch(line)
+        texts.append(stamped.group(4) if stamped else line)
+    return texts
+
+
+def _failed(texts: list[str]) -> list[str]:
+    return [t for t in texts if t.startswith("section ") and ": failed (" in t]
+
+
+def _mark(
+    monkeypatch: pytest.MonkeyPatch, owner: object, name: str, marker: str, before: bool = False
+) -> list[inspect.BoundArguments]:
+    """Wrap `owner.name` so each call writes `marker` as a line of its own to stdout, before the
+    call when `before`, else after it; return the list each call's bound arguments go to."""
+    original = getattr(owner, name)
+    calls: list[inspect.BoundArguments] = []
+
+    def wrapped(*args: object, **kwargs: object) -> object:
+        calls.append(inspect.signature(original).bind(*args, **kwargs))
+        if before:
+            sys.stdout.write(marker + "\n")
+        result = original(*args, **kwargs)
+        if not before:
+            sys.stdout.write(marker + "\n")
+        return result
+
+    monkeypatch.setattr(owner, name, wrapped)
+    return calls
+
+
+# Progress behavior 1: `relay/loop.py` calls these, and nothing else in it writes to the terminal.
+
+
+def test_a_go_writes_only_progress_lines_each_stamped_with_the_time(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop prints a line of its own beside the progress lines, writes to
+    # stderr, or writes no progress line at all.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first, second = _open_ids(queue)[:2]
+    # The first section parks; the second asks for a recut that leaves the queue unchanged,
+    # then fails again.
+    leads = [_step(NEEDS_OWNER_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    for line in captured.out.splitlines():
+        stamped = _STAMP.fullmatch(line)
+        assert stamped is not None, line
+        hours, minutes, seconds = (int(stamped.group(n)) for n in (1, 2, 3))
+        assert hours < 24 and minutes < 60 and seconds < 60, line
+        assert any(p.fullmatch(stamped.group(4)) for p in _PROGRESS), line
+    texts = _texts(captured.out)
+    for wanted in (
+        _STARTED,
+        rf"lead {re.escape(first)}: started .*",
+        rf"lead {re.escape(first)}: finished .+",
+        rf"section {re.escape(first)}: needs an answer: .+",
+        rf"recut {re.escape(second)}: started: .+",
+        rf"recut {re.escape(second)}: finished .+",
+        rf"section {re.escape(second)}: failed \(2 of 2\)",
+        r"relay go .+: ended .+",
+    ):
+        assert any(re.fullmatch(wanted, t) for t in texts), (wanted, texts)
+
+
+# Progress behavior 2: `run` calls `progress.started` after `state.lock()` succeeds, and
+# `progress.ended` after each `ping.stopped`.
+
+
+def test_started_is_written_first_once_the_lock_is_taken_and_not_when_another_go_holds_it(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: run writes the started line before it takes the lock, or never writes it.
+    scenario(_lines(DONE_LEAD))
+    held = queue_file(M2)
+    holder = State.open(held, cfg)
+    holder.lock()
+    try:
+        run(held, cfg)
+    except LockedError:
+        pass
+    assert not any(re.fullmatch(_STARTED, t) for t in _texts(capsys.readouterr().out))
+    free = queue_file(WORKBOARD)
+    state = State.open(free, cfg)
+    for sid in _open_ids(free):
+        state.mark_done(sid)
+    assert run(free, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert texts != []
+    assert re.fullmatch(_STARTED, texts[0]), texts
+    assert len([t for t in texts if re.fullmatch(_STARTED, t)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "lead"),
+    [
+        ("stop-file", ExitCode.STOP_FILE, DONE_LEAD),
+        ("budget", ExitCode.BUDGET, DONE_LEAD),
+        ("queue-empty", ExitCode.QUEUE_EMPTY, DONE_LEAD),
+        ("failed-twice", ExitCode.FAILED_TWICE, NO_STATUS_LEAD),
+        ("budget-retire", ExitCode.BUDGET, DONE_LEAD),
+    ],
+    ids=["stop-file", "budget", "queue-empty", "failed-twice", "budget-retire"],
+)
+def test_ended_is_the_last_line_written_just_after_the_stopped_ping_with_its_reason_and_detail(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    code: int,
+    lead: str,
+) -> None:
+    # Breaks when: a stop writes no ended line, writes it before ping.stopped, or words it
+    # with another reason, detail or exit code than the stop's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(lead))
+    if kind == "budget-retire":
+        _only_first_open(queue, cfg)
+        cfg = dataclasses.replace(cfg, token_budget=RETIRED_SPEND.tokens - 1)
+        cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD)])
+    else:
+        cfg = _stop_on(kind, queue, cfg)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    assert run(queue, cfg) == code
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    assert len(_pings(tmp_path)) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    ended = [t for t in texts if re.fullmatch(r"relay go .+: ended .+", t)]
+    assert len(ended) == 1, texts
+    assert texts[-2:] == ["<ping.stopped>", ended[0]], texts
+    expected = re.escape(f"{reason}: {detail} (exit {int(code)})")
+    assert re.fullmatch(r"relay go .+: ended " + expected, ended[0]), ended
+
+
+def test_a_stop_file_while_waiting_writes_ended_just_after_the_stopped_ping(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the STOP_FILE stop from the wait returns with no ended line after its ping.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    assert texts[-2:-1] == ["<ping.stopped>"], texts
+    expected = re.escape(f"{reason}: {detail} (exit {int(ExitCode.STOP_FILE)})")
+    assert re.fullmatch(r"relay go .+: ended " + expected, texts[-1]), texts
+
+
+# Progress behavior 3: `_run_section` calls `progress.lead_started` just before `run_agent`.
+
+
+def test_lead_started_is_written_just_before_each_lead_runs(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a lead runs with no lead_started line just before it, or the line names
+    # another section or session.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    runs = _mark(monkeypatch, relay.loop, "run_agent", "<run_agent>", before=True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(runs) == 2
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == 2, texts
+    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
+    assert texts[at[1] - 1] == f"lead {first}: started, resuming sess-lead-3", texts
+    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
+
+
+def test_lead_started_is_written_before_the_lead_that_asks_for_a_recut_and_not_before_the_recut(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: lead_started is written for the recut's run_agent too, or not for the lead's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    _mark(monkeypatch, relay.loop, "run_agent", "<run_agent>", before=True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == 3, texts
+    assert re.fullmatch(rf"lead {re.escape(first)}: started.*", texts[at[0] - 1]), texts
+    assert not texts[at[1] - 1].startswith("lead "), texts
+    assert re.fullmatch(rf"lead {re.escape(first)}: started.*", texts[at[2] - 1]), texts
+
+
+# Progress behavior 4: On `NEEDS-OWNER` it calls `progress.needs_answer` beside `ping.needs_owner`.
+
+
+def test_needs_owner_writes_needs_an_answer_beside_the_needs_owner_ping(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: NEEDS-OWNER writes no needs-an-answer line, writes it apart from the ping,
+    # or the ping no longer goes out.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
+    asks = _mark(monkeypatch, relay.ping, "needs_owner", "<ping.needs_owner>")
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    texts = _texts(capsys.readouterr().out)
+    assert len(asks) == 1
+    assert len([p for p in _pings(tmp_path) if QUESTION in p[0]]) == 1
+    needs = [n for n, t in enumerate(texts) if re.fullmatch(r"section \S+: needs an answer: .+", t)]
+    assert len(needs) == 1, texts
+    assert texts[needs[0]] == f"section {sid}: needs an answer: {QUESTION}"
+    assert abs(texts.index("<ping.needs_owner>") - needs[0]) == 1, texts
+
+
+# Progress behavior 5: On every failure `record_failure` counts, the recut's included, it calls
+# `progress.failed` with the new count.
+
+
+@pytest.mark.parametrize(
+    ("failing", "context"),
+    [(_step(NO_STATUS_LEAD), None), (_step(DONE_LEAD, exit=1), None), (_step(DONE_LEAD), FIRST_CONTEXT)],
+    ids=["no-status-line", "non-zero-exit", "killed"],
+)
+def test_a_lead_failure_writes_failed_with_the_count_one(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    failing: dict[str, object],
+    context: int | None,
+) -> None:
+    # Breaks when: a failure record_failure counts writes no failed line, or another count.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    if context is not None:
+        cfg = dataclasses.replace(cfg, context_limit=context - 200, hard_ceiling=context)
+    cfg = _sequenced(cfg, tmp_path, [failing, _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {first}: failed (1 of 2)"]
+
+
+def test_a_second_failure_writes_failed_with_the_count_two(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the failed line carries a count other than record_failure's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _failed(_texts(capsys.readouterr().out)) == [
+        f"section {first}: failed (1 of 2)",
+        f"section {first}: failed (2 of 2)",
+    ]
+
+
+def test_a_failure_recorded_before_this_go_makes_the_first_failed_line_count_two(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop counts this go's failures itself instead of taking record_failure's count.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    State.open(queue, cfg).record_failure(first)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {first}: failed (2 of 2)"]
+
+
+def test_a_recut_that_leaves_the_queue_unchanged_writes_failed_after_the_recut_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a recut that changed nothing counts its failure with no failed line.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert _failed(texts) == [f"section {first}: failed (1 of 2)"]
+    recut = [n for n, t in enumerate(texts) if t.startswith(f"recut {first}: finished ")]
+    assert len(recut) == 1, texts
+    assert texts.index(f"section {first}: failed (1 of 2)") > recut[0]
+
+
+def test_a_recut_with_a_non_zero_exit_writes_failed_with_the_new_count(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a recut's non-zero exit counts a failure with no failed line.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _recut_to_m2(cfg, tmp_path, queue, exit=1)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {sid}: failed (1 of 2)"]
