@@ -8,9 +8,12 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from relay.config import Config
+
+if TYPE_CHECKING:
+    from relay.check import CheckResult
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,9 @@ class Ledger:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+    def append_check(self, section: str, result: "CheckResult") -> None:
+        raise NotImplementedError
 
     def _ends_with_newline(self) -> bool:
         with open(self._path, "rb") as handle:
