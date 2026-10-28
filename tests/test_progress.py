@@ -6,6 +6,7 @@ Lines are read with pytest's `capsys` and matched after their `HH:MM:SS ` prefix
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import os
 import re
 import sys
@@ -139,12 +140,16 @@ class _Stdout:
 
 
 @pytest.fixture(params=["XYZ-14", "ABC+12"], ids=["utc-plus-14", "utc-minus-12"])
-def far_zone(request: pytest.FixtureRequest) -> Iterator[str]:
-    """Set the host's local zone (POSIX `TZ`) 12 or more hours from UTC for the test, then restore it."""
+def far_host_zone(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Run the host in a zone (POSIX `TZ`) 12 or more hours from UTC from before `relay.progress`
+    is imported: the module is imported afresh under that zone, so one that reads its zone once at
+    import sees it as surely as one that reads it on every call. The host zone and a fresh import
+    under it are restored afterwards."""
     saved = os.environ.get("TZ")
     os.environ["TZ"] = request.param
     time.tzset()
     try:
+        importlib.reload(progress)
         yield request.param
     finally:
         if saved is None:
@@ -152,17 +157,19 @@ def far_zone(request: pytest.FixtureRequest) -> Iterator[str]:
         else:
             os.environ["TZ"] = saved
         time.tzset()
+        importlib.reload(progress)
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_each_line_starts_with_the_local_time_in_the_hosts_zone(
+def test_each_line_starts_with_the_local_time_of_the_zone_the_host_runs_in(
     name: str,
-    far_zone: str,
+    far_host_zone: str,
     queue_file: Callable[[str], Path],
     fake_cfg: Config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: a function writes no time prefix, a UTC time, or a time not as HH:MM:SS.
+    # Breaks when: a function writes no time prefix, a UTC time, a time not as HH:MM:SS, or a
+    # time in a zone other than the one the host ran in when the module was imported.
     call = _call(name, queue_file, fake_cfg)
     before = time.time()
     call()
