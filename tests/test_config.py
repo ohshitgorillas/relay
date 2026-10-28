@@ -84,8 +84,8 @@ def test_empty_config_gives_documented_defaults(tmp_path: Path, home: Path) -> N
     assert cfg.lead_command == DEFAULT_LEAD
     assert cfg.recut_command == DEFAULT_LEAD + ["--agent", "divvyer"]
     assert cfg.ping_command in (
-        ["~/.local/bin/claude-ping", "{message}"],
-        [str(home / ".local" / "bin" / "claude-ping"), "{message}"],
+        ["~/.local/bin/claude-ping", "relay", "{message}"],
+        [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"],
     )
     assert cfg.state_root == home / ".local" / "state" / "relay"
 

@@ -116,7 +116,7 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         lead_command=lead_command,
         recut_command=_command(merged, "recut_command", [*lead_command, "--agent", "divvyer"]),
         ping_command=_command(
-            merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "{message}"]
+            merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"]
         ),
         state_root=state_root,
     )
