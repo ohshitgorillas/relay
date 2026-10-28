@@ -6,7 +6,7 @@ exactly one of "DONE", "RECUT: <reason>", "NEEDS-OWNER: <question>", "RETIRED".
 
 from __future__ import annotations
 
-from relay.status import LeadStatus, parse_status
+from relay.status import KINDS, TEXT_NAMES, LeadStatus, parse_status
 
 
 # Behavior 1: `relay/status.py`: parses the lead's final status line, which is the last
@@ -125,3 +125,50 @@ def test_done_followed_by_extra_words_gives_none() -> None:
 def test_retired_followed_by_extra_words_gives_none() -> None:
     # Breaks when: parse_status matches a prefix, so "RETIRED ..." with more words still counts as RETIRED.
     assert parse_status("Context is heavy.\nRETIRED early") is None
+
+
+# Relay's ladder (design: docs/superpowers/specs/relay-ladder-design.md, Modules `relay/status.py`; Order 4).
+# Behavior 1: two status words. `Kind` gains DESIGN and WAITING; TEXT_NAMES names DESIGN's text
+# "problem" and WAITING's "section id".
+
+
+def test_design_and_waiting_are_status_words() -> None:
+    # Breaks when: either word is missing from the one list of status words.
+    assert "DESIGN" in KINDS
+    assert "WAITING" in KINDS
+
+
+def test_design_text_is_named_problem_and_waiting_text_section_id() -> None:
+    # Breaks when: TEXT_NAMES lacks either word or names its text otherwise.
+    assert TEXT_NAMES.get("DESIGN") == "problem"
+    assert TEXT_NAMES.get("WAITING") == "section id"
+
+
+def test_the_earlier_text_names_are_kept() -> None:
+    # Breaks when: adding the two words drops or renames RECUT's or NEEDS-OWNER's text.
+    assert TEXT_NAMES.get("RECUT") == "reason"
+    assert TEXT_NAMES.get("NEEDS-OWNER") == "question"
+
+
+def test_design_carries_its_problem_as_text() -> None:
+    # Breaks when: parse_status does not recognise a final "DESIGN: <problem>" line.
+    status = parse_status("The design has no step for it.\nDESIGN: no module owns the cache; Order 3")
+    assert status == LeadStatus(kind="DESIGN", text="no module owns the cache; Order 3")
+
+
+def test_waiting_carries_its_section_id_as_text() -> None:
+    # Breaks when: parse_status does not recognise a final "WAITING: <id>" line.
+    status = parse_status("I need s2's API first.\nWAITING: s2.d1")
+    assert status == LeadStatus(kind="WAITING", text="s2.d1")
+
+
+def test_design_without_a_problem_gives_none() -> None:
+    # Breaks when: a DESIGN with no problem is accepted, though DESIGN names a text.
+    assert parse_status("Stuck.\nDESIGN") is None
+    assert parse_status("Stuck.\nDESIGN: ") is None
+
+
+def test_waiting_without_a_section_id_gives_none() -> None:
+    # Breaks when: a WAITING with no section id is accepted, though WAITING names a text.
+    assert parse_status("Stuck.\nWAITING") is None
+    assert parse_status("Stuck.\nWAITING: ") is None

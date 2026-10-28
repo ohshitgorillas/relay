@@ -669,3 +669,145 @@ def test_mark_done_with_a_session_and_no_map_file_clears_the_session(queue: Path
     section = State.open(queue, fake_cfg).section("s1")
     assert section.status == "done"
     assert section.research_session is None
+
+
+# Relay's ladder (design: docs/superpowers/specs/relay-ladder-design.md, Modules `relay/state.py`; Order 4).
+# Behavior 2: design_changed: this section had a design change, or a design-change recut made it.
+
+
+def test_mark_design_changed_is_kept_for_that_section_only(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the flag is not saved across reopening, or is set on another section too.
+    State.open(queue, fake_cfg).mark_design_changed("s1.1")
+    state = State.open(queue, fake_cfg)
+    assert state.section("s1.1").design_changed is True
+    assert state.section("s1").design_changed is False
+
+
+def test_mark_design_changed_leaves_from_recut_alone(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the design-change flag is stored in, or also sets, the recut lineage flag.
+    state = State.open(queue, fake_cfg)
+    state.mark_design_changed("s1")
+    state.mark_from_recut("s2")
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s1").from_recut is False
+    assert reopened.section("s1").design_changed is True
+    assert reopened.section("s2").from_recut is True
+    assert reopened.section("s2").design_changed is False
+
+
+def test_a_record_saved_before_the_ladder_loads_with_its_fields_at_their_defaults(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: a state.json from an older relay, without the ladder's keys, no longer loads.
+    state = State.open(queue, fake_cfg)
+    old = '{"sections": {"s1": {"status": "parked", "failures": 1, "question": "q", "answer": null, "last_session": null}}, "last_any": null}'
+    (_dir(state) / "state.json").write_text(old)
+    state.mark_design_changed("s2")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.status == "parked"
+    assert section.design_changed is False
+    assert section.design_open is None
+    assert section.waits_on is None
+
+
+# Behavior 3: design_open: the design path whose product decision awaits the owner's answer.
+
+DESIGN = "docs/superpowers/specs/relay-check-design.md"
+
+
+def test_set_design_open_keeps_the_path_for_that_section_across_reopening(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: the design path is not saved, is altered, or is set on another section too.
+    State.open(queue, fake_cfg).set_design_open("s3", DESIGN)
+    state = State.open(queue, fake_cfg)
+    assert state.section("s3").design_open == DESIGN
+    assert state.section("s1").design_open is None
+
+
+def test_set_design_open_none_clears_it(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: a None design is ignored and the old path kept.
+    state = State.open(queue, fake_cfg)
+    state.set_design_open("s3", DESIGN)
+    state.set_design_open("s3", None)
+    assert State.open(queue, fake_cfg).section("s3").design_open is None
+
+
+# Behavior 4: wait: status "waiting", waits_on blocker; no question.
+
+
+def test_wait_sets_status_waiting_and_the_blocker_across_reopening(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: wait does not set "waiting", does not save the blocker, or touches another section.
+    State.open(queue, fake_cfg).wait("s3", "s2")
+    state = State.open(queue, fake_cfg)
+    assert state.section("s3").status == "waiting"
+    assert state.section("s3").waits_on == "s2"
+    assert state.section("s2").status == "open"
+    assert state.section("s2").waits_on is None
+
+
+def test_wait_sets_no_question(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: wait parks a question for the owner, as park does.
+    State.open(queue, fake_cfg).wait("s3", "s2")
+    assert State.open(queue, fake_cfg).section("s3").question is None
+
+
+# Behavior 5: wake: status "open", waits_on None.
+
+
+def test_wake_reopens_a_waiting_section_and_clears_its_blocker(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: wake leaves the section waiting or keeps waits_on.
+    state = State.open(queue, fake_cfg)
+    state.wait("s3", "s2")
+    state.wake("s3")
+    section = State.open(queue, fake_cfg).section("s3")
+    assert section.status == "open"
+    assert section.waits_on is None
+
+
+def test_wake_leaves_other_waiting_sections_waiting(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: wake reopens every waiting section, not only the one named.
+    state = State.open(queue, fake_cfg)
+    state.wait("s3", "s2")
+    state.wait("s4", "s2")
+    state.wake("s3")
+    section = State.open(queue, fake_cfg).section("s4")
+    assert section.status == "waiting"
+    assert section.waits_on == "s2"
+
+
+# Behavior 6: `set_answer` also reopens a waiting section and clears `waits_on`.
+# `mark_done` clears `design_open` and `waits_on`.
+
+
+def test_set_answer_on_a_waiting_section_reopens_it_and_clears_waits_on(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: set_answer leaves a waiting section waiting, or keeps its blocker.
+    state = State.open(queue, fake_cfg)
+    state.wait("s3", "s2")
+    state.set_answer("s3", "Go on without s2.")
+    section = State.open(queue, fake_cfg).section("s3")
+    assert section.status == "open"
+    assert section.waits_on is None
+    assert section.answer == "Go on without s2."
+
+
+def test_mark_done_clears_design_open(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: mark_done leaves the open design path set.
+    state = State.open(queue, fake_cfg)
+    state.set_design_open("s3", DESIGN)
+    state.mark_done("s3")
+    section = State.open(queue, fake_cfg).section("s3")
+    assert section.status == "done"
+    assert section.design_open is None
+
+
+def test_mark_done_clears_waits_on(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: mark_done leaves the section's blocker set.
+    state = State.open(queue, fake_cfg)
+    state.wait("s3", "s2")
+    state.mark_done("s3")
+    section = State.open(queue, fake_cfg).section("s3")
+    assert section.status == "done"
+    assert section.waits_on is None
