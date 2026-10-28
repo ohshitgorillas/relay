@@ -60,6 +60,10 @@ class Ledger:
             "session": session,
             "tokens": spend.tokens,
             "dollars": spend.dollars,
+            "map": map_commit,
+            "agents": [
+                {"name": a.name, "task_id": a.task_id, "total_tokens": a.context} for a in agents
+            ],
         }
         self._write(entry)
 

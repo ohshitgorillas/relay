@@ -117,8 +117,10 @@ class State:
             s.question = None
             s.check_feedback = None
             s.check_pending = False
+            s.research_session = None
 
         self._update(sid, change)
+        self.map_path(sid).unlink(missing_ok=True)
 
     def record_check_failure(self, sid: str, feedback: str) -> int:
         def change(s: SectionState, _r: dict) -> int:
@@ -223,24 +225,29 @@ class State:
 
     def map_path(self, sid: str) -> Path:
         """<dir>/maps/<sid>.map"""
-        raise NotImplementedError
+        return self._dir / "maps" / f"{sid}.map"
 
     def research_flag(self, sid: str) -> Path:
         """run_dir / "research-<sid>": the research runs' retire flag."""
-        raise NotImplementedError
+        return self.run_dir / f"research-{sid}"
 
     def set_research_session(self, sid: str, session: str | None) -> None:
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> None:
+            s.research_session = session
+
+        self._update(sid, change)
 
     def drop_map(self, sid: str) -> None:
         """Clear research_session and delete map_path(sid)."""
-        raise NotImplementedError
+        self.set_research_session(sid, None)
+        self.map_path(sid).unlink(missing_ok=True)
 
     @contextlib.contextmanager
     def research_lock(self, sid: str) -> Iterator[None]:
         """Blocking flock on <dir>/research-<sid>.lock."""
-        raise NotImplementedError
-        yield
+        with open(self._dir / f"research-{sid}.lock", "a") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
 
     @property
     def retire_flag(self) -> Path:
