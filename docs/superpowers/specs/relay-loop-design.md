@@ -129,6 +129,7 @@ class Ledger:
     def total(self, since: float | None) -> Spend: ...   # since = POSIX timestamp of the window start; skips unreadable lines
     def over(self, cfg: Config, live: Spend, since: float | None) -> Literal["tokens", "dollars"] | None: ...
     def unreadable(self) -> list[int]: ...               # 1-based numbers of the unreadable lines; [] when the file is absent
+    def sessions(self) -> list[tuple[str, str]]: ...     # (section, session) of each readable line naming both, in the order written
 ```
 
 `relay/stream.py`: reads the `claude -p --output-format stream-json` event lines. This is the only code that knows that schema.
@@ -141,9 +142,12 @@ class StreamState:
     spend: Spend               # running sum of usage; dollars filled from the result event
     result_text: str | None    # the result event's text
     is_error: bool
+    activity: agents.Activity # the subagents the run spawned, from its `task_*` system events
 
 def feed(state: StreamState, line: str) -> StreamState: ...   # ignores lines that are not JSON events
 ```
+
+`relay/agents.py`: folds the `task_*` system events that `stream.feed` hands it, already decoded, into the subagents a run spawned. Only `task_type: local_agent` counts; background shell tasks are ignored. Each `Agent` keeps its type, description, context (the last `total_tokens` reported, not a sum), time (the largest `duration_ms` reported, so an agent continued with SendMessage is not counted twice) and finish status. `Activity.events` lists each start and finish with the count of subagents live after it, for the live progress lines. `merge` joins two runs' activity, an agent both hold taken from the later run; `summarise` gives the count, the summed time and the agent with the largest context; `duration` words a time as `36.9s`, `2m13s` or `1h05m`. No cost is kept per agent: no stream event reports one.
 
 `relay/runner.py`: the one place a child process starts, streams, is killed and is reaped. Each child runs in its own process group (`start_new_session=True`). The runner records the child's PID in `<run_dir>/<n>.pid`. It writes the child's stderr to `<run_dir>/<n>.stderr`, a file rather than a pipe, so it never reaches the terminal and the child never blocks on it. It kills by process group, then checks with `os.waitpid` and `os.kill(pid, 0)` that the child is gone. It also installs SIGINT and SIGTERM handlers that kill the live child group before Relay exits.
 
@@ -229,7 +233,9 @@ def main(argv: list[str] | None = None) -> int: ...
 # relay stop <queue.md>                     creates the stop file
 # relay answer <queue.md> <section-id> <text>   sets the answer, reopens the section
 # relay status <queue.md>                   prints each section's state, the ledger's rolling 7-day and all-time totals,
-#                                           and, when Ledger.unreadable() is non-empty, one line naming the ledger path and those line numbers as skipped
+#                                           and, when Ledger.unreadable() is non-empty, one line naming the ledger path and those line numbers as skipped.
+#                                           A section whose runs spawned subagents ends its line "; <n> agents, <time>, biggest <name> at context <tokens>: <description>",
+#                                           from the run logs in State.run_dir whose session Ledger.sessions() files under that section
 ```
 
 The lead and the recut run with `cwd` set to the git top level of the queue's directory. Relay never commits, never cleans the work tree and never edits the queue. Leads and the divvyer keep git and the queue as the record of what is finished.
@@ -243,7 +249,8 @@ Relay replaces nothing: no copy exists in the tree.
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
 | Starting, streaming, killing and reaping child processes; PID records; signal cleanup | `relay/runner.py` | `subprocess`, `os.kill`, `signal` in any other module (`ping.py` may call `subprocess.run` for the ping only) |
-| Claude stream-json schema, token and cost counting | `relay/stream.py` | parsing stream-json events or reading `usage` / `total_cost_usd` anywhere else |
+| Claude stream-json schema, token and cost counting | `relay/stream.py` | parsing stream-json events or reading `usage` / `total_cost_usd` anywhere else; `relay/agents.py` reads only the `task_*` events `stream.feed` passes it |
+| Subagent activity: folding, merging, summing and wording a time | `relay/agents.py` | tracking a run's subagents anywhere else |
 | Divvyer queue format | `relay/queue.py` | reading or regex-matching the queue file anywhere else; writing the queue anywhere |
 | Relay state, stop file, lock, run dirs, ledger path, retire flag | `relay/state.py` | paths under `state_root` built anywhere else, a name joined onto `State.stop_file` or `State.run_dir` included; any non-atomic state write |
 | Spend summing, budget checks, ledger reading, writing and recovery | `relay/ledger.py` | summing tokens or dollars, opening `ledger.jsonl`, or judging a ledger line readable anywhere else; any rewrite, truncation or deletion of the ledger anywhere |

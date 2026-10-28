@@ -194,6 +194,7 @@ def test_no_ledger_method_raises_on_corrupt_or_torn_content(tmp_path: Path, fake
     _call(ledger.over, cfg, Spend(tokens=0, dollars=0.0), time.time() - 60)
     _call(ledger.append, "lead", "s2", "sess-b", Spend(tokens=1, dollars=0.0))
     _call(Ledger(path).total, None)
+    _call(ledger.sessions)
 
 
 # Behavior 2: If the file is non-empty and its last byte is not `\n`, `append` first writes
@@ -453,3 +454,28 @@ def test_append_onto_an_empty_file_writes_no_leading_newline(tmp_path: Path) -> 
     assert not text.startswith("\n")
     assert len(text.splitlines()) == 1
     assert ledger.unreadable() == []
+
+
+# `sessions`: the (section, session) of each readable line, so run logs can be filed by section.
+
+
+def test_sessions_lists_section_and_session_in_the_order_written(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=1, dollars=0.0))
+    ledger.append("recut", "s1", "sess-b", Spend(tokens=1, dollars=0.0))
+    ledger.append("lead", "s2", "sess-a", Spend(tokens=1, dollars=0.0))
+    assert ledger.sessions() == [("s1", "sess-a"), ("s1", "sess-b"), ("s2", "sess-a")]
+
+
+def test_sessions_skips_unreadable_lines_and_lines_without_a_session(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", None, Spend(tokens=1, dollars=0.0))
+    _raw(path, '{"time": 1, "tok\n')
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=1, dollars=0.0))
+    assert ledger.sessions() == [("s2", "sess-b")]
+
+
+def test_sessions_of_a_missing_ledger_is_empty(tmp_path: Path) -> None:
+    assert Ledger(tmp_path / "ledger.jsonl").sessions() == []

@@ -7,12 +7,13 @@ import sys
 import time
 from pathlib import Path
 
-from relay import loop
+from relay import agents, loop
 from relay.config import Config, load_config
 from relay.errors import ExitCode, QueueFormatError, RelayError
-from relay.ledger import Ledger
+from relay.ledger import Ledger, Spend
 from relay.queue import parse_queue
 from relay.state import State
+from relay.stream import StreamState, feed
 
 _WEEK = 7 * 24 * 60 * 60
 
@@ -72,14 +73,57 @@ def _answer(args: argparse.Namespace) -> int:
     return ExitCode.QUEUE_EMPTY
 
 
+def _section_activity(state: State, ledger: Ledger) -> dict[str, agents.Activity]:
+    """Each section's agents, from the run logs whose session the ledger files under it.
+
+    Runs are numbered and ledgered in the order they ran, so a session the ledger names
+    more than once pairs its logs with its ledger lines in that order.
+    """
+    sections: dict[str, list[str]] = {}
+    for section, session in ledger.sessions():
+        sections.setdefault(session, []).append(section)
+    logs = sorted(
+        (p for p in state.run_dir.glob("*.jsonl") if p.stem.isdigit()), key=lambda p: int(p.stem)
+    )
+    found: dict[str, agents.Activity] = {}
+    for log in logs:
+        stream = StreamState(None, 0, Spend(0, 0.0), None, False)
+        try:
+            with log.open(errors="replace") as handle:
+                for line in handle:
+                    stream = feed(stream, line)
+        except OSError:
+            continue
+        owners = sections.get(stream.session_id or "")
+        if not owners:
+            continue
+        section = owners.pop(0) if len(owners) > 1 else owners[0]
+        found[section] = agents.merge(found.get(section, agents.Activity()), stream.activity)
+    return found
+
+
+def _agent_summary(activity: agents.Activity | None) -> str:
+    if activity is None or not activity.agents:
+        return ""
+    summary = agents.summarise(activity)
+    plural = "" if summary.count == 1 else "s"
+    text = f"; {summary.count} agent{plural}, {agents.duration(summary.duration_ms)}"
+    big = summary.biggest
+    if big is not None and big.context:
+        text += f", biggest {big.name} at context {big.context}: {big.description}"
+    return text
+
+
 def _status(args: argparse.Namespace) -> int:
     queue = args.queue.resolve()
     cfg = _config({})
     state = State.open(queue, cfg)
-    for section in parse_queue(queue):
-        print(f"{section.id}  {state.section(section.id).status}")
     path = state.ledger_path
     ledger = Ledger(path)
+    activity = _section_activity(state, ledger)
+    for section in parse_queue(queue):
+        line = f"{section.id}  {state.section(section.id).status}"
+        print(line + _agent_summary(activity.get(section.id)))
     week = ledger.total(time.time() - _WEEK)
     total = ledger.total(None)
     print(f"7 days: {week.tokens} tokens, ${week.dollars}")

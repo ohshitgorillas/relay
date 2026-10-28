@@ -69,6 +69,9 @@ class Ledger:
 
     def _lines(self) -> list[tuple[int, tuple[float, float, float] | None]]:
         """Every line as (1-based number, (time, tokens, dollars) or None when unreadable)."""
+        return [(number, _parse(chunk)) for number, chunk in enumerate(self._chunks(), 1)]
+
+    def _chunks(self) -> list[bytes]:
         try:
             raw = self._path.read_bytes()
         except FileNotFoundError:
@@ -76,7 +79,19 @@ class Ledger:
         chunks = raw.split(b"\n")
         if chunks[-1] == b"":
             chunks.pop()
-        return [(number, _parse(chunk)) for number, chunk in enumerate(chunks, 1)]
+        return chunks
+
+    def sessions(self) -> list[tuple[str, str]]:
+        """(section, session) of each readable line naming both, in the order written."""
+        found = []
+        for chunk in self._chunks():
+            if _parse(chunk) is None:
+                continue
+            entry = json.loads(chunk.decode())
+            section, session = entry.get("section"), entry.get("session")
+            if isinstance(section, str) and isinstance(session, str):
+                found.append((section, session))
+        return found
 
     def total(self, since: float | None) -> Spend:
         tokens = 0

@@ -361,3 +361,46 @@ def test_status_with_a_readable_ledger_prints_no_skipped_line(
         if str(path) in line:
             rest = line.replace(str(path), " ")
             assert not _number(rest, "1") and not _number(rest, "2"), line
+
+
+# `relay status` adds, per section, the subagents its runs spawned: count, total time and the
+# biggest by context, from the run logs the ledger files under that section.
+
+AGENTS_LOG = Path(__file__).parent / "fixtures" / "stream-agents.jsonl"
+
+
+def test_status_summarises_each_sections_subagents_from_its_run_logs(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = State.open(queue, fake_cfg)
+    state.run_dir.mkdir(parents=True)
+    (state.run_dir / "1.jsonl").write_bytes(AGENTS_LOG.read_bytes())
+    Ledger(state.ledger_path).append("lead", "s2", "sess-agents-1", Spend(tokens=1, dollars=0.25))
+    assert _exit(["status", str(queue)]) == 0
+    out = capsys.readouterr().out
+    line = _section_line(out, "s2")
+    assert "2 agents" in line
+    assert "2m11s" in line  # 36.9s + 95.0s
+    assert "biggest test-writer at context 41000" in line
+    assert "agent" not in _section_line(out, "s3")
+
+
+def test_status_files_a_resumed_sessions_runs_under_each_section_in_turn(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = State.open(queue, fake_cfg)
+    state.run_dir.mkdir(parents=True)
+    (state.run_dir / "1.jsonl").write_bytes(AGENTS_LOG.read_bytes())
+    (state.run_dir / "2.jsonl").write_text(
+        AGENTS_LOG.read_text().splitlines()[0] + "\n"
+        + json.dumps({"type": "system", "subtype": "task_started", "task_id": "c1",
+                      "description": "Review", "subagent_type": "diff-reviewer",
+                      "task_type": "local_agent", "session_id": "sess-agents-1"}) + "\n"
+    )
+    ledger = Ledger(state.ledger_path)
+    ledger.append("lead", "s2", "sess-agents-1", Spend(tokens=1, dollars=0.0))
+    ledger.append("lead", "s3", "sess-agents-1", Spend(tokens=1, dollars=0.0))
+    assert _exit(["status", str(queue)]) == 0
+    out = capsys.readouterr().out
+    assert "2 agents" in _section_line(out, "s2")
+    assert "1 agent," in _section_line(out, "s3")

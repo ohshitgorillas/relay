@@ -19,6 +19,7 @@ This design builds on the modules of `docs/superpowers/specs/relay-loop-design.m
 ```python
 from pathlib import Path
 from typing import Literal
+from relay.agents import Event
 from relay.config import Config
 from relay.runner import RunResult
 from relay.status import LeadStatus
@@ -46,6 +47,12 @@ def recut_started(sid: str, reason: str) -> None: ...
 def recut_finished(sid: str, result: RunResult, changed: bool) -> None: ...
 # "recut <sid>: finished <outcome> (<tokens> tokens, $<dollars>)"; outcome "killed", "exit <code>", "with the queue unchanged" or "with the queue recut", the first that holds
 
+def agent_event(who: Literal["lead", "recut"], sid: str, event: Event) -> None: ...
+# "<who> <sid>: agent <name> started: <description> (<who> + <live> agents)" when a subagent starts;
+# "<who> <sid>: agent <name> <status> in <time>, context <tokens>: <description> (<who> + <live> agents)" when it finishes.
+# <status> is the finish status, "finished" when none was reported; "in <time>" reads "time unknown" when no duration was
+# reported; <time> as `agents.duration` words it; "agent" for a live count of 1. The description is cut like a question.
+
 def needs_answer(sid: str, question: str) -> None: ...
 # "section <sid>: needs an answer: <question>"
 
@@ -62,11 +69,13 @@ def ended(queue: Path, code: int, reason: str, detail: str) -> None: ...
 `relay/loop.py` calls these, and nothing else in it writes to the terminal:
 - `run` calls `progress.started` after `state.lock()` succeeds, and `progress.ended` after each `ping.stopped`, the crash path included with reason `crashed` and code `ExitCode.ERROR`.
 - `_run_section` calls `progress.lead_started` just before `run_agent`, with `answered` true when `take_answer` returned an answer, and `progress.lead_finished` once `parse_status` returns. On `NEEDS-OWNER` it calls `progress.needs_answer` beside `ping.needs_owner`. On every failure `record_failure` counts, the recut's included, it calls `progress.failed` with the new count.
-- `_watcher` takes the section id and calls `progress.retiring` the first time it returns `retire` in a run and `progress.killing` when it returns `kill`; it never repeats a line within one run.
+- `_watcher` takes who runs (`lead` or `recut`) and the section id and calls `progress.retiring` the first time it returns `retire` in a run and `progress.killing` when it returns `kill`; it never repeats a line within one run. On each stream event it calls `progress.agent_event` once for every event in `stream.activity.events` it has not yet printed in this run, in order, for leads and recuts alike.
 - `_recut` calls `progress.recut_started` before its `run_agent` and `progress.recut_finished` after it.
 - `_loop` calls `progress.waiting` when it enters a wait and the parked set differs from the set it last printed; a wait that goes on prints nothing more.
 
 `_fail` returns `(second, count)`, the count being what `record_failure` returned, so `progress.failed` gets the number `record_failure` returned; no failure count is kept in `relay/loop.py` or `relay/progress.py`.
+
+Agent lines carry no cost: no stream event reports a cost for each subagent, and an estimate would read as a measurement. Background shell tasks (`task_type` other than `local_agent`) get no line.
 
 `relay/progress.py` replaces nothing: no progress output exists in the tree.
 

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from relay.agents import Event, duration
 from relay.config import Config
 from relay.runner import RunResult
 from relay.state import FAILURE_LIMIT
@@ -85,6 +86,17 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
     else:
         outcome = "with the queue recut"
     _write(f"recut {sid}: finished {outcome} {_spend(result)}")
+
+
+def agent_event(who: Literal["lead", "recut"], sid: str, event: Event) -> None:
+    agent = event.agent
+    if event.kind == "started":
+        what = f"agent {agent.name} started"
+    else:
+        took = "time unknown" if agent.duration_ms is None else f"in {duration(agent.duration_ms)}"
+        what = f"agent {agent.name} {agent.status or 'finished'} {took}, context {agent.context}"
+    plural = "" if event.live == 1 else "s"
+    _write(f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})")
 
 
 def needs_answer(sid: str, question: str) -> None:

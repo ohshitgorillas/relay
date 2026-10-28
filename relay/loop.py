@@ -98,7 +98,7 @@ def _run_section(
     resume = current.last_session or state.last_session_any
     answer = state.take_answer(sid)
     prompt = lead_prompt(queue, section, resume, answer, retire_flag)
-    on_event, budget_hit = _watcher(cfg, ledger, since, sid)
+    on_event, budget_hit = _watcher(cfg, ledger, since, "lead", sid)
 
     retire_flag.unlink(missing_ok=True)
     progress.lead_started(sid, resume, answer is not None)
@@ -139,13 +139,18 @@ def _run_section(
 
 
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float, sid: str
+    cfg: Config, ledger: Ledger, since: float, who: Literal["lead", "recut"], sid: str
 ) -> tuple[Callable[[StreamState], Literal["go", "retire", "kill"]], list[bool]]:
     """The run_agent callback, and a one-slot flag set when a budget ran out mid-run."""
     hit = [False]
     retiring = [False]
+    shown = [0]  # agent events already printed
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
+        events = stream.activity.events
+        for event in events[shown[0] :]:
+            progress.agent_event(who, sid, event)
+        shown[0] = len(events)
         if stream.context_tokens >= cfg.hard_ceiling:
             progress.killing(sid, stream.context_tokens)
             return "kill"
@@ -190,7 +195,7 @@ def _recut(
     """Run the divvyer's recut; True when it failed and that was the section's second failure."""
     brief = recut_brief(queue, section, reason, lead.log)
     before = parse_queue(queue)
-    on_event, _hit = _watcher(cfg, ledger, since, section.id)
+    on_event, _hit = _watcher(cfg, ledger, since, "recut", section.id)
     progress.recut_started(section.id, reason)
     result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag)
     ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 
+from relay import agents
 from relay.ledger import Spend
 
 
@@ -16,6 +17,7 @@ class StreamState:
     result_text: str | None
     is_error: bool
     seen_messages: frozenset[str] = frozenset()
+    activity: agents.Activity = agents.Activity()
 
 
 def _count(usage: dict, key: str) -> int:
@@ -34,6 +36,10 @@ def feed(state: StreamState, line: str) -> StreamState:
     if kind == "system" and event.get("subtype") == "init":
         if state.session_id is None and isinstance(event.get("session_id"), str):
             return replace(state, session_id=event["session_id"])
+    elif kind == "system":
+        activity = agents.feed(state.activity, event)
+        if activity is not state.activity:
+            return replace(state, activity=activity)
     elif kind == "assistant":
         message = event.get("message")
         usage = message.get("usage") if isinstance(message, dict) else None

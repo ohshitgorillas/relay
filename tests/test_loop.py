@@ -1506,6 +1506,7 @@ _PROGRESS = [
     re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
     re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
     re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
+    re.compile(r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"),
     re.compile(r"recut \S+: started: .+"),
     re.compile(r"recut \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
     re.compile(r"section \S+: needs an answer: .+"),
@@ -1669,6 +1670,34 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
         "<ping.stopped>",
         f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
     ]
+
+
+AGENTS_LEAD = "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents and a shell task
+
+
+def test_a_lead_run_writes_one_line_per_subagent_start_and_finish_between_its_started_and_finished_lines(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop drops, repeats or reorders an agent line, prints one for a shell
+    # task, or prints them outside the lead's own started and finished lines.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(AGENTS_LEAD))
+    sid = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(AGENTS_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    start = texts.index(f"lead {sid}: started fresh")
+    assert texts[start + 1 : start + 5] == [
+        f"lead {sid}: agent builder started: Build s2.d1 stub (lead + 1 agent)",
+        f"lead {sid}: agent test-writer started: s2.d2 red tests (lead + 2 agents)",
+        f"lead {sid}: agent builder completed in 36.9s, context 21844: Build s2.d1 stub (lead + 1 agent)",
+        f"lead {sid}: agent test-writer failed in 1m35s, context 41000: s2.d2 red tests (lead + 0 agents)",
+    ]
+    assert texts[start + 5].startswith(f"lead {sid}: finished DONE ")
 
 
 # Progress behavior 2: `run` calls `progress.started` after `state.lock()` succeeds, and

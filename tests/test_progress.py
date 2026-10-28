@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 import pytest
 
 from relay import progress
+from relay.agents import Agent, Event
 from relay.config import Config
 from relay.ledger import Spend
 from relay.runner import RunResult
@@ -45,6 +46,11 @@ def _result(
         stream=stream,
         log=Path("/nonexistent/1.jsonl"),
     )
+
+
+def _agent(**changes: object) -> Agent:
+    agent = Agent("a1", "builder", "Build s2.d1 stub", context=21844, duration_ms=36943, status="completed")
+    return dataclasses.replace(agent, **changes)
 
 
 def _out(capsys: pytest.CaptureFixture[str]) -> str:
@@ -82,6 +88,7 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("killing", lambda: progress.killing("s1", 200_000)),
         ("recut_started", lambda: progress.recut_started("s1", "too big")),
         ("recut_finished", lambda: progress.recut_finished("s1", _result(), True)),
+        ("agent_event", lambda: progress.agent_event("lead", "s1", Event("started", _agent(), 1))),
         ("needs_answer", lambda: progress.needs_answer("s1", "Which name?")),
         ("failed", lambda: progress.failed("s1", 1)),
         ("waiting", lambda: progress.waiting(["s1", "s2"])),
@@ -97,6 +104,7 @@ NAMES = [
     "killing",
     "recut_started",
     "recut_finished",
+    "agent_event",
     "needs_answer",
     "failed",
     "waiting",
@@ -741,4 +749,33 @@ def test_ended_with_code_zero(
     assert line in tuple(
         f"relay go {q}: ended done: every section closed (exit 0)"
         for q in _queues(queue)
+    )
+
+
+# `agent_event`: one line when a lead or recut's subagent starts or finishes, with the count live.
+
+
+def test_agent_started_names_the_agent_its_description_and_the_count_live(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    progress.agent_event("lead", "s2", Event("started", _agent(), 2))
+    assert _line(capsys) == "lead s2: agent builder started: Build s2.d1 stub (lead + 2 agents)"
+
+
+def test_agent_finished_shows_status_time_and_context_but_no_cost(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    progress.agent_event("lead", "s2", Event("finished", _agent(), 1))
+    line = _line(capsys)
+    assert line == (
+        "lead s2: agent builder completed in 36.9s, context 21844: Build s2.d1 stub (lead + 1 agent)"
+    )
+    assert "$" not in line
+
+
+def test_agent_finished_without_a_reported_time_says_so(capsys: pytest.CaptureFixture[str]) -> None:
+    agent = _agent(duration_ms=None, status="stopped", context=0)
+    progress.agent_event("recut", "s3", Event("finished", agent, 0))
+    assert _line(capsys) == (
+        "recut s3: agent builder stopped time unknown, context 0: Build s2.d1 stub (recut + 0 agents)"
     )
