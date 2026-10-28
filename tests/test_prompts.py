@@ -258,7 +258,11 @@ MAP_SENTENCE = (
     "Relay's researcher mapped this section's code. "
     "Put the block below verbatim in every brief you send for this section, the architect's included."
 )
-MAP_ROUTE = "and pass on its answer; no agent searches for it."
+MAP_ROUTE = (
+    f'When an agent reports it needs more, run `relay ask {QUEUE} s4 "<question>"` '
+    "with a 600000 ms timeout or in the background, and pass on its answer; "
+    "on a non-zero exit the agent reads for itself."
+)
 
 
 def _capped(cfg: Config) -> Config:
@@ -301,14 +305,18 @@ def test_lead_prompt_with_a_map_says_put_it_in_every_brief() -> None:
     assert MAP_SENTENCE in _with_map()
 
 
-def test_lead_prompt_with_a_map_routes_needs_through_relay_ask() -> None:
-    # Breaks when: the lead is not told to run `relay ask` and pass the answer on, or the
-    # command names another queue or section, or keeps the `<queue> <sid>` placeholders.
+def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_with_timeout_and_fallback() -> None:
+    # Breaks when: the lead is not told to run `relay ask` with a 600000 ms timeout or in the
+    # background, or the non-zero-exit fallback (the agent reads for itself) is left out, or
+    # the command names another queue or section, or keeps the `<queue> <sid>` placeholders,
+    # or the routing sentence leaves its place between the map sentence and the block.
+    assert MAP_ROUTE in _with_map()
     prompt = _with_map()
-    route = f'When an agent reports it needs more, run `relay ask {QUEUE} s4 "<question>"`'
-    start = prompt.find(route)
-    assert start != -1
-    assert prompt.find(MAP_ROUTE, start + len(route)) != -1
+    sentence = prompt.find(MAP_SENTENCE)
+    route = prompt.find(MAP_ROUTE)
+    assert sentence != -1
+    assert sentence + len(MAP_SENTENCE) <= route
+    assert prompt.find(MAP_BLOCK, route + len(MAP_ROUTE)) != -1
 
 
 def test_lead_prompt_carries_the_map_block_verbatim() -> None:

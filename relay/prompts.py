@@ -42,7 +42,7 @@ def lead_prompt(
             "Put the block below verbatim in every brief you send for this section, the architect's included. "
             f'When an agent reports it needs more, run `relay ask {queue} {section.id} "<question>"` '
             "with a 600000 ms timeout or in the background, "
-            "and pass on its answer; no agent searches for it.\n\n" + map_block
+            "and pass on its answer; on a non-zero exit the agent reads for itself.\n\n" + map_block
         )
     parts.append(
         "Retire contract: on reaching a safe point, after a step's commit, check whether "
