@@ -23,6 +23,12 @@ def _write(text: str) -> None:
         pass
 
 
+def _write_for(who: Kind, text: str) -> None:
+    """Write a line labelled with a run's kind; an ask prints no progress."""
+    if who != "ask":
+        _write(text)
+
+
 def _cut(text: str) -> str:
     lines = text.splitlines()
     first = lines[0] if lines else ""
@@ -67,18 +73,14 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
 def retiring(
     sid: str, why: Literal["context", "budget"], tokens: int, who: Kind = "lead"
 ) -> None:
-    if who == "ask":
-        return
     if why == "context":
-        _write(f"{who} {sid}: asked to retire at {tokens} context tokens")
+        _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
     else:
-        _write(f"{who} {sid}: asked to retire, budget spent")
+        _write_for(who, f"{who} {sid}: asked to retire, budget spent")
 
 
 def killing(sid: str, tokens: int, who: Kind = "lead") -> None:
-    if who == "ask":
-        return
-    _write(f"{who} {sid}: killed at {tokens} context tokens, past the hard ceiling")
+    _write_for(who, f"{who} {sid}: killed at {tokens} context tokens, past the hard ceiling")
 
 
 def recut_started(sid: str, reason: str) -> None:
@@ -98,8 +100,6 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
 
 
 def agent_event(who: Kind, sid: str, event: Event) -> None:
-    if who == "ask":
-        return
     agent = event.agent
     if event.kind == "started":
         what = f"agent {agent.name} started"
@@ -107,7 +107,9 @@ def agent_event(who: Kind, sid: str, event: Event) -> None:
         took = "time unknown" if agent.duration_ms is None else f"in {duration(agent.duration_ms)}"
         what = f"agent {agent.name} {agent.status or 'finished'} {took}, context {agent.context}"
     plural = "" if event.live == 1 else "s"
-    _write(f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})")
+    _write_for(
+        who, f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})"
+    )
 
 
 def needs_answer(sid: str, question: str) -> None:
@@ -150,9 +152,9 @@ def check_failed(sid: str, failures: int) -> None:
 
 
 def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None:
-    if who == "ask":
-        return
-    _write(f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag")
+    _write_for(
+        who, f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag"
+    )
 
 
 def research_started(sid: str, cwd: Path) -> None:
