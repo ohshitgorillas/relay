@@ -28,7 +28,11 @@ def lead_prompt(
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
     parts.append(
         "Retire contract: on reaching a safe point, after a step's commit, check whether "
-        f"the file {retire_flag} exists. If it exists, stop and end with RETIRED."
+        f"the file {retire_flag} exists. If it exists, stop and end with RETIRED. "
+        "A session grown heavy, past about 100k tokens of context, also stops at its "
+        "next safe point and ends with RETIRED, never RECUT: Relay starts a fresh lead "
+        "on the same section, which resumes from this session. RECUT is only for a "
+        "section whose cut is wrong or too big."
     )
     parts.append(
         "Status contract: the last line of your final message is exactly one of these, "
