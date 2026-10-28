@@ -163,9 +163,145 @@ def test_scenario_writes_the_lines_and_names_the_file_for_the_fake(
     assert os.environ["RELAY_FAKE_SCENARIO"] == str(path)
 
 
+# Ladder design, Order 3: when argv carries `--agent <name>` and
+# `RELAY_FAKE_SCENARIO_<NAME>` is set (upper case, `-` as `_`), the fake emits that
+# scenario.
+
+
+def _fake_env(**extra: str) -> dict[str, str]:
+    """The test process's environment with no `RELAY_FAKE_*` variable, plus `extra`."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("RELAY_FAKE_")}
+    env.update(extra)
+    return env
+
+
+def _run_fake_argv(
+    args: list[str], prompt: str, env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(FAKE_CLAUDE), *args],
+        input=prompt, capture_output=True, text=True, env=env, timeout=30,
+    )
+
+
+def test_fake_claude_emits_the_named_agents_scenario_over_the_shared_one(
+    tmp_path: Path,
+) -> None:
+    shared = _write_scenario(tmp_path / "shared.jsonl", SCRIPT_A)
+    architect = _write_scenario(tmp_path / "architect.jsonl", SCRIPT_B)
+    env = _fake_env(
+        RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_ARCHITECT=str(architect)
+    )
+    done = _run_fake_argv(["--agent", "architect"], "design s1\n", env)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == SCRIPT_B
+    # Another agent, whose own variable is not set, still gets the shared scenario.
+    done = _run_fake_argv(["--agent", "divvyer"], "recut s1\n", env)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == SCRIPT_A
+
+
+def test_fake_claude_names_the_agents_variable_upper_case_with_dash_as_underscore(
+    tmp_path: Path,
+) -> None:
+    writer = _write_scenario(tmp_path / "writer.jsonl", SCRIPT_B)
+    env = _fake_env(RELAY_FAKE_SCENARIO_TEST_WRITER=str(writer))
+    done = _run_fake_argv(["--agent", "test-writer"], "red s1\n", env)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == SCRIPT_B
+
+
+def test_fake_claude_finds_the_agent_flag_among_other_arguments(tmp_path: Path) -> None:
+    shared = _write_scenario(tmp_path / "shared.jsonl", SCRIPT_A)
+    researcher = _write_scenario(tmp_path / "researcher.jsonl", SCRIPT_B)
+    env = _fake_env(
+        RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_RESEARCHER=str(researcher)
+    )
+    done = _run_fake_argv(
+        ["-p", "--output-format", "stream-json", "--agent", "researcher", "--verbose"],
+        "research s1\n",
+        env,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines() == SCRIPT_B
+
+
+# Ladder design, Order 3: the fake appends each prompt it reads to the file
+# `RELAY_FAKE_PROMPTS` names, when that is set.
+
+
+def test_fake_claude_appends_each_prompt_it_reads_to_the_prompts_file(
+    tmp_path: Path,
+) -> None:
+    shared = _write_scenario(tmp_path / "shared.jsonl", SCRIPT_A)
+    prompts = tmp_path / "prompts.txt"
+    prompts.write_text("earlier prompt\n")
+    env = _fake_env(RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_PROMPTS=str(prompts))
+    first = "You are a lead\nSection s1.\n"
+    second = "design s1: amending Order 3\n"
+    assert _run_fake_argv([], first, env).returncode == 0
+    assert _run_fake_argv(["--agent", "architect"], second, env).returncode == 0
+    text = prompts.read_text()
+    # Appended, never overwritten: what the file held stays at its head.
+    assert text.startswith("earlier prompt\n")
+    at_first = text.find(first)
+    at_second = text.find(second)
+    assert at_first >= len("earlier prompt\n"), text
+    assert at_second >= at_first + len(first), text
+
+
 # Behavior 4: `tests/fixtures/` holds queue samples in the divvyer's `.md` format.
 
 @pytest.mark.parametrize("name", sorted(QUEUE_SAMPLES))
 def test_fixture_queue_sample_parses_into_its_sections(name: str) -> None:
     sections = parse_queue(FIXTURES / name)
     assert [s.id for s in sections] == QUEUE_SAMPLES[name]
+
+
+# Ladder design, Order 3: the architect streams `tests/fixtures/stream-architect-*.jsonl`,
+# whose final reports are, in turn, an approved design, one awaiting an owner product
+# decision, and a `REJECTED: STEERING` refusal, in the report form `parse_report` reads
+# (design: Modules, `relay/ladder.py`, `DesignReport` and `parse_report`).
+
+
+def _final_report(name: str) -> str:
+    """The `result` text of the stream fixture's last event, which must be its result."""
+    events = [json.loads(line) for line in (FIXTURES / name).read_text().splitlines()]
+    assert events[0]["type"] == "system" and events[0]["subtype"] == "init", name
+    last = events[-1]
+    assert last["type"] == "result" and last["is_error"] is False, name
+    assert isinstance(last["result"], str), name
+    return last["result"]
+
+
+def test_the_approved_architect_stream_reports_an_approved_design_with_nothing_open() -> None:
+    # breaks when: parse_report misses the STATUS line inside the BRIEF ... END DESIGN block.
+    from relay.ladder import DesignReport, parse_report
+
+    report = parse_report(_final_report("stream-architect-approved.jsonl"))
+    assert report == DesignReport(rejected=False, approved=True, decisions=(), unfiled=())
+
+
+def test_the_decision_architect_stream_reports_an_unapproved_design_with_two_decisions() -> None:
+    # breaks when: parse_report drops the indented lines under DECISIONS.
+    from relay.ladder import decision_numbers, parse_report
+
+    report = parse_report(_final_report("stream-architect-decision.jsonl"))
+    assert report is not None
+    assert report.rejected is False
+    assert report.approved is False
+    assert len(report.decisions) == 2
+    for line in report.decisions:
+        assert "| recommend: " in line and "| alternative: " in line, line
+    assert report.unfiled == ()
+    assert decision_numbers(report) == (1, 2)
+
+
+def test_the_rejected_architect_stream_reports_a_steering_refusal() -> None:
+    # breaks when: parse_report looks only for a BRIEF block and misses `REJECTED: STEERING`.
+    from relay.ladder import parse_report
+
+    report = parse_report(_final_report("stream-architect-rejected.jsonl"))
+    assert report is not None
+    assert report.rejected is True
+    assert report.approved is False

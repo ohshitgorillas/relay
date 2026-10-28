@@ -25,6 +25,12 @@ DEFAULT_CHECK_OUTSIDE = [
     "(?i)connection (refused|reset|timed out)",
 ]
 
+# The owner's standing approval, the documented `design_approval` default
+# (design: relay-ladder-design.md, `relay/config.py` (extended)).
+STANDING_APPROVAL = (
+    "I am sick and tired of this paperwork bullshit make it stop for the 5th fucking time"
+)
+
 
 @pytest.fixture
 def fake_cfg(tmp_path: Path) -> Config:
@@ -46,6 +52,9 @@ def fake_cfg(tmp_path: Path) -> Config:
         research_command=[fake, "--agent", "researcher"],
         map_max_lines=150,
         map_max_chars=12_000,
+        design_command=[fake, "--agent", "architect"],
+        section_dollar_cap=None,
+        design_approval=STANDING_APPROVAL,
     )
 
 
