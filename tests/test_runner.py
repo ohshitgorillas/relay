@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pytest
 
@@ -740,4 +740,192 @@ def test_capture_kills_and_reaps_the_group_at_timeout(tmp_path: Path) -> None:
             os.waitpid(shell, os.WNOHANG)
         assert _gone_within(_pid(grandfile))
     finally:
+        _cleanup(grandfile, pidfile)
+
+
+# ---------------------------------------------------------------------------------------
+# A child Relay starts is signalled and reaped exactly once, even when a SIGINT or SIGTERM
+# lands partway through Relay's kill of it, whether the earlier signal handler raises or
+# returns; Relay never signals or waits on a group or pid it has already reaped.
+
+# Runs one kill of a child in a fresh interpreter, with `os.kill`, `os.killpg` and
+# `os.waitpid` wrapped to record every call in order. `a["signum"]` is raised in Relay at
+# the first such call after the kill's first signal ("grace": the child ignores SIGTERM, so
+# Relay is in its grace wait) or after the child is reaped ("reaped": Relay is checking the
+# group is gone). The handler installed before Relay's raises or returns per `a["earlier"]`.
+KILL_DRIVER = """
+import json, os, signal, sys
+from pathlib import Path
+
+a = json.loads(sys.argv[1])
+signum = a["signum"]
+pidfile = Path(a["pidfile"])
+events = []
+state = {"killing": False, "reaped": False, "landed": False}
+real_kill, real_killpg, real_waitpid = os.kill, os.killpg, os.waitpid
+
+
+class Earlier(Exception):
+    pass
+
+
+def earlier(signo, frame):
+    events.append(["earlier", signo])
+    if a["earlier"] == "raises":
+        raise Earlier(signo)
+
+
+def child():
+    try:
+        return int(pidfile.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def land():
+    due = state["reaped"] if a["moment"] == "reaped" else state["killing"]
+    if due and not state["landed"]:
+        state["landed"] = True
+        events.append(["landed", a["moment"]])
+        signal.raise_signal(signum)
+
+
+def note_signal(target, sig):
+    if sig != 0 and abs(target) == child():
+        state["killing"] = True
+
+
+def kill(pid, sig):
+    land()
+    events.append(["kill", pid, sig])
+    note_signal(pid, sig)
+    return real_kill(pid, sig)
+
+
+def killpg(pgid, sig):
+    land()
+    events.append(["killpg", pgid, sig])
+    note_signal(pgid, sig)
+    return real_killpg(pgid, sig)
+
+
+def waitpid(pid, options):
+    land()
+    entry = ["waitpid", pid, options, None]
+    events.append(entry)
+    try:
+        got = real_waitpid(pid, options)
+    except BaseException as exc:
+        entry[3] = type(exc).__name__
+        raise
+    entry[3] = got[0]
+    if got[0] != 0 and got[0] == child():
+        state["reaped"] = True
+        events.append(["reaped", got[0]])
+    return got
+
+
+signal.signal(signal.SIGINT, earlier)
+signal.signal(signal.SIGTERM, earlier)
+# Wrapped before Relay (and `subprocess`) is imported, so a reference taken at import time
+# is the wrapper too.
+os.kill, os.killpg, os.waitpid = kill, killpg, waitpid
+import relay.runner as runner
+
+outcome = "returned"
+try:
+    cwd = Path(a["cwd"])
+    if a["entry"] == "run_command":
+        runner.run_command(a["command"], cwd, Path(a["log"]), 0.5)
+    elif a["entry"] == "capture":
+        runner.capture(["/bin/sh", "-c", a["command"]], cwd, 0.5)
+    else:
+        runner.run_agent(a["argv"], "p\\n", cwd, Path(a["run_dir"]), lambda s: "kill",
+                         Path(a["retire"]))
+except BaseException as exc:
+    outcome = type(exc).__name__
+finally:
+    os.kill, os.killpg, os.waitpid = real_kill, real_killpg, real_waitpid
+    Path(a["out"]).write_text(json.dumps({"events": events, "outcome": outcome}))
+"""
+
+
+def _on(events: list[list[Any]], child: int) -> list[list[Any]]:
+    """The recorded kill, killpg and waitpid calls whose pid or group is `child`."""
+    return [
+        event for event in events
+        if event[0] in {"kill", "killpg", "waitpid"} and abs(event[1]) == child
+    ]
+
+
+@pytest.mark.parametrize("earlier", ["raises", "returns"])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM], ids=["SIGINT", "SIGTERM"])
+@pytest.mark.parametrize("moment", ["grace", "reaped"])
+@pytest.mark.parametrize("entry", ["run_agent", "run_command", "capture"])
+def test_a_signal_landing_mid_kill_leaves_the_child_signalled_and_reaped_once(
+    entry: str,
+    moment: str,
+    signum: int,
+    earlier: str,
+    fake: list[str],
+    tmp_path: Path,
+    run_dir: Path,
+) -> None:
+    pidfile = tmp_path / "pid"
+    grandfile = tmp_path / "grandchild"
+    out = tmp_path / "kill.json"
+    # In the grace wait the child must outlast SIGTERM; after the reap it need not.
+    stubborn = moment == "grace"
+    args = {
+        "entry": entry,
+        "moment": moment,
+        "signum": int(signum),
+        "earlier": earlier,
+        "pidfile": str(pidfile),
+        "cwd": str(tmp_path),
+        "log": str(_log(tmp_path)),
+        "run_dir": str(run_dir),
+        "retire": str(tmp_path / "retire"),
+        "out": str(out),
+        "command": (SLOW_STUBBORN if stubborn else SLOW).format(
+            grand=_q(grandfile), pid=_q(pidfile)
+        ),
+        "argv": _sh(STUBBORN if stubborn else LONG, pidfile, grandfile, fake[0]),
+    }
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO), env.get("PYTHONPATH", "")) if p)
+    with open(tmp_path / "driver.out", "wb") as log:
+        driver = subprocess.Popen(
+            [sys.executable, "-c", KILL_DRIVER, json.dumps(args)],
+            cwd=REPO, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+        )
+    try:
+        driver.wait(timeout=60)
+        assert out.exists(), "the driver ended without recording the kill"
+        events = json.loads(out.read_text())["events"]
+        child = _pid(pidfile)
+        kinds = [event[0] for event in events]
+        assert "landed" in kinds, "the signal never landed during the kill"
+        # Reaped exactly once.
+        assert kinds.count("reaped") == 1
+        landed, reaped = kinds.index("landed"), kinds.index("reaped")
+        if moment == "grace":
+            assert landed < reaped
+        else:
+            assert landed > reaped
+        # Signalled once: each signal of the kill sent once, however many handlers ran.
+        sent = [event[2] for event in _on(events, child) if event[0] != "waitpid" and event[2] != 0]
+        assert sent
+        for sig in set(sent):
+            assert sent.count(sig) == 1
+        # Nothing after the reap signals or waits on the reaped pid or its group.
+        after = _on(events[reaped + 1 :], child)
+        assert [event for event in after if event[0] == "waitpid"] == []
+        assert [event for event in after if event[0] != "waitpid" and event[2] != 0] == []
+        assert _gone_within(child)
+        assert _gone_within(_pid(grandfile))
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+            driver.wait()
         _cleanup(grandfile, pidfile)

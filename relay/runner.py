@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,49 +46,73 @@ def _signal_group(pgid: int, signum: int) -> None:
         pass
 
 
-def _reap(pid: int) -> None:
-    """Reap the child with `os.waitpid`, whether or not it has already been reaped."""
+def _reap(proc: subprocess.Popen) -> None:
+    """Reap the child with `os.waitpid` and record that on `proc`, so `Popen` never waits on
+    the reaped pid again. Whether or not it has already been reaped is harmless."""
     try:
-        os.waitpid(pid, 0)
+        _, status = os.waitpid(proc.pid, 0)
+        code = os.waitstatus_to_exitcode(status)
     except ChildProcessError:
+        code = 0  # reaped elsewhere; `Popen` records the same
+    if proc.returncode is None:
+        proc.returncode = code
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
         pass
+    return True
 
 
-# Groups whose SIGTERM is already out: a kill that a signal handler or guard interrupts is
-# finished by the next `_kill_and_reap` of the same child, without a second grace period.
-_termed: set[int] = set()
+# How far each child's kill has got. A kill that a signal guard interrupts is finished by the
+# guard's nested call, and the interrupted outer call is told by this record, so the child is
+# signalled and reaped exactly once and nothing touches its pid or group after the reap.
+_TERMED, _REAPED = 1, 2
+_stage: weakref.WeakKeyDictionary[subprocess.Popen, int] = weakref.WeakKeyDictionary()
 
 
 def _kill_and_reap(proc: subprocess.Popen) -> None:
     """Kill the child's whole process group, reap the child, and check the group is gone.
 
-    A call that finds the group's SIGTERM already sent (a kill under way, interrupted by a
-    signal) skips straight to the SIGKILL, the reap and the check.
+    A group is signalled only while its leader is unreaped (its pgid cannot be reused) or
+    while stragglers still hold it. A call that finds the SIGTERM already sent (a kill under
+    way, interrupted by a signal) skips straight to the SIGKILL, the reap and the check; a
+    call that finds the child reaped returns at once, and so does an interrupted call that
+    resumes to find it reaped.
     """
     pgid = proc.pid
-    try:
-        if pgid not in _termed:
-            _termed.add(pgid)
-            _signal_group(pgid, signal.SIGTERM)
-            deadline = time.monotonic() + _GRACE_SECONDS
-            while proc.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-        _signal_group(pgid, signal.SIGKILL)
-        _reap(pgid)
+    if _stage.get(proc, 0) < _TERMED:
+        _stage[proc] = _TERMED
+        _signal_group(pgid, signal.SIGTERM)
         deadline = time.monotonic() + _GRACE_SECONDS
         while True:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
+            # The probe comes first: a nested kill that lands here ends this one.
+            alive = _group_alive(pgid)
+            if _stage[proc] >= _REAPED:
                 return
-            except PermissionError:
-                pass
-            if time.monotonic() >= deadline:
-                raise RuntimeError(f"process group {pgid} survived its kill")
-            _signal_group(pgid, signal.SIGKILL)
+            if not alive or proc.poll() is not None or time.monotonic() >= deadline:
+                break
             time.sleep(0.02)
-    finally:
-        _termed.discard(pgid)
+    if _stage[proc] >= _REAPED:
+        return
+    if proc.returncode is None:
+        _signal_group(pgid, signal.SIGKILL)
+        _reap(proc)
+        _stage[proc] = _REAPED
+    else:
+        # `poll` reaped the leader already; only stragglers can still be in the group.
+        _stage[proc] = _REAPED
+        if _group_alive(pgid):
+            _signal_group(pgid, signal.SIGKILL)
+    deadline = time.monotonic() + _GRACE_SECONDS
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"process group {pgid} survived its kill")
+        time.sleep(0.02)
 
 
 def _kill_live(live: list[subprocess.Popen]) -> None:
