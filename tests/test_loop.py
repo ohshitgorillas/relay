@@ -17,6 +17,7 @@ import pytest
 
 import relay.loop
 import relay.ping
+import relay.runner
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
@@ -1423,6 +1424,36 @@ def _mark(
     return calls
 
 
+def _every_run_agent(
+    monkeypatch: pytest.MonkeyPatch, replace: Callable[[Callable[..., object]], Callable[..., object]]
+) -> None:
+    """Put `replace(run_agent)` in place of `relay.runner.run_agent` in every loaded `relay`
+    module that holds it, `relay.runner` itself included, so the stand-in is what runs however
+    `relay/loop.py` reaches `run_agent`: through its own name for it or through `relay.runner`."""
+    original = relay.runner.run_agent
+    stand_in = replace(original)
+    for name, module in list(sys.modules.items()):
+        if (name == "relay" or name.startswith("relay.")) and getattr(module, "run_agent", None) is original:
+            monkeypatch.setattr(module, "run_agent", stand_in)
+
+
+def _mark_run_agent(monkeypatch: pytest.MonkeyPatch, marker: str) -> list[inspect.BoundArguments]:
+    """Write `marker` as a line of its own to stdout just before each `run_agent` call, however
+    `relay/loop.py` reaches it; return the list each call's bound arguments go to."""
+    calls: list[inspect.BoundArguments] = []
+
+    def replace(original: Callable[..., object]) -> Callable[..., object]:
+        def wrapped(*args: object, **kwargs: object) -> object:
+            calls.append(inspect.signature(original).bind(*args, **kwargs))
+            sys.stdout.write(marker + "\n")
+            return original(*args, **kwargs)
+
+        return wrapped
+
+    _every_run_agent(monkeypatch, replace)
+    return calls
+
+
 # Progress behavior 1: `relay/loop.py` calls these, and nothing else in it writes to the
 # terminal; the lines of a whole `relay go` come in the order the run produced them.
 
@@ -1690,7 +1721,7 @@ def test_started_names_the_budgets_the_config_holds_or_that_there_is_none(
 # and code `ExitCode.ERROR`, just after its stopped ping.
 
 
-def test_a_crash_in_the_loop_writes_ended_crashed_with_exit_error_just_after_its_stopped_ping(
+def test_a_crash_in_a_leads_run_writes_ended_crashed_with_exit_error_just_after_its_stopped_ping(
     cfg: Config,
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
@@ -1698,14 +1729,18 @@ def test_a_crash_in_the_loop_writes_ended_crashed_with_exit_error_just_after_its
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: the crash path writes no ended line, writes it before its stopped ping, or
-    # words it with another reason or exit code.
+    # words it with another reason or exit code, whether loop.py calls run_agent by its own
+    # name for it or through relay.runner.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
 
-    def crash(*args: object, **kwargs: object) -> object:
-        raise RuntimeError("the runner broke")
+    def replace(original: Callable[..., object]) -> Callable[..., object]:
+        def crash(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("the runner broke")
 
-    monkeypatch.setattr(relay.loop, "run_agent", crash)
+        return crash
+
+    _every_run_agent(monkeypatch, replace)
     stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
     try:
         run(queue, cfg)
@@ -1748,7 +1783,7 @@ def test_lead_started_is_written_just_before_each_lead_runs(
     assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
 
 
-def test_lead_started_is_written_before_the_lead_that_asks_for_a_recut_and_not_before_the_recut(
+def test_lead_started_is_written_just_before_each_lead_runs_however_the_loop_reaches_run_agent(
     cfg: Config,
     tmp_path: Path,
     queue_file: Callable[[str], Path],
@@ -1756,19 +1791,55 @@ def test_lead_started_is_written_before_the_lead_that_asks_for_a_recut_and_not_b
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: lead_started is written for the recut's run_agent too, or not for the lead's.
+    # Breaks when: a lead runs with no lead_started line just before it, the line names another
+    # section or session, or a lead_started line is written for no run, whether loop.py calls
+    # run_agent by its own name for it or through relay.runner.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(runs) == 2
+    assert len(_runs(tmp_path, "lead")) == 2
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == 2, texts
+    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
+    assert texts[at[1] - 1] == f"lead {first}: started, resuming sess-lead-3", texts
+    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
+
+
+def test_lead_started_comes_just_before_the_lead_that_asks_for_a_recut_and_recut_started_before_the_recut(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: lead_started is written for the recut's run_agent too, or not just before
+    # each lead's; or recut_started is not written between the lead's run and the recut's,
+    # whether loop.py calls run_agent by its own name for it or through relay.runner.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
     cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[_step(DIVVYER_RUN)])
-    _mark(monkeypatch, relay.loop, "run_agent", "<run_agent>", before=True)
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
+    assert len(runs) == 3
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert len(_runs(tmp_path, "recut")) == 1
     at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
     assert len(at) == 3, texts
-    assert re.fullmatch(rf"lead {re.escape(first)}: started.*", texts[at[0] - 1]), texts
+    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
     assert not texts[at[1] - 1].startswith("lead "), texts
-    assert re.fullmatch(rf"lead {re.escape(first)}: started.*", texts[at[2] - 1]), texts
+    assert texts[at[2] - 1] == f"lead {first}: started, resuming sess-lead-4", texts
+    started = f"recut {first}: started: {RECUT_REASON}"
+    assert started in texts, texts
+    assert at[0] < texts.index(started) < at[1], texts
+    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
 
 
 # Progress behavior 4: On `NEEDS-OWNER` it calls `progress.needs_answer` beside `ping.needs_owner`.
@@ -2008,7 +2079,7 @@ def test_a_kill_writes_one_killed_line_for_its_run(
     [(0, False, "with the queue unchanged"), (0, True, "with the queue recut"), (1, True, "exit 1")],
     ids=["unchanged", "recut", "non-zero-exit"],
 )
-def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it(
+def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it_however_the_loop_reaches_run_agent(
     cfg: Config,
     tmp_path: Path,
     queue_file: Callable[[str], Path],
@@ -2020,17 +2091,19 @@ def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it(
     outcome: str,
 ) -> None:
     # Breaks when: the recut writes no started line before its run_agent, no finished line
-    # after it, or a finished line with another outcome or spend than its run's.
+    # after it, or a finished line with another outcome or spend than its run's, whether
+    # loop.py calls run_agent by its own name for it or through relay.runner.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
     recut = _step(DIVVYER_RUN, exit=exit, write=(FIXTURES / M2, queue) if rewrite else None)
     cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[recut])
-    _mark(monkeypatch, relay.loop, "run_agent", "<run_agent>", before=True)
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
+    assert len(_runs(tmp_path, "recut")) == 1
     at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
-    assert len(at) >= 3, texts
+    assert len(at) == len(runs) >= 3, texts
     started = f"recut {first}: started: {RECUT_REASON}"
     finished = f"recut {first}: finished {outcome} ({DIVVYER_SPEND.tokens} tokens, $0.04)"
     assert [t for t in texts if t.startswith("recut ")] == [started, finished], texts
