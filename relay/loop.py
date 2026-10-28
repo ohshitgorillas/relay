@@ -205,8 +205,9 @@ def _recut(
         second, count = _fail(state, section.id)
         progress.failed(section.id, count)
         return second
+    # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
     known = {s.id for s in before}
     for made in parse_queue(queue):
-        if made.id not in known:
+        if made.id not in known or made.id == section.id:
             state.mark_from_recut(made.id)
     return False

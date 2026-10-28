@@ -1175,6 +1175,50 @@ def test_a_section_the_recut_left_in_place_that_ends_recut_is_still_recut(
     assert state.section("s2.1").from_recut
 
 
+def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_its_second_recut(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a section the recut rewrote in place under its own id is not taken as the recut's,
+    # so its next RECUT runs the divvyer again instead of going to the owner.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    widened = tmp_path / "widened.md"
+    widened.write_text(
+        "section s1 | lead | steps: 1\n  s1 work, paths widened\nsection s2 | lead | steps: 1\n  s2 work\n"
+    )
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(widened, queue))])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert [s.id for s in parse_queue(queue)] == ["s1", "s2"]
+    state = State.open(queue, cfg)
+    kept = state.section("s1")
+    assert kept.from_recut
+    assert kept.status == "parked"
+    assert kept.question is not None and RECUT_REASON in kept.question
+    assert kept.failures == 0
+    assert "s1 work, paths widened" in str(_runs(tmp_path, "lead")[1]["prompt"])
+    assert not state.section("s2").from_recut
+
+
+def test_a_recut_that_splits_the_section_runs_the_child_ids_and_leaves_the_old_id_behind(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: after a real split the old id is still run or marked, or a child id is not the recut's.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    split = _queue_of(tmp_path / "split.md", "s1.1", "s1.2", "s2")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(DONE_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(split, queue))])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    state = State.open(queue, cfg)
+    assert state.section("s1.1").from_recut and state.section("s1.1").status == "done"
+    assert state.section("s1.2").from_recut
+    assert not state.section("s1").from_recut
+    assert "Section: s1.1" in str(_runs(tmp_path, "lead")[1]["prompt"])
+    assert "Section: s1.2" in str(_runs(tmp_path, "lead")[2]["prompt"])
+
+
 # Behavior 4 (s7.d3): - NEEDS-OWNER: `park`, then `ping.needs_owner`.
 
 
