@@ -522,6 +522,58 @@ def test_append_check_adds_one_json_line_after_the_existing_ones(tmp_path: Path)
     assert len(_stamps(entry, before, after)) >= 1
 
 
+# The `append_check` docstring: "One line: time, kind "check", section, session null, tokens 0,
+# dollars 0.0, command, exit (int or null), timed_out, verdict, tail, log (str or null)."
+CHECK_LINE_CASES = {
+    "fail": ("s1", "fail", 1),
+    "pass": ("s2", "pass", 0),
+    "outside": ("s3a", "outside", 127),
+    "timed-out": ("s1", "fail", None),
+    "none": ("s4", "none", None),
+}
+
+
+@pytest.mark.parametrize("case", list(CHECK_LINE_CASES))
+def test_append_check_line_holds_each_field_of_the_result_and_section(tmp_path: Path, case: str) -> None:
+    # Breaks when: a check line drops or misnames a field, writes the wrong section, kind or
+    # session, stringifies `exit` or `log`, or holds spend other than 0 tokens and $0.
+    section, verdict, exit_code = CHECK_LINE_CASES[case]
+    result = _check(verdict, exit_code)
+    path = tmp_path / "ledger.jsonl"
+    before = time.time()
+    Ledger(path).append_check(section, result)
+    after = time.time()
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert isinstance(entry, dict)
+    assert isinstance(entry["time"], (int, float)) and not isinstance(entry["time"], bool)
+    assert before <= entry["time"] <= after
+    assert entry["kind"] == "check"
+    assert entry["section"] == section
+    assert "session" in entry and entry["session"] is None
+    assert entry["tokens"] == 0 and not isinstance(entry["tokens"], bool)
+    assert entry["dollars"] == 0.0 and not isinstance(entry["dollars"], bool)
+    assert entry["verdict"] == verdict
+    assert entry["tail"] == result.tail
+    assert entry["timed_out"] is result.timed_out
+    if verdict == "none":
+        assert "command" in entry and entry["command"] is None
+        assert "exit" in entry and entry["exit"] is None
+        assert "log" in entry and entry["log"] is None
+        assert entry["timed_out"] is False
+        assert entry["tail"] == ""
+        return
+    assert entry["command"] == "make test"
+    if exit_code is None:
+        assert "exit" in entry and entry["exit"] is None
+        assert entry["timed_out"] is True
+    else:
+        assert type(entry["exit"]) is int and entry["exit"] == exit_code
+        assert entry["timed_out"] is False
+    assert entry["log"] == "/state/runs/3.check"
+
+
 def test_append_check_creates_a_missing_ledger(tmp_path: Path) -> None:
     # Breaks when: `append_check` needs the file to exist first.
     path = tmp_path / "ledger.jsonl"
