@@ -145,7 +145,7 @@ class StreamState:
 def feed(state: StreamState, line: str) -> StreamState: ...   # ignores lines that are not JSON events
 ```
 
-`relay/runner.py`: the one place a child process starts, streams, is killed and is reaped. Each child runs in its own process group (`start_new_session=True`). The runner records the child's PID in `<run_dir>/<n>.pid`. It kills by process group, then checks with `os.waitpid` and `os.kill(pid, 0)` that the child is gone. It also installs SIGINT and SIGTERM handlers that kill the live child group before Relay exits.
+`relay/runner.py`: the one place a child process starts, streams, is killed and is reaped. Each child runs in its own process group (`start_new_session=True`). The runner records the child's PID in `<run_dir>/<n>.pid`. It writes the child's stderr to `<run_dir>/<n>.stderr`, a file rather than a pipe, so it never reaches the terminal and the child never blocks on it. It kills by process group, then checks with `os.waitpid` and `os.kill(pid, 0)` that the child is gone. It also installs SIGINT and SIGTERM handlers that kill the live child group before Relay exits.
 
 ```python
 @dataclass(frozen=True)
