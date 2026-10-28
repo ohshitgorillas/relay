@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from relay.config import Config
-from relay.errors import RelayError
 
 
 @dataclass(frozen=True)
 class Spend:
     tokens: int
     dollars: float
+
+
+def _parse(chunk: bytes) -> tuple[float, float, float] | None:
+    try:
+        entry = json.loads(chunk.decode())
+        values = (entry["time"], entry["tokens"], entry["dollars"])
+    except (ValueError, KeyError, TypeError, RecursionError):
+        return None
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+    return values
 
 
 class Ledger:
@@ -37,28 +52,39 @@ class Ledger:
             "tokens": spend.tokens,
             "dollars": spend.dollars,
         }
-        with open(self._path, "a") as handle:
-            handle.write(json.dumps(entry) + "\n")
+        data = (json.dumps(entry) + "\n").encode()
+        fd = os.open(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            if os.fstat(fd).st_size > 0 and not self._ends_with_newline():
+                data = b"\n" + data
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _ends_with_newline(self) -> bool:
+        with open(self._path, "rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) == b"\n"
+
+    def _lines(self) -> list[tuple[int, tuple[float, float, float] | None]]:
+        """Every line as (1-based number, (time, tokens, dollars) or None when unreadable)."""
+        try:
+            raw = self._path.read_bytes()
+        except FileNotFoundError:
+            return []
+        chunks = raw.split(b"\n")
+        if chunks[-1] == b"":
+            chunks.pop()
+        return [(number, _parse(chunk)) for number, chunk in enumerate(chunks, 1)]
 
     def total(self, since: float | None) -> Spend:
         tokens = 0
         dollars = 0.0
-        try:
-            text = self._path.read_text()
-        except FileNotFoundError:
-            return Spend(tokens=0, dollars=0.0)
-        for number, line in enumerate(text.splitlines(), 1):
-            where = f"{self._path}:{number}"
-            try:
-                entry = json.loads(line)
-                stamp = entry["time"]
-                add_tokens = entry["tokens"]
-                add_dollars = entry["dollars"]
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                raise RelayError(f"corrupt ledger line {where}: {exc!r}") from exc
-            numbers = (stamp, add_tokens, add_dollars)
-            if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in numbers):
-                raise RelayError(f"corrupt ledger line {where}: non-numeric field")
+        for _, fields in self._lines():
+            if fields is None:
+                continue
+            stamp, add_tokens, add_dollars = fields
             if since is not None and stamp <= since:
                 continue
             tokens += int(add_tokens)
@@ -76,4 +102,4 @@ class Ledger:
         return None
 
     def unreadable(self) -> list[int]:
-        raise NotImplementedError
+        return [number for number, fields in self._lines() if fields is None]
