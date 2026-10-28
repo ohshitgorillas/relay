@@ -43,6 +43,9 @@ def fake_cfg(tmp_path: Path) -> Config:
         idle_ceiling=130_000,
         check_timeout=1800.0,
         check_outside=list(DEFAULT_CHECK_OUTSIDE),
+        research_command=[fake, "--agent", "researcher"],
+        map_max_lines=150,
+        map_max_chars=12_000,
     )
 
 
