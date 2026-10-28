@@ -26,6 +26,12 @@ class RunResult:
     log: Path
 
 
+@dataclass(frozen=True)
+class CommandResult:
+    exit_code: int | None
+    timed_out: bool
+
+
 def _next_number(run_dir: Path) -> int:
     numbers = [int(p.stem) for p in run_dir.glob("*.jsonl") if p.stem.isdigit()]
     return max(numbers, default=0) + 1
@@ -152,3 +158,13 @@ def run_agent(
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     return RunResult(exit_code=exit_code, killed=killed, stream=state, log=log_path)
+
+
+def run_command(command: str, cwd: Path, log: Path, timeout: float) -> CommandResult:
+    """Run `/bin/sh -c command` in `cwd`, output appended to `log`, killed at `timeout`."""
+    raise NotImplementedError
+
+
+def capture(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str]:
+    """Run argv in `cwd`, return (exit code, stdout); (None, "") on OSError or timeout."""
+    raise NotImplementedError
