@@ -387,3 +387,115 @@ def test_kill_ends_a_long_child_at_once_and_reports_it_killed(
         assert not (tmp_path / "retire").exists()
     finally:
         _cleanup(grandfile, pidfile)
+
+
+# Behavior 6: the child's stderr never reaches Relay's own stderr, and is kept in a
+# `<n>.stderr` file beside the run's `<n>.jsonl` stream log.
+
+# Writes the bytes of the hex string $2 to stderr with the Python at $1, then runs the fake ($3).
+NOISY = '"$1" -c "import sys; sys.stderr.buffer.write(bytes.fromhex(sys.argv[1]))" "$2"; "$3"'
+
+# Reads its prompt, then writes each scenario line to stdout, each followed on stderr by
+# argv[1] and a newline: stderr interleaved with the stream.
+INTERLEAVED = """
+import os, sys
+sys.stdin.read()
+for line in open(os.environ["RELAY_FAKE_SCENARIO"]).read().splitlines():
+    sys.stdout.write(line + "\\n")
+    sys.stdout.flush()
+    sys.stderr.write(sys.argv[1] + "\\n")
+    sys.stderr.flush()
+"""
+
+# Writes argv[1] bytes of stderr in 64 KiB chunks; SIGALRM ends a writer still blocked after
+# 20 seconds, so a capture that never drains fails the run instead of hanging the test.
+FLOOD = """
+import signal, sys
+signal.alarm(20)
+left = int(sys.argv[1])
+while left:
+    n = min(left, 65536)
+    sys.stderr.buffer.write(b"e" * n)
+    sys.stderr.buffer.flush()
+    left -= n
+"""
+FLOOD_BYTES = 4 * 1024 * 1024
+
+
+def _stderr_file(result: RunResult) -> Path:
+    return result.log.with_name(result.log.stem + ".stderr")
+
+
+def test_nothing_the_child_writes_to_stderr_reaches_relays_stderr(
+    fake: list[str], tmp_path: Path, run_dir: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    marker = "child-stderr-marker-7f3a"
+    argv = _sh(NOISY, sys.executable, (marker + "\n").encode().hex(), fake[0])
+    capfd.readouterr()
+    result = run_agent(argv, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
+    captured = capfd.readouterr()
+    assert result.exit_code == 0
+    assert marker not in captured.err
+    assert marker not in captured.out
+
+
+def test_every_byte_of_the_childs_stderr_is_kept_in_a_stderr_file_named_like_its_log(
+    fake: list[str], tmp_path: Path, run_dir: Path
+) -> None:
+    first_bytes = b"warn: one\n\xff\x00 not utf-8\r\nlast line, no newline"
+    second_bytes = b"second child only\n"
+    first = run_agent(_sh(NOISY, sys.executable, first_bytes.hex(), fake[0]), "p\n",
+                      tmp_path, run_dir, _go, tmp_path / "retire")
+    second = run_agent(_sh(NOISY, sys.executable, second_bytes.hex(), fake[0]), "p\n",
+                       tmp_path, run_dir, _go, tmp_path / "retire")
+    assert first.log != second.log
+    for result, written in ((first, first_bytes), (second, second_bytes)):
+        kept = run_dir / f"{result.log.stem}.stderr"
+        assert kept.parent == result.log.parent
+        assert kept.is_file()
+        assert kept.read_bytes() == written
+
+
+@pytest.mark.parametrize("order", ["before-stream", "after-stream"])
+def test_a_child_flooding_its_stderr_runs_to_completion_with_its_stream_unchanged(
+    order: str, fake: list[str], tmp_path: Path, run_dir: Path
+) -> None:
+    clean = run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
+    if order == "before-stream":
+        script = '"$1" -c "$2" "$3" || exit 9; "$4"'
+    else:
+        script = '"$4" || exit 8; "$1" -c "$2" "$3" || exit 9'
+    argv = _sh(script, sys.executable, FLOOD, FLOOD_BYTES, fake[0])
+    start = time.monotonic()
+    result = run_agent(argv, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
+    assert time.monotonic() - start < 20
+    assert result.exit_code == 0
+    assert result.killed is False
+    assert result.log.read_text().splitlines() == LINES
+    assert result.stream == clean.stream
+    assert _stderr_file(result).is_file()
+    assert _stderr_file(result).read_bytes() == b"e" * FLOOD_BYTES
+
+
+def test_stream_log_stdout_and_stream_state_are_unchanged_when_the_child_also_writes_stderr(
+    fake: list[str], tmp_path: Path, run_dir: Path
+) -> None:
+    clean = run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
+    # Stream-json on stderr: a stderr line fed to the stream or logged would change both.
+    noise = json.dumps({"type": "system", "subtype": "init", "session_id": "sess-stderr"})
+    seen: list[object] = []
+
+    def on_event(state: object) -> str:
+        seen.append(copy.deepcopy(state))
+        return "go"
+
+    result = run_agent([sys.executable, "-c", INTERLEAVED, noise], "p\n", tmp_path, run_dir,
+                       on_event, tmp_path / "retire")
+    assert result.exit_code == 0
+    assert result.killed is False
+    assert result.log.read_text().splitlines() == LINES
+    assert result.stream == clean.stream
+    assert seen
+    assert seen[-1] == clean.stream
+    assert _stderr_file(result).is_file()
+    assert _stderr_file(result).read_text().splitlines() == [noise] * len(LINES)

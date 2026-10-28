@@ -80,6 +80,7 @@ def run_agent(
     number = _next_number(run_dir)
     log_path = run_dir / f"{number}.jsonl"
     pid_path = run_dir / f"{number}.pid"
+    stderr_path = run_dir / f"{number}.stderr"
     state = StreamState(None, 0, Spend(0, 0.0), None, False)
     killed = False
     retired = False
@@ -97,12 +98,15 @@ def run_agent(
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, on_signal)
+    stderr_file = None
     try:
+        stderr_file = stderr_path.open("wb")
         proc = subprocess.Popen(
             argv,
             cwd=cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
+            stderr=stderr_file,
             text=True,
             start_new_session=True,
         )
@@ -142,6 +146,8 @@ def run_agent(
             if proc.stdout is not None:
                 proc.stdout.close()
     finally:
+        if stderr_file is not None:
+            stderr_file.close()
         live.clear()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
