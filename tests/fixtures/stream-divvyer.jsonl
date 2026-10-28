@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "session_id": "sess-recut-1", "cwd": "/work", "model": "claude-opus", "tools": ["Bash", "Read", "Edit"]}
+{"type": "assistant", "message": {"id": "msg_51", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Recut the section into two steps."}], "usage": {"input_tokens": 8, "cache_creation_input_tokens": 400, "cache_read_input_tokens": 2000, "output_tokens": 50}}, "session_id": "sess-recut-1"}
+{"type": "result", "subtype": "success", "is_error": false, "duration_ms": 1200, "num_turns": 1, "result": "Recut the section into two steps.", "session_id": "sess-recut-1", "total_cost_usd": 0.0444, "usage": {"input_tokens": 8, "cache_creation_input_tokens": 400, "cache_read_input_tokens": 2000, "output_tokens": 50}}

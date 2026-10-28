@@ -1,4 +1,4 @@
-"""Red tests for Relay's loop (design: Modules `relay/loop.py`, its pass steps 1 to 7 and the lead's cwd; Order 13)."""
+"""Red tests for Relay's loop (design: Modules `relay/loop.py`, its pass steps 1 to 8, its stops and the lead's cwd; Order 13)."""
 
 from __future__ import annotations
 
@@ -681,3 +681,545 @@ def test_the_lead_runs_in_the_git_top_level_of_the_queues_directory(
     scenario(_lines(DONE_LEAD))
     run(queue, _shimmed(cfg, tmp_path))
     assert Path(str(_record(tmp_path, 0)["cwd"])).resolve() == tmp_path.resolve()
+
+
+# Behaviors of pass step 8, the budget-triggered retire and the stops (s7.d3) script each
+# lead and recut run through a sequencing shim put in front of the fake `claude`. The shim
+# reads the prompt on stdin and writes `{"cwd", "prompt"}` to `<record dir>/run-<n>.json`,
+# n counting from 0. Run n takes the plan's step n (the last step once the plan runs out,
+# or step n modulo the plan's length when it cycles): it copies the step's `write` source
+# over its target when the step has one, runs the fake on the step's scenario file and exits
+# with the step's exit code. Every stream line it emits is the fake's, from `tests/fixtures/`.
+_SEQ = r"""
+import json, os, subprocess, sys
+rec, fake, plan = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+prompt = sys.stdin.read()
+n = len([p for p in os.listdir(rec) if p.startswith("run-") and p.endswith(".json")])
+out = os.path.join(rec, "run-%d.json" % n)
+with open(out + ".part", "w") as f:
+    json.dump({"cwd": os.getcwd(), "prompt": prompt}, f)
+os.replace(out + ".part", out)
+steps = plan["steps"]
+step = steps[n % len(steps)] if plan["cycle"] else steps[min(n, len(steps) - 1)]
+if step.get("write"):
+    src, dst = step["write"]
+    with open(src, "rb") as f:
+        data = f.read()
+    with open(dst, "wb") as f:
+        f.write(data)
+env = dict(os.environ, RELAY_FAKE_SCENARIO=step["scenario"])
+sys.stdout.flush()
+subprocess.run([fake], stdin=subprocess.DEVNULL, env=env, check=True)
+sys.exit(step["exit"])
+"""
+
+# Scripted leads of `tests/fixtures/`, each a session of its own, ending with the status line named.
+RETIRED_LEAD = "stream-retired.jsonl"  # "RETIRED", session "sess-lead-3"
+RECUT_LEAD = "stream-recut.jsonl"  # "RECUT: step 2 needs a split", session "sess-lead-4"
+NEEDS_OWNER_LEAD = "stream-needs-owner.jsonl"  # "NEEDS-OWNER: Which port should the server use?", "sess-lead-5"
+DONE_SMALL_LEAD = "stream-done-small.jsonl"  # "DONE", session "sess-lead-6", context 1 + 50 + 400
+DIVVYER_RUN = "stream-divvyer.jsonl"  # the divvyer's recut run, session "sess-recut-1"
+
+RECUT_REASON = "step 2 needs a split"
+QUESTION = "Which port should the server use?"
+RETIRED_CONTEXT = 4 + 300 + 1500
+RETIRED_SPEND = Spend(tokens=4 + 300 + 1500 + 20, dollars=0.1111)
+RECUT_SPEND = Spend(tokens=6 + 200 + 1000 + 30, dollars=0.2222)
+DIVVYER_SPEND = Spend(tokens=8 + 400 + 2000 + 50, dollars=0.0444)
+
+REPO = Path(__file__).resolve().parents[1]
+
+# A ping command that records `[message, status of <sid> in state at ping time]` to the record path.
+_RECORD_STATE = r"""
+import json, sys
+from pathlib import Path
+repo, record, queue, root, sid, message = sys.argv[1:7]
+sys.path.insert(0, repo)
+from relay.config import Config
+from relay.state import State
+cfg = Config(token_budget=None, dollar_budget=None, context_limit=1, hard_ceiling=2, poll_seconds=1.0,
+             lead_command=[], recut_command=[], ping_command=[], state_root=Path(root))
+status = State.open(Path(queue), cfg).section(sid).status
+with open(record, "a") as f:
+    f.write(json.dumps([message, status]) + chr(10))
+"""
+
+
+def _step(name: str, exit: int = 0, write: tuple[Path, Path] | None = None) -> dict[str, object]:
+    """One run of the plan: the fixture scenario `name`, its exit code, and a file to copy over another first."""
+    return {
+        "scenario": str(FIXTURES / name),
+        "exit": exit,
+        "write": [str(write[0]), str(write[1])] if write else None,
+    }
+
+
+def _plan(tmp_path: Path, fake: str, role: str, steps: list[dict[str, object]], cycle: bool) -> list[str]:
+    rec = tmp_path / "plans" / role
+    rec.mkdir(parents=True, exist_ok=True)
+    return [sys.executable, "-c", _SEQ, str(rec), fake, json.dumps({"steps": steps, "cycle": cycle})]
+
+
+def _sequenced(
+    cfg: Config,
+    tmp_path: Path,
+    leads: list[dict[str, object]],
+    recuts: list[dict[str, object]] | None = None,
+    cycle: bool = False,
+) -> Config:
+    """`cfg` with each lead run, and each recut run, taking the next step of its plan."""
+    fake = cfg.lead_command[0]
+    recut_plan = recuts if recuts is not None else [_step(DIVVYER_RUN)]
+    return dataclasses.replace(
+        cfg,
+        lead_command=_plan(tmp_path, fake, "lead", leads, cycle),
+        recut_command=_plan(tmp_path, fake, "recut", recut_plan, False),
+    )
+
+
+def _runs(tmp_path: Path, role: str) -> list[dict[str, object]]:
+    """The records of every `role` run ("lead" or "recut"), in run order."""
+    rec = tmp_path / "plans" / role
+    count = len([p for p in rec.iterdir() if p.name.startswith("run-") and p.name.endswith(".json")])
+    return [json.loads((rec / f"run-{n}.json").read_text()) for n in range(count)]
+
+
+def _only_first_open(queue: Path, cfg: Config) -> str:
+    """Mark every section but the queue's first open one done in state; return that one's id."""
+    ids = _open_ids(queue)
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid != ids[0]:
+            state.mark_done(sid)
+    return ids[0]
+
+
+def _body(queue: Path, sid: str) -> str:
+    return next(s.body for s in parse_queue(queue) if s.id == sid)
+
+
+# Behavior 1 (s7.d3): - DONE: `mark_done`.
+
+
+def test_a_lead_ending_done_marks_its_section_done_and_the_next_lead_takes_the_next_section(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop leaves a DONE section open, or records a failure on it.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    state = State.open(queue, cfg)
+    assert state.section(ids[0]).status == "done"
+    assert state.section(ids[0]).failures == 0
+    assert state.section(ids[0]).last_session == "sess-lead-1"
+    assert _ran_on(queue, cfg, "sess-lead-2") == {ids[1]}
+    assert len(_runs(tmp_path, "lead")) == 3
+
+
+def test_a_section_marked_done_gets_no_second_lead(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: mark_done is skipped, so the next pass runs the same section again.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert State.open(queue, cfg).section(first).status == "done"
+
+
+# Behavior 2 (s7.d3): - RETIRED: run a fresh lead on the same section; this is no failure.
+
+
+def test_a_retired_lead_is_followed_by_a_fresh_lead_on_the_same_section(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: RETIRED moves the loop on to the next section, or marks the section done.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    runs = _runs(tmp_path, "lead")
+    assert _body(queue, ids[0]) in str(runs[1]["prompt"])
+    assert "resume sess-lead-3" in str(runs[1]["prompt"])
+    state = State.open(queue, cfg)
+    assert state.section(ids[0]).status == "done"
+    assert state.section(ids[0]).last_session == "sess-lead-1"
+    assert _ran_on(queue, cfg, "sess-lead-2") == {ids[1]}
+
+
+def test_retired_leads_count_no_failure(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop calls record_failure on RETIRED, so a second retire stops FAILED_TWICE.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    leads = [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 4
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 0
+    assert section.status == "done"
+
+
+# Behavior 3 (s7.d3): - RECUT: run `recut_command` with `recut_brief`, append its spend to the
+# ledger, and re-parse. A non-zero exit or an unchanged queue file counts as a failure of the section.
+
+
+def _recut_to_m2(cfg: Config, tmp_path: Path, queue: Path, exit: int = 0) -> Config:
+    """Leads: RECUT, then DONE; the recut copies the m2 queue over `queue` and exits `exit`."""
+    recut = _step(DIVVYER_RUN, exit=exit, write=(FIXTURES / M2, queue))
+    return _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[recut])
+
+
+def test_a_recut_status_runs_the_recut_command_once_with_the_recut_brief(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop never runs recut_command, or sends it a brief without the reason and the lead's log.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    run_dir = State.open(queue, cfg).run_dir
+    cfg = _recut_to_m2(cfg, tmp_path, queue)
+    run(queue, cfg)
+    recuts = _runs(tmp_path, "recut")
+    assert len(recuts) == 1
+    brief = str(recuts[0]["prompt"])
+    assert RECUT_REASON in brief
+    assert sid in brief
+    assert str(run_dir) in brief
+
+
+def test_after_a_recut_the_loop_re_parses_the_queue_and_counts_no_failure(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop keeps the queue it parsed before the recut, or fails a recut that changed it.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _recut_to_m2(cfg, tmp_path, queue)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    m2_ids = _open_ids(queue)
+    assert str(_body(queue, m2_ids[0])) in str(_runs(tmp_path, "lead")[1]["prompt"])
+    state = State.open(queue, cfg)
+    assert all(state.section(m2).status == "done" for m2 in m2_ids)
+    assert state.section(sid).failures == 0
+
+
+def test_the_recut_runs_spend_is_appended_to_the_ledger(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop appends the leads' spend but not the recut's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    cfg = _recut_to_m2(cfg, tmp_path, queue)
+    run(queue, cfg)
+    n = len(_open_ids(queue))
+    total = _ledger(queue, cfg).total(None)
+    assert total.tokens == RECUT_SPEND.tokens + DIVVYER_SPEND.tokens + n * DONE_SPEND.tokens
+    assert total.dollars == pytest.approx(RECUT_SPEND.dollars + DIVVYER_SPEND.dollars + n * DONE_SPEND.dollars)
+
+
+def test_a_recut_with_a_non_zero_exit_counts_as_a_failure_of_the_section(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop ignores the recut's exit code.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _recut_to_m2(cfg, tmp_path, queue, exit=1)
+    run(queue, cfg)
+    assert State.open(queue, cfg).section(sid).failures == 1
+
+
+def test_a_recut_that_leaves_the_queue_file_unchanged_counts_as_a_failure_of_the_section(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop treats a zero-exit recut as success without checking the queue file changed.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 1
+    assert section.status == "done"
+
+
+def test_two_recuts_that_leave_the_queue_unchanged_stop_with_failed_twice(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a failed recut is not counted with the section's other failures.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "recut")) == 2
+    assert State.open(queue, cfg).section(first).failures == 2
+
+
+# Behavior 4 (s7.d3): - NEEDS-OWNER: `park`, then `ping.needs_owner`.
+
+
+def test_needs_owner_parks_the_section_with_its_question_and_the_loop_goes_on(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: NEEDS-OWNER does not park, parks without the question, or counts a failure.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    blocked = blocked_by(parse_queue(queue), {ids[0]})
+    expected = next(sid for sid in ids[1:] if sid not in blocked)
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    section = State.open(queue, cfg).section(ids[0])
+    assert section.status == "parked"
+    assert section.question == QUESTION
+    assert section.failures == 0
+    assert _ran_on(queue, cfg, "sess-lead-2") == {expected}
+
+
+def test_needs_owner_pings_the_owner_with_the_question_once_the_section_is_parked(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop sends no needs-owner ping, or pings before it parks the section.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    record = tmp_path / "pings.jsonl"
+    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), sid, "{message}"]
+    cfg = dataclasses.replace(cfg, ping_command=ping)
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
+    run(queue, cfg)
+    asked = [p for p in _pings(tmp_path) if QUESTION in p[0]]
+    assert len(asked) == 1
+    message, status = asked[0]
+    assert message.startswith("relay ")
+    assert status == "parked"
+
+
+# Behavior 5 (s7.d3): - A missing status, non-zero exit or kill: `record_failure`. A second
+# failure stops with `FAILED_TWICE`.
+
+
+def test_a_lead_with_no_status_line_records_one_failure_and_the_section_is_run_again(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a missing status records no failure, or stops at the first failure.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 1
+    assert section.status == "done"
+
+
+def test_a_lead_ending_done_with_a_non_zero_exit_records_a_failure(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop reads the status line and ignores the lead's exit code.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD, exit=1), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 1
+    assert section.last_session == "sess-lead-6"
+
+
+def test_two_leads_ending_done_with_a_non_zero_exit_stop_with_failed_twice(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a non-zero exit with a DONE line marks the section done.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD, exit=1)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 2
+    assert section.status == "open"
+
+
+def test_a_killed_lead_records_one_failure(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a kill at hard_ceiling records no failure.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == 1
+    assert section.status == "done"
+
+
+def test_a_second_failure_stops_with_failed_twice_and_runs_no_further_lead(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop goes on past the section's second failure.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert _ran_on(queue, cfg, "sess-lead-2") == {ids[0]}
+    section = State.open(queue, cfg).section(ids[0])
+    assert section.failures == 2
+    assert section.status == "open"
+
+
+def test_one_failure_in_each_of_several_sections_does_not_stop_the_loop(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop counts failures across sections instead of per section.
+    queue = queue_file(M2)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD), _step(DONE_LEAD)], cycle=True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    state = State.open(queue, cfg)
+    assert all(state.section(sid).failures == 1 for sid in ids)
+    assert all(state.section(sid).status == "done" for sid in ids)
+
+
+def test_a_failure_recorded_before_this_go_counts_toward_the_second(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop counts only the failures of this `relay go` in memory.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    State.open(queue, cfg).record_failure(first)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "lead")) == 1
+
+
+# Behavior 6 (s7.d3): After a budget-triggered retire, the pass ends with `BUDGET`. Every stop
+# calls `ping.stopped` before returning.
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [{"token_budget": RETIRED_SPEND.tokens - 1}, {"dollar_budget": 0.1}],
+    ids=["tokens", "dollars"],
+)
+def test_a_budget_triggered_retire_ends_the_pass_with_budget_and_runs_no_fresh_lead(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    budget: dict[str, object],
+) -> None:
+    # Breaks when: a lead retired on budget is followed by a fresh lead like any RETIRED.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, **budget)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.BUDGET
+    assert len(_runs(tmp_path, "lead")) == 1
+
+
+def test_a_context_triggered_retire_does_not_end_the_pass_with_budget(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop ends with BUDGET after any retire, not only a budget-triggered one.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=RETIRED_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 2
+
+
+def _stop_on(kind: str, queue: Path, cfg: Config) -> Config:
+    """Set up state so that `run` stops with `kind`; return the config to run with."""
+    state = State.open(queue, cfg)
+    if kind == "stop-file":
+        state.stop_file.touch()
+    elif kind == "budget":
+        cfg = dataclasses.replace(cfg, token_budget=1000)
+        _ledger_line(state, time.time() + 3600, 1001, 0.0)
+    elif kind == "queue-empty":
+        for sid in _open_ids(queue):
+            state.mark_done(sid)
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "lead"),
+    [
+        ("stop-file", ExitCode.STOP_FILE, DONE_LEAD),
+        ("budget", ExitCode.BUDGET, DONE_LEAD),
+        ("queue-empty", ExitCode.QUEUE_EMPTY, DONE_LEAD),
+        ("failed-twice", ExitCode.FAILED_TWICE, NO_STATUS_LEAD),
+    ],
+    ids=["stop-file", "budget", "queue-empty", "failed-twice"],
+)
+def test_every_stop_sends_one_stopped_ping_before_run_returns(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    kind: str,
+    code: int,
+    lead: str,
+) -> None:
+    # Breaks when: a stop returns without calling ping.stopped.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(lead))
+    cfg = _stop_on(kind, queue, cfg)
+    assert run(queue, cfg) == code
+    pings = _pings(tmp_path)
+    assert len(pings) == 1
+    assert pings[0][0].startswith("relay ")
+
+
+def test_a_budget_triggered_retire_sends_one_stopped_ping(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the BUDGET stop after a live-spend retire skips ping.stopped.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, token_budget=RETIRED_SPEND.tokens - 1)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD)])
+    assert run(queue, cfg) == ExitCode.BUDGET
+    assert len(_pings(tmp_path)) == 1
+
+
+def test_a_stop_file_while_waiting_sends_one_stopped_ping(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the STOP_FILE stop from the wait returns without calling ping.stopped.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    pings = _pings(tmp_path)
+    assert len(pings) == 1
+    assert pings[0][0].startswith("relay ")

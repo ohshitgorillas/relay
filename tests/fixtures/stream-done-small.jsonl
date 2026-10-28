@@ -1,0 +1,3 @@
+{"type": "system", "subtype": "init", "session_id": "sess-lead-6", "cwd": "/work", "model": "claude-opus", "tools": ["Bash", "Read"]}
+{"type": "assistant", "message": {"id": "msg_61", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Step committed."}], "usage": {"input_tokens": 1, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 400, "output_tokens": 12}}, "session_id": "sess-lead-6"}
+{"type": "result", "subtype": "success", "is_error": false, "duration_ms": 500, "num_turns": 1, "result": "Step committed.\nDONE", "session_id": "sess-lead-6", "total_cost_usd": 0.0555, "usage": {"input_tokens": 1, "cache_creation_input_tokens": 50, "cache_read_input_tokens": 400, "output_tokens": 12}}
