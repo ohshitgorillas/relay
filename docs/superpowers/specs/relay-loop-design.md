@@ -220,7 +220,7 @@ Each pass does the following, in order:
 6. Otherwise, run a lead with `resume` set to the section's `last_session`, or else `last_session_any`, and `report` set to the section's own `last_report`. A report from another section is never passed, even when `resume` comes from `last_session_any`. During the run, `on_event` returns:
    - `retire` once `context_tokens ≥ context_limit` or the live spend passes a budget;
    - `kill` at `hard_ceiling`.
-7. Append the run's spend to the ledger, record its session, and record `result.stream.result_text` with `set_last_report`; a run with no result text clears it.
+7. Append the run's spend to the ledger, record its session, and record `result.stream.result_text` with `set_last_report`, both only when the run has a session. A run with a session but no result text clears the report; a run with no session leaves the old session and the old report in place.
 8. Act on the status:
    - DONE: `mark_done`.
    - RETIRED: run a fresh lead on the same section; this is no failure.
