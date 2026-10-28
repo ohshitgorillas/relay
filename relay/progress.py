@@ -8,6 +8,7 @@ from typing import Literal
 from relay.agents import Event, duration
 from relay.check import CheckResult, outcome_text
 from relay.config import Config
+from relay.ledger import Kind
 from relay.research import Map
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
@@ -90,7 +91,7 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
     _write(f"recut {sid}: finished {outcome} {_spend(result)}")
 
 
-def agent_event(who: Literal["lead", "recut", "research", "ask"], sid: str, event: Event) -> None:
+def agent_event(who: Kind, sid: str, event: Event) -> None:
     agent = event.agent
     if event.kind == "started":
         what = f"agent {agent.name} started"
