@@ -5,6 +5,7 @@ from pathlib import Path
 from relay.config import Config
 from relay.check import CheckResult, outcome_text
 from relay.queue import Section
+from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN
 from relay.status import KINDS, Kind, TEXT_NAMES
 
 
@@ -78,12 +79,12 @@ def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> st
         f"Section body:\n{section.body}\n"
         "Map the code this section's steps touch. End your final message with the map, "
         f"at most {cfg.map_max_lines} lines and {cfg.map_max_chars} characters, in this form "
-        "and nothing after END MAP:\n"
-        "MAP\n"
+        f"and nothing after {MAP_CLOSE}:\n"
+        f"{MAP_OPEN}\n"
         "<path>:<line>[-<line>] | <what it does>\n"
-        "LINKS\n"
+        f"{LINKS}\n"
         "<path>:<line> -> <path>:<line> | <how>\n"
-        "END MAP\n\n"
+        f"{MAP_CLOSE}\n\n"
         f"When the file {flag} exists, send no more readers and return the map you have.\n"
     )
 
@@ -93,9 +94,9 @@ def ask_brief(question: str, flag: Path, cfg: Config) -> str:
     return (
         f"Answer this question about the code you mapped:\n{question}\n\n"
         f"End your final message with the answer, at most {cfg.map_max_chars} characters, "
-        "in this form and nothing after END ANSWER:\n"
-        "ANSWER\n"
+        f"in this form and nothing after {ANSWER_CLOSE}:\n"
+        f"{ANSWER_OPEN}\n"
         "<file:line pointers, one line each>\n"
-        "END ANSWER\n\n"
+        f"{ANSWER_CLOSE}\n\n"
         f"When the file {flag} exists, send no more readers and return the answer you have.\n"
     )

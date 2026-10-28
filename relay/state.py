@@ -117,10 +117,9 @@ class State:
             s.question = None
             s.check_feedback = None
             s.check_pending = False
-            s.research_session = None
 
         self._update(sid, change)
-        self.map_path(sid).unlink(missing_ok=True)
+        self.drop_map(sid)
 
     def record_check_failure(self, sid: str, feedback: str) -> int:
         def change(s: SectionState, _r: dict) -> int:
