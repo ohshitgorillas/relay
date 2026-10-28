@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -430,3 +431,239 @@ def test_set_answer_leaves_a_pending_check_pending(queue: Path, fake_cfg: Config
     section = State.open(queue, fake_cfg).section("s6")
     assert section.status == "open"
     assert section.check_pending is True
+
+
+# Relay's research (design: docs/superpowers/specs/relay-research-design.md, Modules `relay/state.py`; Order 3).
+# Behavior 1: Researcher session, map path, research flag, research lock; dropping the map when
+# the section is done.
+
+MAP_FIXTURE = Path(__file__).parent / "fixtures" / "research-map.txt"
+
+
+def _save_map(state: State, sid: str) -> Path:
+    """Put the fixture map at the section's map path, as `research.save` leaves one."""
+    path = state.map_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(MAP_FIXTURE.read_bytes())
+    return path
+
+
+def test_map_path_is_the_sections_map_file_under_maps_in_the_queues_directory(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: the map is kept anywhere but `<dir>/maps/<sid>.map`.
+    state = State.open(queue, fake_cfg)
+    assert state.map_path("s1") == _dir(state) / "maps" / "s1.map"
+    assert state.map_path("s2.d1") == _dir(state) / "maps" / "s2.d1.map"
+
+
+def test_map_path_is_the_same_for_a_reopened_state_and_differs_per_queue(
+    queue: Path, other_queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: the path is not derived from the queue's own directory.
+    first = State.open(queue, fake_cfg).map_path("s1")
+    assert State.open(queue, fake_cfg).map_path("s1") == first
+    assert State.open(other_queue, fake_cfg).map_path("s1") != first
+
+
+def test_research_flag_is_research_sid_inside_the_run_dir(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the research flag is the lead's retire flag or lies outside `run_dir`.
+    state = State.open(queue, fake_cfg)
+    assert state.research_flag("s1") == state.run_dir / "research-s1"
+    assert state.research_flag("s2.d1") == state.run_dir / "research-s2.d1"
+    assert state.research_flag("s1") != state.retire_flag
+
+
+def test_set_research_session_is_kept_per_section_across_reopening(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the session is not saved, or is shared between sections.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.set_research_session("s2", "research-b")
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s1").research_session == "research-a"
+    assert reopened.section("s2").research_session == "research-b"
+    assert reopened.section("s3").research_session is None
+
+
+def test_set_research_session_none_clears_it(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: a None session is ignored and the old one kept.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.set_research_session("s1", None)
+    assert State.open(queue, fake_cfg).section("s1").research_session is None
+
+
+def test_set_research_session_leaves_the_leads_session_alone(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the researcher's session is written into `last_session` or `last_session_any`.
+    state = State.open(queue, fake_cfg)
+    state.set_last_session("s1", "lead-a")
+    state.set_research_session("s1", "research-a")
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s1").last_session == "lead-a"
+    assert reopened.section("s1").research_session == "research-a"
+    assert reopened.last_session_any == "lead-a"
+
+
+def test_drop_map_clears_the_research_session_and_deletes_the_map(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `drop_map` leaves either the session or the map file behind.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    path = _save_map(state, "s1")
+    state.drop_map("s1")
+    assert not path.exists()
+    assert State.open(queue, fake_cfg).section("s1").research_session is None
+
+
+def test_drop_map_leaves_other_sections_maps_and_sessions(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `drop_map` clears or deletes another section's research.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.set_research_session("s2", "research-b")
+    _save_map(state, "s1")
+    other = _save_map(state, "s2")
+    state.drop_map("s1")
+    assert other.read_bytes() == MAP_FIXTURE.read_bytes()
+    assert State.open(queue, fake_cfg).section("s2").research_session == "research-b"
+
+
+def test_drop_map_with_no_map_saved_clears_the_session(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `drop_map` raises on a section whose map file is absent (as `_research` meets
+    # before a section's first research run), or keeps the session.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.drop_map("s1")
+    assert not state.map_path("s1").exists()
+    assert State.open(queue, fake_cfg).section("s1").research_session is None
+
+
+RESEARCH_WRITES: dict[str, Callable[[State], object]] = {
+    "set_research_session": lambda s: s.set_research_session("s1", "research-a"),
+    "drop_map": lambda s: s.drop_map("s1"),
+}
+
+
+@pytest.mark.parametrize("write", sorted(RESEARCH_WRITES))
+def test_each_research_write_replaces_a_file_in_the_queues_directory_from_a_temp_file(
+    write: str, queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the research session is written other than by temp file and `os.replace`.
+    state = State.open(queue, fake_cfg)
+    state.set_answer("s1", "An earlier answer.")
+    calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def recording_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        calls.append((Path(os.fsdecode(src)), Path(os.fsdecode(dst))))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, recording_replace)
+    RESEARCH_WRITES[write](state)
+    assert calls
+    for src, dst in calls:
+        assert src != dst
+        assert dst.is_relative_to(_dir(state))
+        assert not src.exists()
+
+
+def _research_lock_file(state: State, sid: str) -> Path:
+    return _dir(state) / f"research-{sid}.lock"
+
+
+def test_research_lock_holds_flock_on_the_sections_lock_file(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the lock is taken on another file, or not held while the block runs.
+    state = State.open(queue, fake_cfg)
+    with state.research_lock("s1"):
+        assert _research_lock_file(state, "s1").is_file()
+        with open(_research_lock_file(state, "s1"), "a") as other:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_research_lock_is_released_when_the_block_ends(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the flock outlives the `with` block.
+    state = State.open(queue, fake_cfg)
+    with state.research_lock("s1"):
+        assert _research_lock_file(state, "s1").is_file()
+    with open(_research_lock_file(state, "s1"), "a") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_research_lock_is_released_when_the_block_raises(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: an error inside the block leaves the flock held, or the error is swallowed.
+    state = State.open(queue, fake_cfg)
+    with pytest.raises(LookupError):
+        with state.research_lock("s1"):
+            raise LookupError("inside")
+    with open(_research_lock_file(state, "s1"), "a") as other:
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_research_lock_blocks_until_the_holder_lets_go(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the lock is non-blocking, raising or entering while another holds it.
+    state = State.open(queue, fake_cfg)
+    entered = threading.Event()
+    errors: list[BaseException] = []
+
+    def take() -> None:
+        try:
+            with State.open(queue, fake_cfg).research_lock("s1"):
+                entered.set()
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            errors.append(exc)
+            entered.set()
+
+    with state.research_lock("s1"):
+        waiter = threading.Thread(target=take)
+        waiter.start()
+        assert not entered.wait(0.3)
+    waiter.join(5)
+    assert errors == []
+    assert entered.is_set()
+
+
+def test_research_lock_of_one_section_does_not_block_another_or_the_go_lock(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: research locks share one file, or take `<dir>/lock`, the `relay go` lock.
+    state = State.open(queue, fake_cfg)
+    with state.research_lock("s1"):
+        with State.open(queue, fake_cfg).research_lock("s2"):
+            assert _research_lock_file(state, "s2").is_file()
+        State.open(queue, fake_cfg).lock()
+
+
+# Behavior 2: `mark_done` also calls the work of `drop_map`.
+
+
+def test_mark_done_clears_the_research_session_and_deletes_the_map(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `mark_done` leaves the researcher's session or the map file behind.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    path = _save_map(state, "s1")
+    state.mark_done("s1")
+    assert not path.exists()
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.status == "done"
+    assert section.research_session is None
+
+
+def test_mark_done_leaves_other_sections_maps_and_sessions(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `mark_done` drops every section's research, not only its own.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.set_research_session("s2", "research-b")
+    _save_map(state, "s1")
+    other = _save_map(state, "s2")
+    state.mark_done("s1")
+    assert other.read_bytes() == MAP_FIXTURE.read_bytes()
+    assert State.open(queue, fake_cfg).section("s2").research_session == "research-b"
+
+
+def test_mark_done_with_a_session_and_no_map_file_clears_the_session(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: `mark_done` raises on an absent map, or keeps the session when there is no map.
+    state = State.open(queue, fake_cfg)
+    state.set_research_session("s1", "research-a")
+    state.mark_done("s1")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.status == "done"
+    assert section.research_session is None

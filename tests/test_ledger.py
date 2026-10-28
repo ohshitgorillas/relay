@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from relay import agents
 from relay.check import CheckResult
 from relay.config import Config
 from relay.ledger import Ledger, Spend
@@ -685,3 +686,135 @@ def test_sessions_of_a_ledger_of_only_check_lines_is_empty(tmp_path: Path) -> No
     ledger.append_check("s1", _check())
     ledger.append_check("s1", _check("outside", 127))
     assert _call(ledger.sessions) == []
+
+
+# Relay's research (design: docs/superpowers/specs/relay-research-design.md, Modules
+# `relay/ledger.py`; Order 3).
+# Behavior 3: Run lines with map commit and agents' tokens.
+
+RUN_KINDS = ["lead", "recut", "research", "ask"]
+
+
+def _subagents() -> tuple:
+    """The two subagents of the agents fixture stream: builder a1 at 21844 tokens, test-writer
+    a2 at 41000, folded as `relay/agents.py` folds a run's stream."""
+    activity = agents.Activity()
+    for line in (Path(__file__).parent / "fixtures" / "stream-agents.jsonl").read_text().splitlines():
+        event = json.loads(line)
+        if event.get("type") == "system":
+            activity = agents.feed(activity, event)
+    return tuple(activity.agents)
+
+
+SUBAGENT_RECORDS = [
+    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
+    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+]
+
+
+@pytest.mark.parametrize("kind", RUN_KINDS)
+def test_a_run_line_carries_its_kind_map_commit_and_each_subagents_tokens(tmp_path: Path, kind: str) -> None:
+    # Breaks when: a run line drops the map commit or the agents, names their fields otherwise,
+    # or a research or ask run is refused or written under another kind.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["kind"] == kind
+    assert entry.get("map") == "4f2a9c1"
+    assert entry.get("agents") == SUBAGENT_RECORDS
+
+
+@pytest.mark.parametrize("kind", RUN_KINDS)
+def test_a_run_line_with_no_map_and_no_agents_holds_null_and_an_empty_list(tmp_path: Path, kind: str) -> None:
+    # Breaks when: a run without a map omits `map` or writes other than null, or omits `agents`.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert entry["kind"] == kind
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == []
+
+
+def test_a_run_line_by_keyword_keeps_the_map_and_agents_given(tmp_path: Path) -> None:
+    # Breaks when: `map_commit` and `agents` are not the keyword names, or are swapped.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(
+        "research", "s2", "sess-r", Spend(tokens=9, dollars=0.125), agents=_subagents()[:1], map_commit=None
+    )
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == SUBAGENT_RECORDS[:1]
+
+
+# Behavior 4: `_parse` is unchanged, so `total`, `over`, `unreadable` and `sessions` read the
+# new lines as they read lead lines.
+
+
+def _new_shape(path: Path) -> None:
+    """Every line in the file is a run line of the new form, holding `map` and `agents`, so the
+    reads below are of the new lines and not of lead lines without them."""
+    for line in path.read_text().splitlines():
+        entry = json.loads(line)
+        assert "map" in entry and isinstance(entry.get("agents"), list)
+
+
+def _ledger_with_research(path: Path) -> Ledger:
+    """Four run lines, one of each kind, with maps and agents: 52 tokens, $1.875."""
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-lead", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
+    ledger.append("research", "s1", "sess-research", Spend(tokens=7, dollars=1.0), "4f2a9c1", _subagents())
+    ledger.append("ask", "s1", "sess-research", Spend(tokens=3, dollars=0.25), None, _subagents()[1:])
+    ledger.append("recut", "s1", "sess-recut", Spend(tokens=2, dollars=0.125), "4f2a9c1", ())
+    _new_shape(path)
+    return ledger
+
+
+def test_total_sums_research_and_ask_lines_as_it_sums_lead_lines(tmp_path: Path) -> None:
+    # Breaks when: a research or ask line, or one carrying a map or agents, is skipped or its
+    # subagents' tokens are added to the run's own.
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.total, None) == Spend(tokens=52, dollars=1.875)
+
+
+def test_total_since_counts_only_research_and_ask_lines_after_it(tmp_path: Path) -> None:
+    # Breaks when: a research or ask line's time is not read as a lead line's is.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("research", "s1", "sess-old", Spend(tokens=1_000, dollars=4.0), "4f2a9c1", _subagents())
+    start = _tick()
+    ledger.append("research", "s2", "sess-new", Spend(tokens=30, dollars=0.5), "9b0d3e7", _subagents())
+    ledger.append("ask", "s2", "sess-new", Spend(tokens=5, dollars=0.25), None, ())
+    _new_shape(path)
+    assert _call(ledger.total, start) == Spend(tokens=35, dollars=0.75)
+
+
+def test_over_counts_research_and_ask_lines(tmp_path: Path, fake_cfg: Config) -> None:
+    # Breaks when: research or ask spend escapes the budgets.
+    cfg = dataclasses.replace(fake_cfg, token_budget=53, dollar_budget=1.9)
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.0), None) is None
+    assert _call(ledger.over, cfg, Spend(tokens=2, dollars=0.0), None) == "tokens"
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.125), None) == "dollars"
+
+
+def test_unreadable_reads_lines_with_a_map_and_agents_as_readable(tmp_path: Path) -> None:
+    # Breaks when: a line with `map` or `agents` is counted unreadable.
+    path = tmp_path / "ledger.jsonl"
+    ledger = _ledger_with_research(path)
+    assert _call(ledger.unreadable) == []
+    _raw(path, "not json\n")
+    ledger.append("ask", "s1", "sess-research", Spend(tokens=1, dollars=0.0), None, _subagents())
+    assert _call(ledger.unreadable) == [5]
+
+
+def test_sessions_lists_research_and_ask_lines_in_the_order_written(tmp_path: Path) -> None:
+    # Breaks when: `sessions()` skips research or ask lines, or lines carrying a map or agents.
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.sessions) == [
+        ("s1", "sess-lead"),
+        ("s1", "sess-research"),
+        ("s1", "sess-research"),
+        ("s1", "sess-recut"),
+    ]
