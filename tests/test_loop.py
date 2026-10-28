@@ -48,10 +48,60 @@ def _lines(name: str) -> list[str]:
     return (FIXTURES / name).read_text().splitlines()
 
 
+_UNITTEST_MODULES = ("test_model", "test_collect", "test_repos", "test_sources", "test_lineage")
+_IMPORTED_MODULES = (
+    "budget",
+    "sources",
+    "events",
+    "hook",
+    "statusline",
+    "history",
+    "lineage",
+    "otel",
+    "progress",
+    "repos",
+    "state",
+    "terminus",
+    "transcript",
+    "views",
+)
+_CHECKED_SCRIPTS = (
+    "core.js",
+    "strip.js",
+    "drill.js",
+    "views/failures.js",
+    "views/history.js",
+    "views/now.js",
+    "views/steps.js",
+    "views/timeline.js",
+    "views/worktrees.js",
+)
+
+
+def _workboard_checks_pass(top: Path) -> None:
+    """Give the git top level `top` the files every `done-check:` line of the WORKBOARD queue
+    needs to exit 0 there, so a `DONE` on any of its sections passes its check: the older tests
+    here claim what follows a section finished and checked, not a failed check."""
+    for name in _UNITTEST_MODULES:
+        (top / f"{name}.py").write_text(
+            "import unittest\n\n\nclass Stub(unittest.TestCase):\n    def test_stub(self):\n        pass\n"
+        )
+    for name in _IMPORTED_MODULES:
+        (top / f"{name}.py").write_text("")
+    for name in _CHECKED_SCRIPTS:
+        script = top / "web" / name
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text("")
+    (top / "install").mkdir()
+    (top / "install" / "README.md").write_text("Install.\n")
+
+
 @pytest.fixture
 def cfg(fake_cfg: Config, tmp_path: Path) -> Config:
-    """`fake_cfg` with its pings recorded to `<tmp_path>/pings.jsonl`, and `tmp_path` a git work tree."""
+    """`fake_cfg` with its pings recorded to `<tmp_path>/pings.jsonl`, and `tmp_path` a git work tree
+    in which the WORKBOARD queue's checks pass."""
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _workboard_checks_pass(tmp_path)
     record = tmp_path / "pings.jsonl"
     return dataclasses.replace(fake_cfg, ping_command=[sys.executable, "-c", _RECORD, str(record), "{message}"])
 
@@ -753,10 +803,18 @@ def test_each_lead_runs_spend_is_appended_to_the_ledger(
     assert total.dollars == pytest.approx(n * DONE_SPEND.dollars)
     # One readable line per lead run, each holding that run's own spend.
     assert _ledger(queue, cfg).unreadable() == []
-    entries = [json.loads(line) for line in (State.open(queue, cfg).stop_file.parent / "ledger.jsonl").read_text().splitlines()]
+    lines = [json.loads(line) for line in (State.open(queue, cfg).stop_file.parent / "ledger.jsonl").read_text().splitlines()]
+    # relay-check-design.md:168-170: a check line is kind "check"; every other line is a lead run's.
+    entries = [e for e in lines if e["kind"] != "check"]
     assert len(entries) == n
     assert all(e["tokens"] == DONE_SPEND.tokens for e in entries)
     assert all(e["dollars"] == pytest.approx(DONE_SPEND.dollars) for e in entries)
+    # relay-check-design.md:244-247: no m2 section has a check line, so each DONE adds one check
+    # line with verdict "none"; relay-check-design.md:168-170: its session is null and it spends nothing.
+    checks = [e for e in lines if e["kind"] == "check"]
+    assert sorted(e["section"] for e in checks) == sorted(_open_ids(queue))
+    assert all(e["verdict"] == "none" for e in checks)
+    assert all(e["session"] is None and e["tokens"] == 0 and e["dollars"] == 0.0 for e in checks)
 
 
 def test_a_failed_lead_runs_spend_is_appended_to_the_ledger_too(
@@ -1124,18 +1182,19 @@ def test_a_section_from_a_recut_that_ends_recut_is_parked_with_the_reason_and_no
 ) -> None:
     # Breaks when: a recut section's RECUT runs the divvyer again, parks without the reason, or counts a failure.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
-    recut = _queue_of(tmp_path / "recut.md", "s1.1", "s1.2", "s2")
+    # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`, `s1b`.
+    recut = _queue_of(tmp_path / "recut.md", "s1a", "s1b", "s2")
     scenario(_lines(DONE_LEAD))
     leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     assert len(_runs(tmp_path, "recut")) == 1
     state = State.open(queue, cfg)
-    parked = state.section("s1.1")
+    parked = state.section("s1a")
     assert parked.status == "parked"
     assert parked.question is not None and RECUT_REASON in parked.question
     assert parked.failures == 0
-    assert state.section("s1.2").from_recut
+    assert state.section("s1b").from_recut
     assert not state.section("s2").from_recut
 
 
@@ -1144,10 +1203,11 @@ def test_a_section_from_a_recut_that_ends_recut_pings_the_owner_with_the_reason_
 ) -> None:
     # Breaks when: the parked recut section sends no needs-owner ping, or pings before it is parked.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
-    recut = _queue_of(tmp_path / "recut.md", "s1.1", "s2")
+    # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`.
+    recut = _queue_of(tmp_path / "recut.md", "s1a", "s2")
     scenario(_lines(DONE_LEAD))
     record = tmp_path / "pings.jsonl"
-    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), "s1.1", "{message}"]
+    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), "s1a", "{message}"]
     cfg = dataclasses.replace(cfg, ping_command=ping)
     leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
@@ -1155,7 +1215,7 @@ def test_a_section_from_a_recut_that_ends_recut_pings_the_owner_with_the_reason_
     asked = [p for p in _pings(tmp_path) if RECUT_REASON in p[0]]
     assert len(asked) == 1
     message, status = asked[0]
-    assert "s1.1" in message and "needs the owner" in message
+    assert "s1a" in message and "needs the owner" in message
     assert status == "parked"
 
 
@@ -1164,8 +1224,9 @@ def test_a_section_the_recut_left_in_place_that_ends_recut_is_still_recut(
 ) -> None:
     # Breaks when: every section of a recut queue is taken as a recut's, so an original section's RECUT is parked.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
-    first = _queue_of(tmp_path / "first.md", "s1.1", "s2")
-    second = _queue_of(tmp_path / "second.md", "s1.1", "s2.1")
+    # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a` and `s2` giving `s2a`.
+    first = _queue_of(tmp_path / "first.md", "s1a", "s2")
+    second = _queue_of(tmp_path / "second.md", "s1a", "s2a")
     scenario(_lines(DONE_LEAD))
     leads = [_step(RECUT_LEAD), _step(DONE_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
     recuts = [_step(DIVVYER_RUN, write=(first, queue)), _step(DIVVYER_RUN, write=(second, queue))]
@@ -1174,7 +1235,7 @@ def test_a_section_the_recut_left_in_place_that_ends_recut_is_still_recut(
     assert len(_runs(tmp_path, "recut")) == 2
     state = State.open(queue, cfg)
     assert state.section("s2").status == "open"
-    assert state.section("s2.1").from_recut
+    assert state.section("s2a").from_recut
 
 
 def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_its_second_recut(
@@ -1208,17 +1269,18 @@ def test_a_recut_that_splits_the_section_runs_the_child_ids_and_leaves_the_old_i
 ) -> None:
     # Breaks when: after a real split the old id is still run or marked, or a child id is not the recut's.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
-    split = _queue_of(tmp_path / "split.md", "s1.1", "s1.2", "s2")
+    # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`, `s1b`.
+    split = _queue_of(tmp_path / "split.md", "s1a", "s1b", "s2")
     scenario(_lines(DONE_LEAD))
     leads = [_step(RECUT_LEAD), _step(DONE_LEAD), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(split, queue))])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     state = State.open(queue, cfg)
-    assert state.section("s1.1").from_recut and state.section("s1.1").status == "done"
-    assert state.section("s1.2").from_recut
+    assert state.section("s1a").from_recut and state.section("s1a").status == "done"
+    assert state.section("s1b").from_recut
     assert not state.section("s1").from_recut
-    assert "Section: s1.1" in str(_runs(tmp_path, "lead")[1]["prompt"])
-    assert "Section: s1.2" in str(_runs(tmp_path, "lead")[2]["prompt"])
+    assert "Section: s1a" in str(_runs(tmp_path, "lead")[1]["prompt"])
+    assert "Section: s1b" in str(_runs(tmp_path, "lead")[2]["prompt"])
 
 
 # Behavior 4 (s7.d3): - NEEDS-OWNER: `park`, then `ping.needs_owner`.
@@ -1575,6 +1637,9 @@ _PROGRESS = [
     re.compile(r"section \S+: failed \(\d+ of 2\)"),
     re.compile(r"waiting for answers on .+"),
     re.compile(r"relay go .+: ended .+: .* \(exit \d+\)"),
+    # relay-check-design.md:219-220: `check_started` and `check_finished`.
+    re.compile(r"check \S+: running \d+ checks? in .+"),
+    re.compile(r"check \S+: (?:passed|failed: .+|timed out.*|outside the code: .+|none to run)"),
 ]
 
 
@@ -1709,13 +1774,21 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
     assert len(stops) == 1
     reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
     name = queue.name
-    assert _texts(captured.out) == [
+    # relay-check-design.md:244-247 and 219-220: each DONE runs the section's checks in the queue's
+    # git top level (no section worktree here); the WORKBOARD fixture gives section a one
+    # done-check, b none and c three, all of which `cfg` makes pass. b has no check line, so
+    # `check_finished` reports "none to run"; the design does not say whether `check_started`
+    # comes before it with 0, so its "running 0 checks" line is allowed, not required.
+    top = tmp_path.resolve()
+    head = [
         f"relay go {name}: started; no token budget, no dollar budget",
         f"lead {a}: started fresh",
         f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
         f"section {a}: failed (1 of 2)",
         f"lead {a}: started, resuming sess-lead-2",
         f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+        f"check {a}: running 1 check in {top}",
+        f"check {a}: passed",
         f"lead {b}: started, resuming sess-lead-1",
         f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
         f"recut {b}: started: {RECUT_REASON}",
@@ -1726,12 +1799,20 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
         f"section {b}: needs an answer: {QUESTION}",
         f"lead {c}: started, resuming sess-lead-5",
         f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+        f"check {c}: running 3 checks in {top}",
+        f"check {c}: passed",
         f"waiting for answers on {b}",
         f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
         f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+    ]
+    tail = [
         "<ping.stopped>",
         f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
     ]
+    assert _texts(captured.out) in (
+        [*head, f"check {b}: running 0 checks in {top}", f"check {b}: none to run", *tail],
+        [*head, f"check {b}: none to run", *tail],
+    )
 
 
 AGENTS_LEAD = "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents and a shell task

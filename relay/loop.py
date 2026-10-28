@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from relay import ping, progress
+from relay import git, ping, progress
+from relay.check import owner_text, run_checks
 from relay.config import Config
 from relay.errors import ExitCode
-from relay.ledger import Ledger, Spend
-from relay.prompts import lead_prompt, recut_brief
+from relay.ledger import Kind, Ledger, Spend
+from relay.prompts import check_feedback, lead_prompt, recut_brief
 from relay.queue import Section, blocked_by, parse_queue
 from relay.runner import RunResult, run_agent
-from relay.state import FAILURE_LIMIT, State
+from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
@@ -95,56 +97,67 @@ def _run_section(
 ) -> _Stop | None:
     sid = section.id
     current = state.section(sid)
+    if current.check_pending:
+        _verify(cfg, queue, state, ledger, cwd, section, state.last_lead_log(sid))
+        return None
     resume = current.last_session or state.last_session_any
     answer = state.take_answer(sid)
-    prompt = lead_prompt(queue, section, resume, answer, retire_flag)
-    on_event, budget_hit = _watcher(cfg, ledger, since, "lead", sid)
+    feedback = state.take_check_feedback(sid)
+    prompt = lead_prompt(queue, section, resume, answer, retire_flag, feedback)
+    watch = _watcher(cfg, ledger, since, "lead", sid, cwd)
 
     retire_flag.unlink(missing_ok=True)
     progress.lead_started(sid, resume, answer is not None)
-    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, on_event, retire_flag)
+    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, watch.on_event, retire_flag)
     session = result.stream.session_id
     ledger.append("lead", sid, session, result.stream.spend)
+    state.set_last_log(sid, result.log)
     if session is not None:
         state.set_last_session(sid, session)
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
     failed = result.killed or result.exit_code != 0 or status is None
-    if failed:
+    if watch.idle_retired:
+        pass  # handled as RETIRED: no failure recorded
+    elif failed:
         second, count = _fail(state, sid)
         progress.failed(sid, count)
         if second:
             return _failed_twice(sid)
     elif status.kind == "DONE":
-        state.mark_done(sid)
+        _verify(cfg, queue, state, ledger, cwd, section, result.log)
     elif status.kind == "RECUT" and current.from_recut:
         # A section a recut made gets no second recut: the owner decides what happens to it.
         question = f"a section from a recut asked to recut again: {status.text}"
-        state.park(sid, question)
-        ping.needs_owner(cfg, queue, sid, question)
-        progress.needs_answer(sid, question)
+        _park(cfg, queue, state, sid, question)
     elif status.kind == "RECUT":
         if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, status.text, result):
             return _failed_twice(sid)
     elif status.kind == "NEEDS-OWNER":
-        state.park(sid, status.text)
-        ping.needs_owner(cfg, queue, sid, status.text)
-        progress.needs_answer(sid, status.text)
+        _park(cfg, queue, state, sid, status.text)
     # RETIRED: nothing to record; the next pass runs a fresh lead on the same section.
 
-    if budget_hit[0]:
+    if watch.budget_hit:
         return ExitCode.BUDGET, "over budget", "a lead was retired when the budget ran out"
     return None
 
 
+@dataclass
+class _Watch:
+    on_event: Callable[[StreamState], Literal["go", "retire", "kill"]]
+    budget_hit: bool = False
+    idle_retired: bool = False
+
+
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float, who: Literal["lead", "recut"], sid: str
-) -> tuple[Callable[[StreamState], Literal["go", "retire", "kill"]], list[bool]]:
-    """The run_agent callback, and a one-slot flag set when a budget ran out mid-run."""
-    hit = [False]
+    cfg: Config, ledger: Ledger, since: float, who: Kind, sid: str, repo: Path
+) -> _Watch:
+    """The run_agent callback, with flags set when a budget ran out or an idle lead was killed."""
+    watch = _Watch(on_event=lambda stream: "go")
     retiring = [False]
     shown = [0]  # agent events already printed
+    snapshot: list[dict[str, str]] = []  # branch heads when the retire flag first went up
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
         events = stream.activity.events
@@ -154,20 +167,67 @@ def _watcher(
         if stream.context_tokens >= cfg.hard_ceiling:
             progress.killing(sid, stream.context_tokens)
             return "kill"
+        why: Literal["context", "budget"] | None = None
         if ledger.over(cfg, stream.spend, since) is not None:
-            hit[0] = True
-            if not retiring[0]:
-                retiring[0] = True
-                progress.retiring(sid, "budget", stream.context_tokens)
-            return "retire"
-        if stream.context_tokens >= cfg.context_limit:
-            if not retiring[0]:
-                retiring[0] = True
-                progress.retiring(sid, "context", stream.context_tokens)
-            return "retire"
-        return "go"
+            watch.budget_hit = True
+            why = "budget"
+        elif stream.context_tokens >= cfg.context_limit:
+            why = "context"
+        if why is None:
+            return "go"
+        if not retiring[0]:
+            retiring[0] = True
+            progress.retiring(sid, why, stream.context_tokens)
+        if who == "lead":
+            if not snapshot:
+                snapshot.append(git.heads(repo))
+            elif stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
+                # `git.heads` is {} when git fails: an empty read proves no commit either way.
+                now = git.heads(repo)
+                if now and now == snapshot[0]:
+                    watch.idle_retired = True
+                    progress.retired_idle(sid, stream.context_tokens)
+                    return "kill"
+        return "retire"
 
-    return on_event, hit
+    watch.on_event = on_event
+    return watch
+
+
+def _park(cfg: Config, queue: Path, state: State, sid: str, question: str) -> None:
+    """Park `sid` with `question`, ping the owner and show the question: the one park."""
+    state.park(sid, question)
+    ping.needs_owner(cfg, queue, sid, question)
+    progress.needs_answer(sid, question)
+
+
+def _verify(
+    cfg: Config,
+    queue: Path,
+    state: State,
+    ledger: Ledger,
+    cwd: Path,
+    section: Section,
+    run_log: Path,
+) -> None:
+    """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
+    sid = section.id
+    where = git.section_worktree(cwd, sid) or cwd
+    progress.check_started(sid, len(section.checks), where)
+    result = run_checks(cfg, section, where, state.check_log(run_log))
+    ledger.append_check(sid, result)
+    progress.check_finished(sid, result)
+    if result.verdict in ("pass", "none"):
+        state.mark_done(sid)
+    elif result.verdict == "fail":
+        state.set_check_pending(sid, False)
+        count = state.record_check_failure(sid, check_feedback(result))
+        progress.check_failed(sid, count)
+        if count >= CHECK_LIMIT:
+            _park(cfg, queue, state, sid, owner_text(result, count))
+    else:
+        state.set_check_pending(sid, True)
+        _park(cfg, queue, state, sid, owner_text(result, state.section(sid).check_failures))
 
 
 def _fail(state: State, sid: str) -> tuple[bool, int]:
@@ -195,19 +255,21 @@ def _recut(
     """Run the divvyer's recut; True when it failed and that was the section's second failure."""
     brief = recut_brief(queue, section, reason, lead.log)
     before = parse_queue(queue)
-    on_event, _hit = _watcher(cfg, ledger, since, "recut", section.id)
+    watch = _watcher(cfg, ledger, since, "recut", section.id, cwd)
     progress.recut_started(section.id, reason)
-    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag)
+    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, watch.on_event, retire_flag)
     ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
-    changed = parse_queue(queue) != before
+    after = parse_queue(queue)
+    changed = after != before
     progress.recut_finished(section.id, result, changed)
-    if result.killed or result.exit_code != 0 or not changed:
+    known = {s.id for s in before}
+    nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
+    if result.killed or result.exit_code != 0 or not changed or nested:
         second, count = _fail(state, section.id)
         progress.failed(section.id, count)
         return second
     # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
-    known = {s.id for s in before}
-    for made in parse_queue(queue):
+    for made in after:
         if made.id not in known or made.id == section.id:
             state.mark_from_recut(made.id)
     return False

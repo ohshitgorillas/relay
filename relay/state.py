@@ -37,6 +37,7 @@ class SectionState:
     check_feedback: str | None = None
     check_pending: bool = False
     research_session: str | None = None  # the researcher a follow-up resumes
+    last_log: str | None = None  # the run log of the section's last lead run
 
 
 def _fresh() -> SectionState:
@@ -142,6 +143,18 @@ class State:
 
     def check_log(self, run_log: Path) -> Path:
         return run_log.with_suffix(".check")
+
+    def set_last_log(self, sid: str, log: Path) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.last_log = str(log)
+
+        self._update(sid, change)
+
+    def last_lead_log(self, sid: str) -> Path:
+        """The run log of `sid`'s last lead run; with none, runs/check-<sid>.jsonl, whose check
+        log is the section's own runs/check-<sid>.check."""
+        recorded = self.section(sid).last_log
+        return Path(recorded) if recorded else self.run_dir / f"check-{sid}.jsonl"
 
     def park(self, sid: str, question: str) -> None:
         def change(s: SectionState, _r: dict) -> None:
