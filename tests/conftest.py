@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -12,6 +13,17 @@ from relay.config import Config
 TESTS = Path(__file__).parent
 FAKE_CLAUDE = TESTS / "fakes" / "fake_claude.py"
 FIXTURES = TESTS / "fixtures"
+
+# The documented default `check_outside` patterns, in order (design: `relay/config.py`).
+DEFAULT_CHECK_OUTSIDE = [
+    "command not found",
+    "(?i)credit balance",
+    "(?i)api[ _-]?key",
+    "(?i)could not resolve host",
+    "(?i)name resolution",
+    "(?i)network is unreachable",
+    "(?i)connection (refused|reset|timed out)",
+]
 
 
 @pytest.fixture
@@ -28,6 +40,9 @@ def fake_cfg(tmp_path: Path) -> Config:
         recut_command=[fake, "--agent", "divvyer"],
         ping_command=[fake, "{message}"],
         state_root=tmp_path / "state",
+        idle_ceiling=130_000,
+        check_timeout=1800.0,
+        check_outside=list(DEFAULT_CHECK_OUTSIDE),
     )
 
 
@@ -57,3 +72,61 @@ def scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[list[
         return path
 
     return write
+
+
+# Fixed identity and no hooks, so a commit here never reads the user's git config.
+_GIT = [
+    "git",
+    "-c", "user.name=Relay Tests",
+    "-c", "user.email=relay-tests@example.invalid",
+    "-c", "commit.gpgsign=false",
+    "-c", "core.hooksPath=/dev/null",
+]
+
+
+class GitRepo:
+    """A temporary git repository on `main` with one commit and a worktree on `lead/s1`."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.worktrees: dict[str, Path] = {}
+
+    def git(self, *args: str, cwd: Path | None = None) -> str:
+        """Run git in `cwd` (default the main checkout) and return its stdout; raise on failure."""
+        done = subprocess.run(
+            [*_GIT, *args],
+            cwd=cwd or self.root,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return done.stdout
+
+    def rev(self, ref: str) -> str:
+        """The object name `ref` points at."""
+        return self.git("rev-parse", ref).strip()
+
+    def commit(self, cwd: Path | None = None, message: str = "commit") -> str:
+        """Make an empty commit in `cwd` and return its object name."""
+        self.git("commit", "--allow-empty", "-q", "-m", message, cwd=cwd)
+        return self.git("rev-parse", "HEAD", cwd=cwd).strip()
+
+    def worktree(self, sid: str) -> Path:
+        """Add a worktree beside the repository on a new branch `lead/<sid>` and return its real path."""
+        path = self.root.parent / f"wt-{sid}"
+        self.git("worktree", "add", "-q", "-b", f"lead/{sid}", str(path))
+        self.worktrees[sid] = path.resolve()
+        return self.worktrees[sid]
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> GitRepo:
+    """A temporary git repository with a `lead/s1` worktree (design: Order 2)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    repo = GitRepo(root)
+    repo.git("init", "-q", "-b", "main")
+    repo.commit(message="first")
+    repo.worktree("s1")
+    return repo

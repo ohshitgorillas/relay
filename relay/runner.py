@@ -7,7 +7,8 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -92,6 +93,65 @@ def run_agent(
     retired = False
 
     live: list[subprocess.Popen] = []
+
+    # Handlers go in before the child starts.
+    with _group_guard(live):
+        stderr_file = None
+        try:
+            stderr_file = stderr_path.open("wb")
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                text=True,
+                start_new_session=True,
+            )
+            live.append(proc)
+            try:
+                pid_path.write_text(f"{proc.pid}\n")
+                try:
+                    assert proc.stdin is not None
+                    proc.stdin.write(stdin_text)
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+                assert proc.stdout is not None
+                with log_path.open("w") as log:
+                    for raw in proc.stdout:
+                        line = raw.rstrip("\n")
+                        log.write(line + "\n")
+                        log.flush()
+                        state = feed(state, line)
+                        verdict = on_event(state)
+                        if verdict == "kill":
+                            killed = True
+                            break
+                        if verdict == "retire" and not retired:
+                            retired = True
+                            retire_flag.touch()
+                if killed:
+                    _kill_and_reap(proc)
+                    exit_code = None
+                else:
+                    exit_code = proc.wait()
+                    _kill_and_reap(proc)  # sweep stragglers in the group
+            except BaseException:
+                _kill_and_reap(proc)
+                raise
+            finally:
+                if proc.stdout is not None:
+                    proc.stdout.close()
+        finally:
+            if stderr_file is not None:
+                stderr_file.close()
+    return RunResult(exit_code=exit_code, killed=killed, stream=state, log=log_path)
+
+
+@contextmanager
+def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
+    """While active, SIGINT/SIGTERM kill the live child's group first, then re-raise the signal."""
     previous: dict[int, object] = {}
 
     def on_signal(signum: int, _frame: object) -> None:
@@ -100,71 +160,68 @@ def run_agent(
         signal.signal(signum, previous[signum])
         os.kill(os.getpid(), signum)
 
-    # Handlers go in before the child starts; only the main thread may install them.
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.signal(signum, on_signal)
-    stderr_file = None
     try:
-        stderr_file = stderr_path.open("wb")
-        proc = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=stderr_file,
-            text=True,
-            start_new_session=True,
-        )
-        live.append(proc)
-        try:
-            pid_path.write_text(f"{proc.pid}\n")
-            try:
-                assert proc.stdin is not None
-                proc.stdin.write(stdin_text)
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-            assert proc.stdout is not None
-            with log_path.open("w") as log:
-                for raw in proc.stdout:
-                    line = raw.rstrip("\n")
-                    log.write(line + "\n")
-                    log.flush()
-                    state = feed(state, line)
-                    verdict = on_event(state)
-                    if verdict == "kill":
-                        killed = True
-                        break
-                    if verdict == "retire" and not retired:
-                        retired = True
-                        retire_flag.touch()
-            if killed:
-                _kill_and_reap(proc)
-                exit_code = None
-            else:
-                exit_code = proc.wait()
-                _kill_and_reap(proc)  # sweep stragglers in the group
-        except BaseException:
-            _kill_and_reap(proc)
-            raise
-        finally:
-            if proc.stdout is not None:
-                proc.stdout.close()
+        yield
     finally:
-        if stderr_file is not None:
-            stderr_file.close()
         live.clear()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
-    return RunResult(exit_code=exit_code, killed=killed, stream=state, log=log_path)
 
 
 def run_command(command: str, cwd: Path, log: Path, timeout: float) -> CommandResult:
     """Run `/bin/sh -c command` in `cwd`, output appended to `log`, killed at `timeout`."""
-    raise NotImplementedError
+    live: list[subprocess.Popen] = []
+    with _group_guard(live), log.open("ab") as out:
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", command],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        live.append(proc)
+        try:
+            try:
+                exit_code: int | None = proc.wait(timeout=timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                exit_code, timed_out = None, True
+            _kill_and_reap(proc)  # the group dies with the shell, or at the timeout
+        except BaseException:
+            _kill_and_reap(proc)
+            raise
+    return CommandResult(exit_code=exit_code, timed_out=timed_out)
 
 
 def capture(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str]:
     """Run argv in `cwd`, return (exit code, stdout); (None, "") on OSError or timeout."""
-    raise NotImplementedError
+    live: list[subprocess.Popen] = []
+    with _group_guard(live):
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+        except OSError:
+            return None, ""
+        live.append(proc)
+        try:
+            try:
+                out, _ = proc.communicate(timeout=timeout)
+                result: tuple[int | None, str] = (proc.returncode, out)
+            except subprocess.TimeoutExpired:
+                result = (None, "")
+            _kill_and_reap(proc)
+        except BaseException:
+            _kill_and_reap(proc)
+            raise
+    return result
