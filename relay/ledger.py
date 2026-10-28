@@ -74,3 +74,6 @@ class Ledger:
         if cfg.dollar_budget is not None and past.dollars + live.dollars > cfg.dollar_budget:
             return "dollars"
         return None
+
+    def unreadable(self) -> list[int]:
+        raise NotImplementedError
