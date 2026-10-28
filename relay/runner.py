@@ -53,33 +53,53 @@ def _reap(pid: int) -> None:
         pass
 
 
+# Groups whose SIGTERM is already out: a kill that a signal handler or guard interrupts is
+# finished by the next `_kill_and_reap` of the same child, without a second grace period.
+_termed: set[int] = set()
+
+
 def _kill_and_reap(proc: subprocess.Popen) -> None:
-    """Kill the child's whole process group, reap the child, and check the group is gone."""
+    """Kill the child's whole process group, reap the child, and check the group is gone.
+
+    A call that finds the group's SIGTERM already sent (a kill under way, interrupted by a
+    signal) skips straight to the SIGKILL, the reap and the check.
+    """
     pgid = proc.pid
-    _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + _GRACE_SECONDS
-    while proc.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    _signal_group(pgid, signal.SIGKILL)
-    _reap(pgid)
-    deadline = time.monotonic() + _GRACE_SECONDS
-    while True:
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            pass
-        if time.monotonic() >= deadline:
-            raise RuntimeError(f"process group {pgid} survived its kill")
+    try:
+        if pgid not in _termed:
+            _termed.add(pgid)
+            _signal_group(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + _GRACE_SECONDS
+            while proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
         _signal_group(pgid, signal.SIGKILL)
-        time.sleep(0.02)
+        _reap(pgid)
+        deadline = time.monotonic() + _GRACE_SECONDS
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"process group {pgid} survived its kill")
+            _signal_group(pgid, signal.SIGKILL)
+            time.sleep(0.02)
+    finally:
+        _termed.discard(pgid)
 
 
 def _kill_live(live: list[subprocess.Popen]) -> None:
-    """Kill and reap the live child once: it leaves `live` first, so no guard kills it again."""
+    """Kill and reap the live child. It stays in `live` until its kill ends, so a guard that
+    fires mid-kill finds it and finishes that kill rather than starting another."""
     if live:
-        _kill_and_reap(live.pop(0))
+        proc = live[0]
+        try:
+            _kill_and_reap(proc)
+        finally:
+            if proc in live:
+                live.remove(proc)
 
 
 def run_agent(
