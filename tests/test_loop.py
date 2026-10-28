@@ -1423,46 +1423,96 @@ def _mark(
     return calls
 
 
-# Progress behavior 1: `relay/loop.py` calls these, and nothing else in it writes to the terminal.
+# Progress behavior 1: `relay/loop.py` calls these, and nothing else in it writes to the
+# terminal; the lines of a whole `relay go` come in the order the run produced them.
+
+# In NEEDS_OWNER_LEAD, one assistant message and a result of 0.0333 dollars.
+NEEDS_OWNER_SPEND = Spend(tokens=2 + 100 + 800 + 15, dollars=0.0333)
 
 
-def test_a_go_writes_only_progress_lines_each_stamped_with_the_time(
+def _finished(spend: Spend) -> str:
+    """The `(<tokens> tokens, $<dollars>)` tail of a finished line, for the spends used here,
+    whose dollars each round to two places without a tie."""
+    return f"({spend.tokens} tokens, ${spend.dollars:.2f})"
+
+
+def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_with_its_outcome(
     cfg: Config,
     tmp_path: Path,
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: the loop prints a line of its own beside the progress lines, writes to
-    # stderr, or writes no progress line at all.
+    # Breaks when: a line is missing, repeated or out of the run's order; a finished line
+    # carries another outcome than the lead's (DONE, the RECUT reason, NEEDS-OWNER, no status
+    # line); the lead given the owner's answer does not say so; or the loop writes a line of
+    # its own, or to stderr.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
-    first, second = _open_ids(queue)[:2]
-    # The first section parks; the second asks for a recut that leaves the queue unchanged,
-    # then fails again.
-    leads = [_step(NEEDS_OWNER_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    a, b, c = _open_ids(queue)[:3]
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid not in (a, b, c):
+            state.mark_done(sid)
+    # a: no status line, then DONE. b: RECUT, whose recut leaves the queue unchanged, then
+    # NEEDS-OWNER. c: DONE, leaving only b parked, so the loop waits. b, answered: DONE.
+    leads = [
+        _step(NO_STATUS_LEAD),
+        _step(DONE_LEAD),
+        _step(RECUT_LEAD),
+        _step(NEEDS_OWNER_LEAD),
+        _step(DONE_LEAD),
+        _step(DONE_LEAD),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN)])
-    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: State.open(queue, cfg).section(c).status == "done")
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).set_answer(b, "Use port 8080.")
+        assert loop.finish() == ExitCode.QUEUE_EMPTY
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
     captured = capsys.readouterr()
     assert captured.err == ""
     for line in captured.out.splitlines():
+        if line == "<ping.stopped>":
+            continue
         stamped = _STAMP.fullmatch(line)
         assert stamped is not None, line
         hours, minutes, seconds = (int(stamped.group(n)) for n in (1, 2, 3))
         assert hours < 24 and minutes < 60 and seconds < 60, line
         assert any(p.fullmatch(stamped.group(4)) for p in _PROGRESS), line
-    texts = _texts(captured.out)
-    for wanted in (
-        _STARTED,
-        rf"lead {re.escape(first)}: started .*",
-        rf"lead {re.escape(first)}: finished .+",
-        rf"section {re.escape(first)}: needs an answer: .+",
-        rf"recut {re.escape(second)}: started: .+",
-        rf"recut {re.escape(second)}: finished .+",
-        rf"section {re.escape(second)}: failed \(2 of 2\)",
-        r"relay go .+: ended .+",
-    ):
-        assert any(re.fullmatch(wanted, t) for t in texts), (wanted, texts)
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    name = queue.name
+    assert _texts(captured.out) == [
+        f"relay go {name}: started; no token budget, no dollar budget",
+        f"lead {a}: started fresh",
+        f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+        f"section {a}: failed (1 of 2)",
+        f"lead {a}: started, resuming sess-lead-2",
+        f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+        f"lead {b}: started, resuming sess-lead-1",
+        f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+        f"recut {b}: started: {RECUT_REASON}",
+        f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
+        f"section {b}: failed (1 of 2)",
+        f"lead {b}: started, resuming sess-lead-4",
+        f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+        f"section {b}: needs an answer: {QUESTION}",
+        f"lead {c}: started, resuming sess-lead-5",
+        f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+        f"waiting for answers on {b}",
+        f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
+        f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+        "<ping.stopped>",
+        f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
+    ]
 
 
 # Progress behavior 2: `run` calls `progress.started` after `state.lock()` succeeds, and
@@ -1568,6 +1618,106 @@ def test_a_stop_file_while_waiting_writes_ended_just_after_the_stopped_ping(
     assert texts[-2:-1] == ["<ping.stopped>"], texts
     expected = re.escape(f"{reason}: {detail} (exit {int(ExitCode.STOP_FILE)})")
     assert re.fullmatch(r"relay go .+: ended " + expected, texts[-1]), texts
+
+
+# Progress behavior 2a: the started and ended lines name the queue file `relay go` was given
+# and the budgets its config holds, or that there is none.
+
+
+def _all_done(queue: Path, cfg: Config) -> None:
+    state = State.open(queue, cfg)
+    for sid in _open_ids(queue):
+        state.mark_done(sid)
+
+
+@pytest.mark.parametrize("name", [WORKBOARD, M2])
+def test_started_and_ended_name_the_queue_file_relay_go_was_given(
+    name: str,
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: started or ended names another queue than the one run was given, or none.
+    queue = queue_file(name)
+    scenario(_lines(DONE_LEAD))
+    _all_done(queue, cfg)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    assert texts == [
+        f"relay go {name}: started; no token budget, no dollar budget",
+        "<ping.stopped>",
+        f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("budgets", "wording"),
+    [
+        ({}, r"no token budget, no dollar budget"),
+        ({"token_budget": 900}, r"budget 900 tokens, no dollar budget"),
+        ({"dollar_budget": 2.5}, r"no token budget, \$2\.50?"),
+        ({"token_budget": 900, "dollar_budget": 2.5}, r"budget 900 tokens, \$2\.50?"),
+    ],
+    ids=["none", "tokens", "dollars", "both"],
+)
+def test_started_names_the_budgets_the_config_holds_or_that_there_is_none(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    budgets: dict[str, object],
+    wording: str,
+) -> None:
+    # Breaks when: started leaves out a budget the config holds, names one it does not hold,
+    # or gives another amount than the config's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _all_done(queue, cfg)
+    cfg = dataclasses.replace(cfg, **budgets)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    started = [t for t in texts if re.fullmatch(_STARTED, t)]
+    assert len(started) == 1, texts
+    assert re.fullmatch(re.escape(f"relay go {WORKBOARD}: started; ") + wording, started[0]), started
+
+
+# Progress behavior 2b: a crash in the loop also writes the ended line, with reason `crashed`
+# and code `ExitCode.ERROR`, just after its stopped ping.
+
+
+def test_a_crash_in_the_loop_writes_ended_crashed_with_exit_error_just_after_its_stopped_ping(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the crash path writes no ended line, writes it before its stopped ping, or
+    # words it with another reason or exit code.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+
+    def crash(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("the runner broke")
+
+    monkeypatch.setattr(relay.loop, "run_agent", crash)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    try:
+        run(queue, cfg)
+    except RuntimeError:
+        pass
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    ended = [t for t in texts if re.fullmatch(r"relay go .+: ended .+", t)]
+    assert len(ended) == 1, texts
+    assert texts[-2:] == ["<ping.stopped>", ended[0]], texts
+    wanted = re.escape(f"relay go {WORKBOARD}: ended crashed: ") + r".*" + re.escape(f" (exit {int(ExitCode.ERROR)})")
+    assert re.fullmatch(wanted, ended[0]), ended
 
 
 # Progress behavior 3: `_run_section` calls `progress.lead_started` just before `run_agent`.
