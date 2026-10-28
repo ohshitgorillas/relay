@@ -26,6 +26,8 @@ from relay.loop import run
 from relay.queue import parse_queue
 from relay.state import State
 
+from tests.conftest import GitRepo
+
 FIXTURES = Path(__file__).parent / "fixtures"
 WORKBOARD = "workboard-queue.md"
 M2 = "m2-rest-queue.md"
@@ -2981,3 +2983,269 @@ def test_the_check_feedback_goes_to_the_next_lead_only(
     section = State.open(queue, cfg).section("s1")
     assert section.status == "done"
     assert section.check_feedback is None
+
+
+# Idle retire (relay-check design, Order 7; `_watcher` and `_run_section`). When the retire flag
+# first goes up, `_watcher` snapshots the branch heads; on an event at `idle_ceiling` or more
+# with the flag up and the heads unchanged it kills the lead, writes the retired-idle line, and
+# the run is handled as `RETIRED`. Each lead below runs through a climbing shim: it records
+# `{"cwd", "prompt"}` to `<tmp_path>/plans/lead/run-<n>.json` as `_SEQ` does and takes plan step
+# n (the last once the plan runs out). It runs the fake on the step's first stream; when the step
+# has a second, it waits for the retire flag (a path the prompt names that did not exist when
+# the lead started), and, when the step has a gate, writes `<gate>/ready` and waits for
+# `<gate>/go` (the test commits in between), then runs the fake on the second stream.
+_CLIMB = r"""
+import json, os, re, subprocess, sys, time
+rec, fake, plan = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+prompt = sys.stdin.read()
+n = len([p for p in os.listdir(rec) if p.startswith("run-") and p.endswith(".json")])
+out = os.path.join(rec, "run-%d.json" % n)
+with open(out + ".part", "w") as f:
+    json.dump({"cwd": os.getcwd(), "prompt": prompt}, f)
+os.replace(out + ".part", out)
+step = plan[min(n, len(plan) - 1)]
+paths = sorted({p.rstrip(".,;:)") for p in re.findall(r"/[^\s`'\"<>]+", prompt)})
+before = {p for p in paths if os.path.exists(p)}
+def emit(stream):
+    sys.stdout.flush()
+    env = dict(os.environ, RELAY_FAKE_SCENARIO=stream)
+    subprocess.run([fake], stdin=subprocess.DEVNULL, env=env, check=True)
+emit(step["first"])
+if step["second"]:
+    end = time.time() + 10
+    while time.time() < end and not [p for p in paths if p not in before and os.path.exists(p)]:
+        time.sleep(0.02)
+    if step["gate"]:
+        time.sleep(0.2)
+        open(os.path.join(step["gate"], "ready"), "w").close()
+        end = time.time() + 15
+        while time.time() < end and not os.path.exists(os.path.join(step["gate"], "go")):
+            time.sleep(0.02)
+    emit(step["second"])
+"""
+
+# With `fake_cfg`'s context_limit 100_000, idle_ceiling 130_000 and hard_ceiling 200_000: the
+# first stream's message raises the retire flag below the idle ceiling, the second's reaches it.
+FLAG_CONTEXT = 110_000
+IDLE_CONTEXT = 150_000
+PAST_HARD_CONTEXT = 210_000
+
+
+def _usage(context: int) -> dict[str, int]:
+    """Usage whose context tokens (input plus both cache counts) come to `context`."""
+    return {
+        "input_tokens": 10,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": context - 10,
+        "output_tokens": 5,
+    }
+
+
+def _climb_step(tmp_path: Path, session: str, second_context: int, gate: Path | None = None) -> dict[str, object]:
+    """A climbing lead's plan step: a first stream (init, one message at FLAG_CONTEXT) and a
+    second (one message at `second_context`, then a result ending DONE), in session `session`."""
+    streams = tmp_path / "streams"
+    streams.mkdir(exist_ok=True)
+
+    def message(n: int, context: int) -> str:
+        body = {
+            "id": f"msg_{session}_{n}",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Working."}],
+            "usage": _usage(context),
+        }
+        return json.dumps({"type": "assistant", "message": body, "session_id": session})
+
+    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
+    result = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 100,
+        "num_turns": 2,
+        "result": "Step committed.\nDONE",
+        "session_id": session,
+        "total_cost_usd": 0.01,
+        "usage": _usage(second_context),
+    }
+    first = streams / f"{session}-1.jsonl"
+    second = streams / f"{session}-2.jsonl"
+    first.write_text(json.dumps(init) + "\n" + message(1, FLAG_CONTEXT) + "\n")
+    second.write_text(message(2, second_context) + "\n" + json.dumps(result) + "\n")
+    return {"first": str(first), "second": str(second), "gate": str(gate) if gate else None}
+
+
+def _fixture_step(name: str) -> dict[str, object]:
+    """A plan step that runs the fixture stream `name` whole."""
+    return {"first": str(FIXTURES / name), "second": None, "gate": None}
+
+
+def _climbing(cfg: Config, tmp_path: Path, steps: list[dict[str, object]]) -> Config:
+    rec = tmp_path / "plans" / "lead"
+    rec.mkdir(parents=True, exist_ok=True)
+    lead = [sys.executable, "-c", _CLIMB, str(rec), cfg.lead_command[0], json.dumps(steps)]
+    return dataclasses.replace(cfg, lead_command=lead)
+
+
+def _retired_idle(sid: str, tokens: int) -> str:
+    return f"lead {sid}: retired at {tokens} context tokens, no commit since the retire flag"
+
+
+# Loop behavior 1: idle retire with and without a commit.
+
+
+def test_a_lead_with_no_commit_since_the_retire_flag_is_retired_at_the_idle_ceiling(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher never compares the heads at idle_ceiling, compares with `>`, or
+    # lets the lead run on to its DONE with no commit since the flag.
+    queue = _queue_of(git_repo.root / "queue.md", "s1")
+    scenario(_lines(DONE_LEAD))
+    cfg = dataclasses.replace(cfg, idle_ceiling=IDLE_CONTEXT)
+    steps = [_climb_step(tmp_path, "sess-climb-1", IDLE_CONTEXT), _fixture_step(DONE_SMALL_LEAD)]
+    cfg = _climbing(cfg, tmp_path, steps)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 2
+    texts = _texts(capsys.readouterr().out)
+    assert [t for t in texts if ": retired at " in t] == [_retired_idle("s1", IDLE_CONTEXT)], texts
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "done"
+    assert section.last_session == "sess-lead-6"
+
+
+def test_a_commit_since_the_retire_flag_keeps_the_lead_running_past_the_idle_ceiling(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher retires at idle_ceiling whatever the heads say, snapshots the heads
+    # at each event instead of when the flag goes up, or retires a lead that committed.
+    queue = _queue_of(git_repo.root / "queue.md", "s1", "s2")
+    scenario(_lines(DONE_LEAD))
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    steps = [
+        _climb_step(tmp_path, "sess-climb-1", IDLE_CONTEXT, gate=gate),
+        _climb_step(tmp_path, "sess-climb-2", IDLE_CONTEXT),
+        _fixture_step(DONE_SMALL_LEAD),
+    ]
+    cfg = _climbing(cfg, tmp_path, steps)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: (gate / "ready").exists())
+        git_repo.commit(cwd=git_repo.worktrees["s1"], message="step 1")
+        (gate / "go").touch()
+        assert loop.finish() == ExitCode.QUEUE_EMPTY
+    finally:
+        (gate / "go").touch()
+        State.open(queue, cfg).stop_file.touch()
+        loop.thread.join(15)
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3
+    assert _body(queue, "s2") in str(runs[1]["prompt"])
+    assert _body(queue, "s2") in str(runs[2]["prompt"])
+    texts = _texts(capsys.readouterr().out)
+    assert [t for t in texts if ": retired at " in t] == [_retired_idle("s2", IDLE_CONTEXT)], texts
+    state = State.open(queue, cfg)
+    assert state.section("s1").status == "done"
+    assert state.section("s1").last_session == "sess-climb-1"
+    assert state.section("s1").failures == 0
+    assert state.section("s2").status == "done"
+
+
+# Loop behavior 2: A run with `idle_retired` set is handled as `RETIRED`. It records no failure.
+
+
+def test_idle_retired_runs_are_followed_by_a_fresh_lead_and_count_no_failure(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: an idle retire is taken as a kill, so it records a failure and the second
+    # stops the run FAILED_TWICE, or the loop moves on from the section.
+    queue = _queue_of(git_repo.root / "queue.md", "s1")
+    scenario(_lines(DONE_LEAD))
+    steps = [
+        _climb_step(tmp_path, "sess-climb-1", IDLE_CONTEXT),
+        _climb_step(tmp_path, "sess-climb-2", IDLE_CONTEXT),
+        _fixture_step(DONE_SMALL_LEAD),
+    ]
+    cfg = _climbing(cfg, tmp_path, steps)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3
+    assert all(_body(queue, "s1") in str(r["prompt"]) for r in runs)
+    assert "resume sess-climb-1" in str(runs[1]["prompt"])
+    assert "resume sess-climb-2" in str(runs[2]["prompt"])
+    section = State.open(queue, cfg).section("s1")
+    assert section.failures == 0
+    assert section.status == "done"
+
+
+# Loop behavior 3: The hard_ceiling kill keeps its order and meaning.
+
+
+def test_past_the_hard_ceiling_a_lead_is_killed_as_a_failure_not_retired_idle(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher weighs the idle ceiling before the hard ceiling, so a lead past
+    # hard_ceiling with no commit since the flag is retired and counts no failure.
+    queue = _queue_of(git_repo.root / "queue.md", "s1")
+    scenario(_lines(DONE_LEAD))
+    steps = [
+        _climb_step(tmp_path, "sess-climb-1", IDLE_CONTEXT),
+        _climb_step(tmp_path, "sess-climb-2", PAST_HARD_CONTEXT),
+        _fixture_step(DONE_SMALL_LEAD),
+    ]
+    cfg = _climbing(cfg, tmp_path, steps)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 3
+    texts = _texts(capsys.readouterr().out)
+    retired = _retired_idle("s1", IDLE_CONTEXT)
+    killed = f"lead s1: killed at {PAST_HARD_CONTEXT} context tokens, past the hard ceiling"
+    assert [t for t in texts if ": retired at " in t] == [retired], texts
+    assert [t for t in texts if ": killed at " in t and str(PAST_HARD_CONTEXT) in t] == [killed], texts
+    assert texts.index(retired) < texts.index(killed)
+    section = State.open(queue, cfg).section("s1")
+    assert section.failures == 1
+    assert section.status == "done"
+
+
+# Loop behavior 4: a nested recut id failing the recut.
+
+
+@pytest.mark.parametrize(
+    "ids",
+    [("s1.1", "s1.2", "s2"), ("s1a", "s1.1", "s2")],
+    ids=["all-nested", "one-nested-beside-a-flat-one"],
+)
+def test_a_recut_that_adds_an_id_nested_under_the_section_counts_as_a_failure_of_the_section(
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    ids: tuple[str, ...],
+) -> None:
+    # Breaks when: `_recut` takes a changed queue as a good recut whatever ids it adds, or fails
+    # it only when every new id is nested.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    recut = _queue_of(tmp_path / "recut.md", *ids)
+    scenario(_lines(DONE_LEAD))
+    recuts = [_step(DIVVYER_RUN, write=(recut, queue))]
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=recuts)
+    run(queue, cfg)
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert State.open(queue, cfg).section("s1").failures == 1
+    assert "section s1: failed (1 of 2)" in _texts(capsys.readouterr().out)

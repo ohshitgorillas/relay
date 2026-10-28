@@ -427,3 +427,36 @@ def test_status_files_a_resumed_sessions_runs_under_each_section_in_turn(
     out = capsys.readouterr().out
     assert "2 agents" in _section_line(out, "s2")
     assert "1 agent," in _section_line(out, "s3")
+
+
+# `relay go` gains `--idle-ceiling` (relay-check design, Modules, `relay/config.py`).
+
+
+def test_go_passes_the_idle_ceiling_option_as_an_override(
+    queue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `relay go` has no `--idle-ceiling`, or drops it so the default 130000 holds.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--idle-ceiling", "150000"]) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    cfg = calls[0][1]
+    assert cfg.idle_ceiling == 150_000
+    assert cfg.context_limit == 100_000
+    assert cfg.hard_ceiling == 200_000
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["100000", "200000", "lots"],
+    ids=["at-context-limit", "at-hard-ceiling", "non-number"],
+)
+def test_go_with_an_idle_ceiling_out_of_range_exits_with_usage_and_never_runs_the_loop(
+    value: str, queue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the `--idle-ceiling` override skips `load_config`'s range check
+    # (context_limit < idle_ceiling < hard_ceiling), or a non-number reaches the loop.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--idle-ceiling", value]) == ExitCode.USAGE
+    assert calls == []
