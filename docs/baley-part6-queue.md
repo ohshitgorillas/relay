@@ -1,7 +1,8 @@
 design docs/superpowers/specs/relay-ladder-design.md | order docs/superpowers/specs/relay-ladder-design.md | main 6566796
 section s1 | lead | steps: 1 | size: lead: tokens: 1249071.4 seconds: 697.3 overruns: 0 refusals: 0
-  s1.d1 | spiker | steps: 1 | writes: the scratchpad | size: spiker: tokens: 152837.2 seconds: 46.8 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/.claude/worktrees/agent-a7bfdb0aa1bc23506/docs/baley-part6-queue.md s1.d1
+  s1.d1 | general-purpose | steps: 1 | writes: the scratchpad | size: general-purpose: tokens: 740745.9 seconds: 190.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/.claude/worktrees/agent-ab7f2a9204b9805d5/docs/baley-part6-queue.md s1.d1
+    resume a92816ac7bf61b10c
     design: docs/superpowers/specs/relay-ladder-design.md | Order 1
 section s2 | lead | steps: 2, 3, 4, 5 | size: lead: tokens: 1249071.4 seconds: 697.3 overruns: 0 refusals: 0
   s2.d1 | builder | steps: 2 | writes: relay/ladder.py, relay/queue.py, relay/status.py, relay/state.py, relay/ledger.py | size: builder: tokens: 287840.7 seconds: 151.7 overruns: 0 refusals: 0
