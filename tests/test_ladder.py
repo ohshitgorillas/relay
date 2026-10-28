@@ -174,7 +174,7 @@ def test_parse_report_reads_a_brief_block() -> None:
     assert report is not None
     assert report.rejected is False
     assert report.approved is True
-    assert [line.strip() for line in report.unfiled] == ["the old relay/loop.py note"]
+    assert list(report.unfiled) == ["the old relay/loop.py note"]
 
 
 def test_parse_report_a_status_not_approved_is_not_approved() -> None:
@@ -195,7 +195,7 @@ def test_parse_report_reads_the_last_brief_block() -> None:
         + _block("from the last block")
     )
     assert report is not None
-    assert [line.strip() for line in report.unfiled] == ["from the last block"]
+    assert list(report.unfiled) == ["from the last block"]
 
 
 def test_parse_report_none_gives_none() -> None:
