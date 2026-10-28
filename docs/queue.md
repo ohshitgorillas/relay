@@ -2,6 +2,7 @@ design /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | order
 landed 6 | b8471fa
 landed 7 | 0b59081
 landed 8 | 7afb1a1
+landed 14 | c234986
 section s1.1 | lead | steps: 1 | size: lead: tokens: 1010049.9 seconds: 675.1 overruns: 0 refusals: 0
   s1.1.d1 | builder | steps: 1 | writes: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s1.1.d1
@@ -213,16 +214,19 @@ section s7 | lead | steps: 13 | size: lead: tokens: 971308.7 seconds: 672.0 over
     view: stubgen .pyi of relay/cli.py
     behavior: `relay status` shows the rolling 7-day total (`since` = now minus 7 days) beside the all-time total.
     view: stubgen .pyi of relay/cli.py
-section s8 | lead | steps: 14 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
-  s8.d1 | builder | steps: 14 | writes: relay/loop.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s8.d1
+section s8.1.1 | lead | steps: 15, 16 | size: lead: tokens: 1080209.0 seconds: 684.7 overruns: 0 refusals: 0
+  s8.1.1.d1 | test-writer | steps: 15 | writes: tests/test_state.py | size: test-writer: tokens: 561413.8 seconds: 168.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s8.1.1.d1
+    resume c69bf337-72dd-42df-856a-cdbd42cd340a
+    red
+    design: docs/superpowers/specs/relay-loop-design.md Order 15
+    behavior: def ledger_path(self) -> Path: ...
+    view: stubgen .pyi of relay/state.py
+    behavior: def retire_flag(self) -> Path: ...
+    view: stubgen .pyi of relay/state.py
+  s8.1.1.d2 | builder | steps: 16 | writes: relay/state.py, relay/loop.py, relay/cli.py | size: builder: tokens: 318239.8 seconds: 173.9 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay/docs/queue.md s8.1.1.d2
     design: docs/superpowers/specs/relay-loop-design.md
-    step: 14. Loop and CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`.
-    paths: relay/loop.py
-    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_loop.py
-  s8.d2 | builder | steps: 14 | writes: relay/cli.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s8.d2
-    design: docs/superpowers/specs/relay-loop-design.md
-    step: 14. Loop and CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`.
-    paths: relay/cli.py
-    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_loop.py tests/test_cli.py
+    step: 16. State path accessors: build. `builder` writes `relay/state.py` (`ledger_path`, `retire_flag`), `relay/loop.py` and `relay/cli.py`, replacing the paths built at `relay/loop.py:46`, `relay/loop.py:49` and `relay/cli.py:81` with those accessors.
+    paths: relay/state.py, relay/loop.py, relay/cli.py
+    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_state.py tests/test_loop.py tests/test_cli.py
