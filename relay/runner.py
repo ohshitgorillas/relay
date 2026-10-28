@@ -58,6 +58,33 @@ def _reap(proc: subprocess.Popen) -> None:
         proc.returncode = code
 
 
+def _leader_reaped(proc: subprocess.Popen) -> bool:
+    """Whether the leader has been reaped, asked of the kernel rather than of `returncode`.
+
+    `Popen` sets `returncode` only after its own `waitpid` returns, so a signal guard that fires
+    in between sees `None` for a leader already gone. A non-blocking `waitpid` cannot be fooled:
+    a leader still running yields nothing, a zombie is reaped here and recorded, and a leader
+    reaped elsewhere raises `ChildProcessError`."""
+    if proc.returncode is not None:
+        return True
+    try:
+        pid, status = os.waitpid(proc.pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    if pid == 0:
+        return False
+    proc.returncode = os.waitstatus_to_exitcode(status)
+    return True
+
+
+def _signal_held(proc: subprocess.Popen, signum: int) -> None:
+    """Signal the child's group only while its leader is unreaped (the pgid cannot be reused)
+    or while stragglers still hold it. This is the one place a kill's signals are decided."""
+    if _leader_reaped(proc) and not _group_alive(proc.pid):
+        return
+    _signal_group(proc.pid, signum)
+
+
 def _group_alive(pgid: int) -> bool:
     try:
         os.killpg(pgid, 0)
@@ -87,7 +114,7 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
     pgid = proc.pid
     if _stage.get(proc, 0) < _TERMED:
         _stage[proc] = _TERMED
-        _signal_group(pgid, signal.SIGTERM)
+        _signal_held(proc, signal.SIGTERM)
         deadline = time.monotonic() + _GRACE_SECONDS
         while True:
             # The probe comes first: a nested kill that lands here ends this one.
@@ -99,15 +126,14 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
             time.sleep(0.02)
     if _stage[proc] >= _REAPED:
         return
-    if proc.returncode is None:
+    if not _leader_reaped(proc):
         _signal_group(pgid, signal.SIGKILL)
         _reap(proc)
         _stage[proc] = _REAPED
     else:
-        # `poll` reaped the leader already; only stragglers can still be in the group.
+        # The leader is already reaped; only stragglers can still be in the group.
         _stage[proc] = _REAPED
-        if _group_alive(pgid):
-            _signal_group(pgid, signal.SIGKILL)
+        _signal_held(proc, signal.SIGKILL)
     deadline = time.monotonic() + _GRACE_SECONDS
     while _group_alive(pgid):
         if time.monotonic() >= deadline:
