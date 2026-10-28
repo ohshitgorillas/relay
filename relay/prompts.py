@@ -3,6 +3,11 @@
 from pathlib import Path
 
 from relay.queue import Section
+from relay.status import KINDS, Kind, TEXT_NAMES
+
+
+def _status_form(kind: Kind) -> str:
+    return f"{kind}: <{TEXT_NAMES[kind]}>" if kind in TEXT_NAMES else kind
 
 
 def lead_prompt(
@@ -17,9 +22,9 @@ def lead_prompt(
         f"Queue: {queue}\nSection: {section.id}",
         f"Section body:\n{section.body}",
     ]
-    if resume:
+    if resume is not None:
         parts.append(f"resume {resume}")
-    if answer:
+    if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
     parts.append(
         "Retire contract: on reaching a safe point, after a step's commit, check whether "
@@ -27,11 +32,7 @@ def lead_prompt(
     )
     parts.append(
         "Status contract: the last line of your final message is exactly one of these, "
-        "and nothing follows it:\n"
-        "DONE\n"
-        "RECUT: <reason>\n"
-        "NEEDS-OWNER: <question>\n"
-        "RETIRED"
+        "and nothing follows it:\n" + "\n".join(_status_form(kind) for kind in KINDS)
     )
     return "\n\n".join(parts) + "\n"
 
