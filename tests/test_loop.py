@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 import re
 import subprocess
@@ -14,6 +15,8 @@ from typing import Callable
 
 import pytest
 
+import relay.ping
+import relay.runner
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
@@ -1360,3 +1363,930 @@ def test_each_kind_of_stop_sends_a_stopped_ping_unlike_every_other_kinds(
         for other, theirs in messages.items():
             if other != kind:
                 assert not set(mine) & set(theirs), (kind, mine, other, theirs)
+
+
+# Progress lines (design `relay-progress-design.md`, Modules: `relay/loop.py` calls these).
+# Each test reads what `run` wrote with `capsys` and matches each line after its `HH:MM:SS `
+# prefix. A test that must see where a call falls among the lines wraps that call so it writes
+# a marker line of its own, which carries no such prefix.
+
+_STAMP = re.compile(r"(\d{2}):(\d{2}):(\d{2}) (.*)")
+_STARTED = r"relay go .+: started; .+"
+
+# Every line `relay/progress.py` words, as the design gives it.
+_PROGRESS = [
+    re.compile(_STARTED),
+    re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
+    re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
+    re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
+    re.compile(r"recut \S+: started: .+"),
+    re.compile(r"recut \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"section \S+: needs an answer: .+"),
+    re.compile(r"section \S+: failed \(\d+ of 2\)"),
+    re.compile(r"waiting for answers on .+"),
+    re.compile(r"relay go .+: ended .+: .* \(exit \d+\)"),
+]
+
+
+def _texts(out: str) -> list[str]:
+    """Each line of `out`: a progress line cut to what follows its `HH:MM:SS ` prefix, a marker kept whole."""
+    texts = []
+    for line in out.splitlines():
+        stamped = _STAMP.fullmatch(line)
+        texts.append(stamped.group(4) if stamped else line)
+    return texts
+
+
+def _failed(texts: list[str]) -> list[str]:
+    return [t for t in texts if t.startswith("section ") and ": failed (" in t]
+
+
+def _mark(
+    monkeypatch: pytest.MonkeyPatch, owner: object, name: str, marker: str, before: bool = False
+) -> list[inspect.BoundArguments]:
+    """Wrap `owner.name` so each call writes `marker` as a line of its own to stdout, before the
+    call when `before`, else after it; return the list each call's bound arguments go to."""
+    original = getattr(owner, name)
+    calls: list[inspect.BoundArguments] = []
+
+    def wrapped(*args: object, **kwargs: object) -> object:
+        calls.append(inspect.signature(original).bind(*args, **kwargs))
+        if before:
+            sys.stdout.write(marker + "\n")
+        result = original(*args, **kwargs)
+        if not before:
+            sys.stdout.write(marker + "\n")
+        return result
+
+    monkeypatch.setattr(owner, name, wrapped)
+    return calls
+
+
+def _every_run_agent(
+    monkeypatch: pytest.MonkeyPatch, replace: Callable[[Callable[..., object]], Callable[..., object]]
+) -> None:
+    """Put `replace(run_agent)` in place of `relay.runner.run_agent` in every loaded `relay`
+    module that holds it, `relay.runner` itself included, so the stand-in is what runs however
+    `relay/loop.py` reaches `run_agent`: through its own name for it or through `relay.runner`."""
+    original = relay.runner.run_agent
+    stand_in = replace(original)
+    for name, module in list(sys.modules.items()):
+        if (name == "relay" or name.startswith("relay.")) and getattr(module, "run_agent", None) is original:
+            monkeypatch.setattr(module, "run_agent", stand_in)
+
+
+def _mark_run_agent(monkeypatch: pytest.MonkeyPatch, marker: str) -> list[inspect.BoundArguments]:
+    """Write `marker` as a line of its own to stdout just before each `run_agent` call, however
+    `relay/loop.py` reaches it; return the list each call's bound arguments go to."""
+    calls: list[inspect.BoundArguments] = []
+
+    def replace(original: Callable[..., object]) -> Callable[..., object]:
+        def wrapped(*args: object, **kwargs: object) -> object:
+            calls.append(inspect.signature(original).bind(*args, **kwargs))
+            sys.stdout.write(marker + "\n")
+            return original(*args, **kwargs)
+
+        return wrapped
+
+    _every_run_agent(monkeypatch, replace)
+    return calls
+
+
+# Progress behavior 1: `relay/loop.py` calls these, and nothing else in it writes to the
+# terminal; the lines of a whole `relay go` come in the order the run produced them.
+
+# In NEEDS_OWNER_LEAD, one assistant message and a result of 0.0333 dollars.
+NEEDS_OWNER_SPEND = Spend(tokens=2 + 100 + 800 + 15, dollars=0.0333)
+
+
+def _finished(spend: Spend) -> str:
+    """The `(<tokens> tokens, $<dollars>)` tail of a finished line, for the spends used here,
+    whose dollars each round to two places without a tie."""
+    return f"({spend.tokens} tokens, ${spend.dollars:.2f})"
+
+
+def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_with_its_outcome(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a line is missing, repeated or out of the run's order; a finished line
+    # carries another outcome than the lead's (DONE, the RECUT reason, NEEDS-OWNER, no status
+    # line); the lead given the owner's answer does not say so; or the loop writes a line of
+    # its own, or to stderr.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    a, b, c = _open_ids(queue)[:3]
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid not in (a, b, c):
+            state.mark_done(sid)
+    # a: no status line, then DONE. b: RECUT, whose recut leaves the queue unchanged, then
+    # NEEDS-OWNER. c: DONE, leaving only b parked, so the loop waits. b, answered: DONE.
+    leads = [
+        _step(NO_STATUS_LEAD),
+        _step(DONE_LEAD),
+        _step(RECUT_LEAD),
+        _step(NEEDS_OWNER_LEAD),
+        _step(DONE_LEAD),
+        _step(DONE_LEAD),
+    ]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN)])
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: State.open(queue, cfg).section(c).status == "done")
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).set_answer(b, "Use port 8080.")
+        assert loop.finish() == ExitCode.QUEUE_EMPTY
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    for line in captured.out.splitlines():
+        if line == "<ping.stopped>":
+            continue
+        stamped = _STAMP.fullmatch(line)
+        assert stamped is not None, line
+        hours, minutes, seconds = (int(stamped.group(n)) for n in (1, 2, 3))
+        assert hours < 24 and minutes < 60 and seconds < 60, line
+        assert any(p.fullmatch(stamped.group(4)) for p in _PROGRESS), line
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    name = queue.name
+    assert _texts(captured.out) == [
+        f"relay go {name}: started; no token budget, no dollar budget",
+        f"lead {a}: started fresh",
+        f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+        f"section {a}: failed (1 of 2)",
+        f"lead {a}: started, resuming sess-lead-2",
+        f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+        f"lead {b}: started, resuming sess-lead-1",
+        f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+        f"recut {b}: started: {RECUT_REASON}",
+        f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
+        f"section {b}: failed (1 of 2)",
+        f"lead {b}: started, resuming sess-lead-4",
+        f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+        f"section {b}: needs an answer: {QUESTION}",
+        f"lead {c}: started, resuming sess-lead-5",
+        f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+        f"waiting for answers on {b}",
+        f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
+        f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+        "<ping.stopped>",
+        f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
+    ]
+
+
+# Progress behavior 2: `run` calls `progress.started` after `state.lock()` succeeds, and
+# `progress.ended` after each `ping.stopped`.
+
+
+def test_started_is_written_first_once_the_lock_is_taken_and_not_when_another_go_holds_it(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: run writes the started line before it takes the lock, or never writes it.
+    scenario(_lines(DONE_LEAD))
+    held = queue_file(M2)
+    holder = State.open(held, cfg)
+    holder.lock()
+    try:
+        run(held, cfg)
+    except LockedError:
+        pass
+    assert not any(re.fullmatch(_STARTED, t) for t in _texts(capsys.readouterr().out))
+    free = queue_file(WORKBOARD)
+    state = State.open(free, cfg)
+    for sid in _open_ids(free):
+        state.mark_done(sid)
+    assert run(free, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert texts != []
+    assert re.fullmatch(_STARTED, texts[0]), texts
+    assert len([t for t in texts if re.fullmatch(_STARTED, t)]) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "lead"),
+    [
+        ("stop-file", ExitCode.STOP_FILE, DONE_LEAD),
+        ("budget", ExitCode.BUDGET, DONE_LEAD),
+        ("queue-empty", ExitCode.QUEUE_EMPTY, DONE_LEAD),
+        ("failed-twice", ExitCode.FAILED_TWICE, NO_STATUS_LEAD),
+        ("budget-retire", ExitCode.BUDGET, DONE_LEAD),
+    ],
+    ids=["stop-file", "budget", "queue-empty", "failed-twice", "budget-retire"],
+)
+def test_ended_is_the_last_line_written_just_after_the_stopped_ping_with_its_reason_and_detail(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    code: int,
+    lead: str,
+) -> None:
+    # Breaks when: a stop writes no ended line, writes it before ping.stopped, or words it
+    # with another reason, detail or exit code than the stop's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(lead))
+    if kind == "budget-retire":
+        _only_first_open(queue, cfg)
+        cfg = dataclasses.replace(cfg, token_budget=RETIRED_SPEND.tokens - 1)
+        cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD)])
+    else:
+        cfg = _stop_on(kind, queue, cfg)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    assert run(queue, cfg) == code
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    assert len(_pings(tmp_path)) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    ended = [t for t in texts if re.fullmatch(r"relay go .+: ended .+", t)]
+    assert len(ended) == 1, texts
+    assert texts[-2:] == ["<ping.stopped>", ended[0]], texts
+    expected = re.escape(f"{reason}: {detail} (exit {int(code)})")
+    assert re.fullmatch(r"relay go .+: ended " + expected, ended[0]), ended
+
+
+def test_a_stop_file_while_waiting_writes_ended_just_after_the_stopped_ping(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the STOP_FILE stop from the wait returns with no ended line after its ping.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    assert texts[-2:-1] == ["<ping.stopped>"], texts
+    expected = re.escape(f"{reason}: {detail} (exit {int(ExitCode.STOP_FILE)})")
+    assert re.fullmatch(r"relay go .+: ended " + expected, texts[-1]), texts
+
+
+# Progress behavior 2a: the started and ended lines name the queue file `relay go` was given
+# and the budgets its config holds, or that there is none.
+
+
+def _all_done(queue: Path, cfg: Config) -> None:
+    state = State.open(queue, cfg)
+    for sid in _open_ids(queue):
+        state.mark_done(sid)
+
+
+@pytest.mark.parametrize("name", [WORKBOARD, M2])
+def test_started_and_ended_name_the_queue_file_relay_go_was_given(
+    name: str,
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: started or ended names another queue than the one run was given, or none.
+    queue = queue_file(name)
+    scenario(_lines(DONE_LEAD))
+    _all_done(queue, cfg)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    reason, detail = stops[0].arguments["reason"], stops[0].arguments["detail"]
+    assert texts == [
+        f"relay go {name}: started; no token budget, no dollar budget",
+        "<ping.stopped>",
+        f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("budgets", "wording"),
+    [
+        ({}, r"no token budget, no dollar budget"),
+        ({"token_budget": 900}, r"budget 900 tokens, no dollar budget"),
+        ({"dollar_budget": 2.5}, r"no token budget, \$2\.50?"),
+        ({"token_budget": 900, "dollar_budget": 2.5}, r"budget 900 tokens, \$2\.50?"),
+    ],
+    ids=["none", "tokens", "dollars", "both"],
+)
+def test_started_names_the_budgets_the_config_holds_or_that_there_is_none(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    budgets: dict[str, object],
+    wording: str,
+) -> None:
+    # Breaks when: started leaves out a budget the config holds, names one it does not hold,
+    # or gives another amount than the config's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _all_done(queue, cfg)
+    cfg = dataclasses.replace(cfg, **budgets)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    started = [t for t in texts if re.fullmatch(_STARTED, t)]
+    assert len(started) == 1, texts
+    assert re.fullmatch(re.escape(f"relay go {WORKBOARD}: started; ") + wording, started[0]), started
+
+
+# Progress behavior 2b: a crash in the loop also writes the ended line, with reason `crashed`
+# and code `ExitCode.ERROR`, just after its stopped ping.
+
+
+def test_a_crash_in_a_leads_run_writes_ended_crashed_with_exit_error_just_after_its_stopped_ping(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the crash path writes no ended line, writes it before its stopped ping, or
+    # words it with another reason or exit code, whether loop.py calls run_agent by its own
+    # name for it or through relay.runner.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+
+    def replace(original: Callable[..., object]) -> Callable[..., object]:
+        def crash(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("the runner broke")
+
+        return crash
+
+    _every_run_agent(monkeypatch, replace)
+    stops = _mark(monkeypatch, relay.ping, "stopped", "<ping.stopped>")
+    try:
+        run(queue, cfg)
+    except RuntimeError:
+        pass
+    texts = _texts(capsys.readouterr().out)
+    assert len(stops) == 1
+    ended = [t for t in texts if re.fullmatch(r"relay go .+: ended .+", t)]
+    assert len(ended) == 1, texts
+    assert texts[-2:] == ["<ping.stopped>", ended[0]], texts
+    wanted = re.escape(f"relay go {WORKBOARD}: ended crashed: ") + r".*" + re.escape(f" (exit {int(ExitCode.ERROR)})")
+    assert re.fullmatch(wanted, ended[0]), ended
+
+
+# Progress behavior 3: `_run_section` calls `progress.lead_started` just before `run_agent`.
+
+
+def test_lead_started_naming_each_section_is_written_just_before_its_leads_run_however_the_loop_reaches_run_agent(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the lead_started line is written once per go or per pass instead of just
+    # before each section's run_agent, names the section of an earlier or later lead, or is
+    # missing when loop.py calls run_agent through relay.runner rather than its own name.
+    queue = queue_file(M2)
+    scenario(_lines(DONE_LEAD))
+    ids = _open_ids(queue)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(runs) == len(ids)
+    assert len(_runs(tmp_path, "lead")) == len(ids)
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == len(ids), texts
+    expected = [f"lead {ids[0]}: started fresh"] + [f"lead {sid}: started, resuming sess-lead-1" for sid in ids[1:]]
+    assert [texts[n - 1] for n in at] == expected, texts
+    assert [t for t in texts if t.startswith("lead ") and ": started" in t] == expected, texts
+
+
+def test_lead_started_is_written_just_before_each_lead_runs_however_the_loop_reaches_run_agent(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a lead runs with no lead_started line just before it, the line names another
+    # section or session, or a lead_started line is written for no run, whether loop.py calls
+    # run_agent by its own name for it or through relay.runner.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(runs) == 2
+    assert len(_runs(tmp_path, "lead")) == 2
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == 2, texts
+    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
+    assert texts[at[1] - 1] == f"lead {first}: started, resuming sess-lead-3", texts
+    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
+
+
+def test_lead_started_comes_just_before_the_lead_that_asks_for_a_recut_and_recut_started_before_the_recut(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: lead_started is written for the recut's run_agent too, or not just before
+    # each lead's; or recut_started is not written between the lead's run and the recut's,
+    # whether loop.py calls run_agent by its own name for it or through relay.runner.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(runs) == 3
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert len(_runs(tmp_path, "recut")) == 1
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == 3, texts
+    assert texts[at[0] - 1] == f"lead {first}: started fresh", texts
+    assert not texts[at[1] - 1].startswith("lead "), texts
+    assert texts[at[2] - 1] == f"lead {first}: started, resuming sess-lead-4", texts
+    started = f"recut {first}: started: {RECUT_REASON}"
+    assert started in texts, texts
+    assert at[0] < texts.index(started) < at[1], texts
+    assert len([t for t in texts if t.startswith("lead ") and ": started" in t]) == 2
+
+
+# Progress behavior 4: On `NEEDS-OWNER` it calls `progress.needs_answer` beside `ping.needs_owner`.
+
+
+def test_needs_owner_writes_needs_an_answer_beside_the_needs_owner_ping(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: NEEDS-OWNER writes no needs-an-answer line, writes it apart from the ping,
+    # or the ping no longer goes out.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
+    asks = _mark(monkeypatch, relay.ping, "needs_owner", "<ping.needs_owner>")
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    texts = _texts(capsys.readouterr().out)
+    assert len(asks) == 1
+    assert len([p for p in _pings(tmp_path) if QUESTION in p[0]]) == 1
+    needs = [n for n, t in enumerate(texts) if re.fullmatch(r"section \S+: needs an answer: .+", t)]
+    assert len(needs) == 1, texts
+    assert texts[needs[0]] == f"section {sid}: needs an answer: {QUESTION}"
+    assert abs(texts.index("<ping.needs_owner>") - needs[0]) == 1, texts
+
+
+# Progress behavior 5: On every failure `record_failure` counts, the recut's included, it calls
+# `progress.failed` with the new count.
+
+
+@pytest.mark.parametrize(
+    ("failing", "context"),
+    [(_step(NO_STATUS_LEAD), None), (_step(DONE_LEAD, exit=1), None), (_step(DONE_LEAD), FIRST_CONTEXT)],
+    ids=["no-status-line", "non-zero-exit", "killed"],
+)
+def test_a_lead_failure_writes_failed_with_the_count_one(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    failing: dict[str, object],
+    context: int | None,
+) -> None:
+    # Breaks when: a failure record_failure counts writes no failed line, or another count.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    if context is not None:
+        cfg = dataclasses.replace(cfg, context_limit=context - 200, hard_ceiling=context)
+    cfg = _sequenced(cfg, tmp_path, [failing, _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {first}: failed (1 of 2)"]
+
+
+def test_a_second_failure_writes_failed_with_the_count_two(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the failed line carries a count other than record_failure's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _failed(_texts(capsys.readouterr().out)) == [
+        f"section {first}: failed (1 of 2)",
+        f"section {first}: failed (2 of 2)",
+    ]
+
+
+def test_a_failure_recorded_before_this_go_makes_the_first_failed_line_count_two(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop counts this go's failures itself instead of taking record_failure's count.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    State.open(queue, cfg).record_failure(first)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {first}: failed (2 of 2)"]
+
+
+def test_a_recut_that_leaves_the_queue_unchanged_writes_failed_after_the_recut_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a recut that changed nothing counts its failure with no failed line.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert _failed(texts) == [f"section {first}: failed (1 of 2)"]
+    recut = [n for n, t in enumerate(texts) if t.startswith(f"recut {first}: finished ")]
+    assert len(recut) == 1, texts
+    assert texts.index(f"section {first}: failed (1 of 2)") > recut[0]
+
+
+def test_a_recut_with_a_non_zero_exit_writes_failed_with_the_new_count(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a recut's non-zero exit counts a failure with no failed line.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    sid = _open_ids(queue)[0]
+    cfg = _recut_to_m2(cfg, tmp_path, queue, exit=1)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _failed(_texts(capsys.readouterr().out)) == [f"section {sid}: failed (1 of 2)"]
+
+
+# Progress behavior 6: `_watcher` takes the section id and calls `progress.retiring` the first
+# time it returns `retire` in a run and `progress.killing` when it returns `kill`; it never
+# repeats a line within one run.
+
+
+def _between(texts: list[str], line: str, sid: str) -> None:
+    """`line` lies after the first `lead <sid>: started` line and before the next `lead <sid>: finished` line."""
+    started = next(n for n, t in enumerate(texts) if t.startswith(f"lead {sid}: started"))
+    finished = next(n for n, t in enumerate(texts) if n > started and t.startswith(f"lead {sid}: finished "))
+    assert started < texts.index(line) < finished, texts
+
+
+def test_a_context_retire_writes_one_asked_to_retire_line_though_every_later_event_returns_retire(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher writes a retiring line on every event that returns retire, writes
+    # none, or names another section or context than the first retire's.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    # Both assistant messages of DONE_LEAD leave context_tokens at or above this limit.
+    cfg = dataclasses.replace(cfg, context_limit=7 + 100 + 900)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: asked to retire at {FIRST_CONTEXT} context tokens"
+    assert [t for t in texts if ": asked to retire" in t] == [line], texts
+    _between(texts, line, first)
+
+
+def test_a_budget_retire_writes_one_budget_spent_line_though_every_later_event_returns_retire(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher repeats the budget retiring line per event, words it as a context
+    # retire, or writes none.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    # The live spend passes this budget at DONE_LEAD's first assistant message and stays past it.
+    cfg = dataclasses.replace(cfg, token_budget=FIRST_SPEND - 1)
+    assert run(queue, cfg) == ExitCode.BUDGET
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: asked to retire, budget spent"
+    assert [t for t in texts if ": asked to retire" in t] == [line], texts
+    _between(texts, line, first)
+
+
+def test_each_run_that_retires_writes_its_own_asked_to_retire_line_and_a_run_that_does_not_writes_none(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the first-retire memory outlives its run, so a later run that retires writes
+    # no line; or a run that never returns retire writes one.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=RETIRED_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: asked to retire at {RETIRED_CONTEXT} context tokens"
+    assert [t for t in texts if ": asked to retire" in t] == [line, line], texts
+    starts = [n for n, t in enumerate(texts) if t.startswith(f"lead {first}: started")]
+    retires = [n for n, t in enumerate(texts) if t == line]
+    assert len(starts) == 3, texts
+    assert starts[0] < retires[0] < starts[1] < retires[1] < starts[2], texts
+
+
+def test_a_run_killed_at_the_hard_ceiling_writes_its_killed_line_and_no_asked_to_retire_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher writes an asked-to-retire line for a run it kills (the context
+    # being past context_limit too), writes no killed line on kill, repeats it, writes it for
+    # a run that stays below hard_ceiling, or names another section or context.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    # DONE_LEAD's first assistant message takes context_tokens to FIRST_CONTEXT: past
+    # context_limit and at hard_ceiling at once.
+    cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "lead")) == 2
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: killed at {FIRST_CONTEXT} context tokens, past the hard ceiling"
+    watched = [t for t in texts if ": killed at " in t or ": asked to retire" in t]
+    assert watched == [line], texts
+    _between(texts, line, first)
+
+
+# Progress behavior 7: `_recut` calls `progress.recut_started` before its `run_agent` and
+# `progress.recut_finished` after it.
+
+
+@pytest.mark.parametrize(
+    ("exit", "rewrite", "outcome"),
+    [(0, False, "with the queue unchanged"), (0, True, "with the queue recut"), (1, True, "exit 1")],
+    ids=["unchanged", "recut", "non-zero-exit"],
+)
+def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it_however_the_loop_reaches_run_agent(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit: int,
+    rewrite: bool,
+    outcome: str,
+) -> None:
+    # Breaks when: the recut writes no started line before its run_agent, no finished line
+    # after it, or a finished line with another outcome or spend than its run's, whether
+    # loop.py calls run_agent by its own name for it or through relay.runner.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    recut = _step(DIVVYER_RUN, exit=exit, write=(FIXTURES / M2, queue) if rewrite else None)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[recut])
+    runs = _mark_run_agent(monkeypatch, "<run_agent>")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    assert len(_runs(tmp_path, "recut")) == 1
+    at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
+    assert len(at) == len(runs) >= 3, texts
+    started = f"recut {first}: started: {RECUT_REASON}"
+    finished = f"recut {first}: finished {outcome} ({DIVVYER_SPEND.tokens} tokens, $0.04)"
+    assert [t for t in texts if t.startswith("recut ")] == [started, finished], texts
+    assert at[0] < texts.index(started) < at[1] < texts.index(finished) < at[2], texts
+
+
+# Progress behavior 8: `_loop` calls `progress.waiting` when it enters a wait and the parked
+# set differs from the set it last printed; a wait that goes on prints nothing more.
+
+_WAITING = "waiting for answers on "
+
+
+def _park_two(queue: Path, cfg: Config) -> tuple[State, str, str]:
+    """Park the queue's first two open sections and mark every other section done."""
+    a, b = _open_ids(queue)[:2]
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid not in (a, b):
+            state.mark_done(sid)
+    state.park(a, QUESTION)
+    state.park(b, QUESTION)
+    return state, a, b
+
+
+def _waits(texts: list[str]) -> list[set[str]]:
+    """The set of ids each waiting line names, in line order."""
+    return [set(t[len(_WAITING) :].split(", ")) for t in texts if t.startswith(_WAITING)]
+
+
+def _until(condition: Callable[[], bool], timeout: float = 15.0) -> None:
+    end = time.time() + timeout
+    while not condition():
+        assert time.time() < end, "condition never held"
+        time.sleep(0.02)
+
+
+def test_a_wait_that_goes_on_writes_one_waiting_line_naming_the_parked_section(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop writes a waiting line on every poll, or none on entering the wait.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    parked = _open_ids(queue)[0]
+    state = _park_all_but_done(queue, cfg, parked)
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    texts = _texts(capsys.readouterr().out)
+    assert [t for t in texts if t.startswith(_WAITING)] == [f"{_WAITING}{parked}"], texts
+
+
+def test_a_wait_writes_one_waiting_line_naming_each_parked_section_exactly_once(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the waiting line names only some of several parked sections, names one
+    # twice, names a section that is not parked, or the wait writes no waiting line.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    parked = _open_ids(queue)[:3]
+    state = State.open(queue, cfg)
+    for sid in [s.id for s in parse_queue(queue)]:
+        if sid not in parked:
+            state.mark_done(sid)
+    for sid in parked:
+        state.park(sid, QUESTION)
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    texts = _texts(capsys.readouterr().out)
+    waiting = [t for t in texts if t.startswith(_WAITING)]
+    assert len(waiting) == 1, texts
+    assert sorted(waiting[0][len(_WAITING) :].split(", ")) == sorted(parked), waiting
+
+
+def test_a_new_wait_on_a_changed_parked_set_writes_a_new_waiting_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop writes the waiting line only on its first wait of the run.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    state, a, b = _park_two(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).set_answer(a, "Use port 8080.")
+        _until(lambda: State.open(queue, cfg).section(a).status == "done")
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    assert _waits(_texts(capsys.readouterr().out)) == [{a, b}, {b}]
+
+
+def test_a_new_wait_on_the_parked_set_last_printed_writes_no_waiting_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop writes a waiting line on every wait it enters, though the parked
+    # set is the one it last printed.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    state, a, b = _park_two(queue, cfg)
+    # The answered section's lead parks it again with the same question.
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD)])
+    loop = _Background(queue, cfg)
+    try:
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).set_answer(a, "Use port 8080.")
+        _until(lambda: len(_pings(tmp_path)) == 1)
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        State.open(queue, cfg).stop_file.touch()
+        assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert State.open(queue, cfg).section(a).status == "parked"
+    texts = _texts(capsys.readouterr().out)
+    assert any(t.startswith(f"lead {a}: finished ") for t in texts), texts
+    assert _waits(texts) == [{a, b}]
+
+
+# Progress behavior 9: a progress line never replaces a ping.
+
+
+def test_every_ping_still_goes_out_beside_its_progress_line(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop writes the needs-an-answer or ended line in place of its ping.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _open_ids(queue)[0]
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    texts = _texts(capsys.readouterr().out)
+    assert f"section {first}: needs an answer: {QUESTION}" in texts, texts
+    assert any(re.fullmatch(r"relay go .+: ended .+", t) for t in texts), texts
+    pings = [p[0] for p in _pings(tmp_path)]
+    assert len(pings) == 2, pings
+    assert QUESTION in pings[0]
+    assert pings[1].startswith("relay ")
+    assert not set(pings) & set(texts)

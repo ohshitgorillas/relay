@@ -6,14 +6,14 @@ import time
 from pathlib import Path
 from typing import Callable, Literal
 
-from relay import ping
+from relay import ping, progress
 from relay.config import Config
 from relay.errors import ExitCode
 from relay.ledger import Ledger, Spend
 from relay.prompts import lead_prompt, recut_brief
 from relay.queue import Section, blocked_by, parse_queue
 from relay.runner import RunResult, run_agent
-from relay.state import State
+from relay.state import FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
@@ -32,12 +32,15 @@ def _git_top(directory: Path) -> Path:
 def run(queue: Path, cfg: Config) -> int:
     state = State.open(queue, cfg)
     state.lock()
+    progress.started(queue, cfg)
     try:
         code, reason, detail = _loop(queue, cfg, state)
     except Exception as exc:
         ping.stopped(cfg, queue, "crashed", f"{type(exc).__name__}: {exc}")
+        progress.ended(queue, ExitCode.ERROR, "crashed", f"{type(exc).__name__}: {exc}")
         raise
     ping.stopped(cfg, queue, reason, detail)
+    progress.ended(queue, code, reason, detail)
     return code
 
 
@@ -47,6 +50,7 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
     cwd = _git_top(queue.parent)
     state.run_dir.mkdir(parents=True, exist_ok=True)
     retire_flag = state.retire_flag
+    last_waiting: list[str] | None = None
 
     while True:
         if state.stop_file.exists():
@@ -66,6 +70,10 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
         if not runnable:
             if not parked:
                 return ExitCode.QUEUE_EMPTY, "queue empty", "every section is done"
+            waiting = sorted(parked)
+            if waiting != last_waiting:
+                progress.waiting(waiting)
+                last_waiting = waiting
             time.sleep(cfg.poll_seconds)
             continue
 
@@ -88,10 +96,12 @@ def _run_section(
     sid = section.id
     current = state.section(sid)
     resume = current.last_session or state.last_session_any
-    prompt = lead_prompt(queue, section, resume, state.take_answer(sid), retire_flag)
-    on_event, budget_hit = _watcher(cfg, ledger, since)
+    answer = state.take_answer(sid)
+    prompt = lead_prompt(queue, section, resume, answer, retire_flag)
+    on_event, budget_hit = _watcher(cfg, ledger, since, sid)
 
     retire_flag.unlink(missing_ok=True)
+    progress.lead_started(sid, resume, answer is not None)
     result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, on_event, retire_flag)
     session = result.stream.session_id
     ledger.append("lead", sid, session, result.stream.spend)
@@ -99,9 +109,12 @@ def _run_section(
         state.set_last_session(sid, session)
 
     status = parse_status(result.stream.result_text)
+    progress.lead_finished(sid, result, status)
     failed = result.killed or result.exit_code != 0 or status is None
     if failed:
-        if _fail(state, sid):
+        second, count = _fail(state, sid)
+        progress.failed(sid, count)
+        if second:
             return _failed_twice(sid)
     elif status.kind == "DONE":
         state.mark_done(sid)
@@ -111,6 +124,7 @@ def _run_section(
     elif status.kind == "NEEDS-OWNER":
         state.park(sid, status.text)
         ping.needs_owner(cfg, queue, sid, status.text)
+        progress.needs_answer(sid, status.text)
     # RETIRED: nothing to record; the next pass runs a fresh lead on the same section.
 
     if budget_hit[0]:
@@ -119,27 +133,36 @@ def _run_section(
 
 
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float
+    cfg: Config, ledger: Ledger, since: float, sid: str
 ) -> tuple[Callable[[StreamState], Literal["go", "retire", "kill"]], list[bool]]:
     """The run_agent callback, and a one-slot flag set when a budget ran out mid-run."""
     hit = [False]
+    retiring = [False]
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
         if stream.context_tokens >= cfg.hard_ceiling:
+            progress.killing(sid, stream.context_tokens)
             return "kill"
         if ledger.over(cfg, stream.spend, since) is not None:
             hit[0] = True
+            if not retiring[0]:
+                retiring[0] = True
+                progress.retiring(sid, "budget", stream.context_tokens)
             return "retire"
         if stream.context_tokens >= cfg.context_limit:
+            if not retiring[0]:
+                retiring[0] = True
+                progress.retiring(sid, "context", stream.context_tokens)
             return "retire"
         return "go"
 
     return on_event, hit
 
 
-def _fail(state: State, sid: str) -> bool:
-    """Record a failure of `sid`; True when it is the second."""
-    return state.record_failure(sid) >= 2
+def _fail(state: State, sid: str) -> tuple[bool, int]:
+    """Record a failure of `sid`; (True when it is the second, the count recorded)."""
+    count = state.record_failure(sid)
+    return count >= FAILURE_LIMIT, count
 
 
 def _failed_twice(sid: str) -> _Stop:
@@ -161,9 +184,14 @@ def _recut(
     """Run the divvyer's recut; True when it failed and that was the section's second failure."""
     brief = recut_brief(queue, section, reason, lead.log)
     before = parse_queue(queue)
-    on_event, _hit = _watcher(cfg, ledger, since)
+    on_event, _hit = _watcher(cfg, ledger, since, section.id)
+    progress.recut_started(section.id, reason)
     result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag)
     ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
-    if result.killed or result.exit_code != 0 or parse_queue(queue) == before:
-        return _fail(state, section.id)
+    changed = parse_queue(queue) != before
+    progress.recut_finished(section.id, result, changed)
+    if result.killed or result.exit_code != 0 or not changed:
+        second, count = _fail(state, section.id)
+        progress.failed(section.id, count)
+        return second
     return False
