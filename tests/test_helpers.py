@@ -293,6 +293,13 @@ def test_the_decision_architect_stream_reports_an_unapproved_design_with_two_dec
     assert len(report.decisions) == 2
     for line in report.decisions:
         assert "| recommend: " in line and "| alternative: " in line, line
+    # Each decision is the indented line under DECISIONS, as written.
+    assert tuple(line.strip() for line in report.decisions) == (
+        "1 | Should two() return 2 when one.py is absent? | recommend: no, fail loudly"
+        " | alternative: return 2",
+        "2 | Should three() ship in this release? | recommend: yes"
+        " | alternative: hold it for the next",
+    )
     assert report.unfiled == ()
     assert decision_numbers(report) == (1, 2)
 
@@ -305,3 +312,55 @@ def test_the_rejected_architect_stream_reports_a_steering_refusal() -> None:
     assert report is not None
     assert report.rejected is True
     assert report.approved is False
+
+
+# Two more streams, so each design-report outcome `_design_outcome` acts on has its own:
+# a design that is not approved with nothing open, and one with an UNFILED line open
+# (design: Modules, `relay/loop.py`, `_design_outcome`).
+
+
+def test_the_unapproved_architect_stream_reports_a_design_not_approved_with_nothing_open() -> None:
+    # breaks when: parse_report sets approved from any STATUS line, not only `Status: approved`.
+    from relay.ladder import DesignReport, parse_report
+
+    report = parse_report(_final_report("stream-architect-unapproved.jsonl"))
+    assert report == DesignReport(rejected=False, approved=False, decisions=(), unfiled=())
+
+
+def test_the_unfiled_architect_stream_reports_one_unfiled_line_and_no_decision() -> None:
+    # breaks when: parse_report drops the indented lines under UNFILED.
+    from relay.ladder import decision_numbers, parse_report
+
+    report = parse_report(_final_report("stream-architect-unfiled.jsonl"))
+    assert report is not None
+    assert report.rejected is False
+    assert report.approved is False
+    assert report.decisions == ()
+    assert decision_numbers(report) == ()
+    # The unfiled line is the indented line under UNFILED, as written.
+    assert tuple(line.strip() for line in report.unfiled) == (
+        "1 | Who owns one.py once both sections use it? | recommend: section s1"
+        " | alternative: a new shared section",
+    )
+
+
+def test_each_design_report_outcome_has_its_own_architect_stream() -> None:
+    # breaks when: two streams report the same outcome, or one outcome has no stream.
+    from relay.ladder import parse_report
+
+    def outcome(name: str) -> str:
+        report = parse_report(_final_report(name))
+        assert report is not None, name
+        if report.rejected:
+            return "steering refusal"
+        if report.decisions:
+            return "decisions"
+        if report.unfiled:
+            return "unfiled"
+        return "approved" if report.approved else "not approved"
+
+    names = sorted(p.name for p in FIXTURES.glob("stream-architect-*.jsonl"))
+    outcomes = sorted(outcome(name) for name in names)
+    assert outcomes == sorted(
+        ["approved", "decisions", "unfiled", "not approved", "steering refusal"]
+    )
