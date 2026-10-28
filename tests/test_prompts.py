@@ -6,8 +6,10 @@ import dataclasses
 from pathlib import Path
 
 from relay.check import CheckResult
-from relay.prompts import check_feedback, lead_prompt, recut_brief
+from relay.config import Config
+from relay.prompts import ask_brief, check_feedback, lead_prompt, recut_brief, research_brief
 from relay.queue import Section
+from tests.conftest import FIXTURES
 
 QUEUE = Path("/work/repo/docs/queue.md")
 RETIRE_FLAG = Path("/state/relay/work-repo-docs-queue-md/runs/3.retire")
@@ -238,3 +240,196 @@ def test_check_feedback_for_a_timeout_says_timed_out() -> None:
     assert "timed out after 1800s" in text
     short = check_feedback(_check_result(exit_code=None, timed_out=True, timeout=0.5))
     assert "timed out after 0.5s" in short
+
+
+# Research design (docs/superpowers/specs/relay-research-design.md, Modules `relay/prompts.py`
+# and Homes; Order 5).
+
+RESEARCH_FLAG = Path("/state/relay/work-repo-docs-queue-md/runs/research-s4")
+QUESTION = 'Where does `_research` read HEAD, and what "stale" means?\n  {braces} 100%'
+
+# The researcher's map from `tests/fixtures/research-map.txt`, as the block a lead carries.
+_MAP_TEXT = (FIXTURES / "research-map.txt").read_text()
+MAP_BLOCK = (
+    "map s4 at 0123456789abcdef0123456789abcdef01234567\n"
+    + _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
+)
+MAP_SENTENCE = (
+    "Relay's researcher mapped this section's code. "
+    "Put the block below verbatim in every brief you send for this section, the architect's included."
+)
+MAP_ROUTE = "and pass on its answer; no agent searches for it."
+
+
+def _capped(cfg: Config) -> Config:
+    return dataclasses.replace(cfg, map_max_lines=137, map_max_chars=9876)
+
+
+# Behavior 1: Lead-facing map wording, research and ask briefs
+
+
+def test_research_brief_is_a_text(fake_cfg: Config) -> None:
+    # Breaks when: research_brief builds no brief text for the researcher.
+    brief = research_brief(QUEUE, _section(), RESEARCH_FLAG, fake_cfg)
+    assert isinstance(brief, str)
+    assert brief.strip() != ""
+
+
+def test_ask_brief_is_a_text(fake_cfg: Config) -> None:
+    # Breaks when: ask_brief builds no brief text for the follow-up.
+    brief = ask_brief(QUESTION, RESEARCH_FLAG, fake_cfg)
+    assert isinstance(brief, str)
+    assert brief.strip() != ""
+
+
+# Behavior 2: As now, plus, when map_block is set
+
+
+def _with_map(map_block: str | None = MAP_BLOCK) -> str:
+    return lead_prompt(
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        map_block=map_block,
+    )
+
+
+def test_lead_prompt_with_a_map_says_put_it_in_every_brief() -> None:
+    # Breaks when: the map's usage rule for the lead is left out or worded otherwise.
+    assert MAP_SENTENCE in _with_map()
+
+
+def test_lead_prompt_with_a_map_routes_needs_through_relay_ask() -> None:
+    # Breaks when: the lead is not told to run `relay ask` and pass the answer on.
+    prompt = _with_map()
+    assert "When an agent reports it needs more, run `relay ask " in prompt
+    assert MAP_ROUTE in prompt
+
+
+def test_lead_prompt_carries_the_map_block_verbatim() -> None:
+    # Breaks when: the map block is dropped, stripped, re-indented or escaped.
+    assert MAP_BLOCK in _with_map()
+
+
+def test_lead_prompt_puts_the_map_block_after_its_wording() -> None:
+    # Breaks when: the block comes before the sentence that introduces it.
+    prompt = _with_map()
+    start = prompt.find(MAP_SENTENCE)
+    assert start != -1
+    assert prompt.find(MAP_BLOCK, start + len(MAP_SENTENCE)) != -1
+
+
+def test_lead_prompt_without_a_map_leaves_the_map_wording_out() -> None:
+    # Breaks when: the map wording is written though map_block is None or left at its
+    # default, or is never written at all.
+    assert MAP_SENTENCE in _with_map()
+    assert MAP_SENTENCE not in _with_map(None)
+    assert "relay ask" not in _with_map(None)
+    assert MAP_SENTENCE not in _lead()
+    assert "relay ask" not in _lead()
+
+
+def test_lead_prompt_with_a_map_keeps_everything_else() -> None:
+    # Breaks when: setting map_block replaces the prompt instead of adding to it.
+    prompt = _with_map()
+    assert MAP_BLOCK in prompt
+    assert prompt.startswith("You are a lead")
+    assert str(QUEUE) in prompt
+    assert BODY in prompt
+    assert "resume sess-lead-7" in prompt
+    assert str(RETIRE_FLAG) in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 3: The queue path, the section id and body, the caps cfg.map_max_lines and
+# cfg.map_max_chars, the MAP / LINKS / END MAP form, and the flag sentence.
+
+
+def _research(cfg: Config, section: Section | None = None) -> str:
+    return research_brief(QUEUE, section or _section(), RESEARCH_FLAG, _capped(cfg))
+
+
+def test_research_brief_holds_the_queue_path(fake_cfg: Config) -> None:
+    # Breaks when: the research brief leaves out the queue's path.
+    assert str(QUEUE) in _research(fake_cfg)
+
+
+def test_research_brief_holds_the_section_id_and_body_verbatim(fake_cfg: Config) -> None:
+    # Breaks when: the section id is left out, or the body is reflowed, stripped or escaped.
+    brief = _research(fake_cfg)
+    assert "s4" in brief
+    assert BODY in brief
+
+
+def test_research_brief_holds_the_given_section_not_another(fake_cfg: Config) -> None:
+    # Breaks when: the brief is built from a fixed or cached section rather than the one passed.
+    other_body = "## Ping\n\nWire `relay/ping.py` to claude-ping.\n"
+    brief = _research(fake_cfg, _section(sid="s9", body=other_body))
+    assert "s9" in brief
+    assert other_body in brief
+    assert BODY not in brief
+
+
+def test_research_brief_holds_the_line_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the line cap is left out or fixed rather than read from cfg.map_max_lines.
+    assert "137" in _research(fake_cfg)
+
+
+def test_research_brief_holds_the_char_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the character cap is left out or fixed rather than read from cfg.map_max_chars.
+    assert "9876" in _research(fake_cfg)
+
+
+def test_research_brief_states_the_map_form(fake_cfg: Config) -> None:
+    # Breaks when: the MAP, LINKS or END MAP line of the map's form is left out.
+    lines = _research(fake_cfg).splitlines()
+    assert "MAP" in lines
+    assert "LINKS" in lines
+    assert "END MAP" in lines
+
+
+def test_research_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
+    # Breaks when: the flag sentence is left out, worded otherwise or names another path.
+    sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    assert sentence in _research(fake_cfg)
+
+
+# Behavior 4: The question, the ANSWER / END ANSWER form, the cap cfg.map_max_chars, the flag rule.
+
+
+def _ask(cfg: Config, question: str = QUESTION) -> str:
+    return ask_brief(question, RESEARCH_FLAG, _capped(cfg))
+
+
+def test_ask_brief_holds_the_question_verbatim(fake_cfg: Config) -> None:
+    # Breaks when: the question is dropped, stripped, re-indented or escaped.
+    assert QUESTION in _ask(fake_cfg)
+
+
+def test_ask_brief_holds_the_given_question_not_another(fake_cfg: Config) -> None:
+    # Breaks when: the brief is built from a fixed or cached question rather than the one passed.
+    brief = _ask(fake_cfg, "Which test covers `relay ask`?")
+    assert "Which test covers `relay ask`?" in brief
+    assert QUESTION not in brief
+
+
+def test_ask_brief_states_the_answer_form(fake_cfg: Config) -> None:
+    # Breaks when: the ANSWER or END ANSWER line of the answer's form is left out.
+    lines = _ask(fake_cfg).splitlines()
+    assert "ANSWER" in lines
+    assert "END ANSWER" in lines
+
+
+def test_ask_brief_holds_the_char_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the character cap is left out or fixed rather than read from cfg.map_max_chars.
+    assert "9876" in _ask(fake_cfg)
+
+
+def test_ask_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
+    # Breaks when: the flag rule is left out or names another path than the research flag.
+    brief = _ask(fake_cfg)
+    assert f"When the file {RESEARCH_FLAG} exists" in brief
+    assert "send no more readers" in brief
