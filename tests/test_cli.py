@@ -56,6 +56,9 @@ def _exit(argv: list[str] | None) -> int:
     try:
         return main(argv)
     except SystemExit as stop:
+        # As the interpreter maps it: no code is status 0, a non-int code is status 1.
+        if stop.code is None:
+            return 0
         return stop.code if isinstance(stop.code, int) else 1
 
 
@@ -92,7 +95,14 @@ def _section_line(out: str, sid: str) -> str:
 
 
 def _number(out: str, value: str) -> bool:
-    return re.search(rf"(?<![\d.]){re.escape(value)}(?![\d])", out) is not None
+    """True when `out` shows a number equal to `value`; a decimal `value` may be shown to any
+    precision from two places on, so it matches within half a cent."""
+    want = float(value)
+    tolerance = 0.005 + 1e-9 if "." in value else 0.0
+    return any(
+        abs(float(shown) - want) <= tolerance
+        for shown in re.findall(r"(?<![\d.])\d+(?:\.\d+)?(?![\d.]*\d)", out)
+    )
 
 
 # Behavior 1: `relay/cli.py`: the `relay` console script.
@@ -340,7 +350,14 @@ def test_status_with_a_readable_ledger_prints_no_skipped_line(
     queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = _ledger_path(queue, fake_cfg)
-    _write_entries(path, [(time.time() - 60, 10, 0.5)])
+    now = time.time()
+    # Totals 25 tokens and 1.25 dollars, so no total reads as a line number 1 or 2.
+    _write_entries(path, [(now - 60, 10, 0.5), (now - 30, 15, 0.75)])
     assert _exit(["status", str(queue)]) == 0
     out = capsys.readouterr().out
     assert "skip" not in out.lower()
+    # A line may name the ledger, but none names it with line numbers as if some were skipped.
+    for line in out.splitlines():
+        if str(path) in line:
+            rest = line.replace(str(path), " ")
+            assert not _number(rest, "1") and not _number(rest, "2"), line

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
 from relay.loop import run
-from relay.queue import blocked_by, parse_queue
+from relay.queue import parse_queue
 from relay.state import State
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -229,11 +230,12 @@ def test_the_lead_runs_on_the_first_section_the_queue_leaves_open(
 ) -> None:
     queue = queue_file(name)
     scenario(_lines(NO_STATUS_LEAD))
-    run(queue, cfg)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
     first = _open_ids(queue)[0]
     assert _ran_on(queue, cfg, "sess-lead-2") == {first}
     state = State.open(queue, cfg)
     assert state.section(first).failures >= 1
+    assert state.section(first).failures == 2
     assert all(state.section(sid).failures == 0 for sid in _open_ids(queue) if sid != first)
 
 
@@ -252,35 +254,50 @@ def test_a_section_done_in_state_is_passed_over(
     assert State.open(queue, cfg).section(ids[1]).status == "done"
 
 
+def _with_depends(queue: Path, depends: dict[str, str]) -> Path:
+    """Give each section `sid` of `queue` a `depends: <id>` field on its header line, the
+    divvyer's dependency format; return `queue`."""
+    lines = queue.read_text().splitlines(keepends=True)
+    for n, line in enumerate(lines):
+        for sid, dep in depends.items():
+            if line.startswith(f"section {sid} |"):
+                lines[n] = line.rstrip("\n") + f" | depends: {dep}\n"
+    queue.write_text("".join(lines))
+    return queue
+
+
+# The first three sections of each fixture queue, and the section that should run once the
+# first is parked: the second depends on the first and the third on the second, so parking
+# the first blocks both, the third transitively.
+_CHAINS = {WORKBOARD: ("s1.1.1", "s1.1.2", "s1.2", "s2"), M2: ("s1", "s2", "s3", "s4")}
+
+
 @pytest.mark.parametrize("name", [WORKBOARD, M2])
 def test_a_parked_section_and_every_section_it_blocks_are_passed_over(
     name: str, cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
-    queue = queue_file(name)
+    # Breaks when: the loop runs a section that depends, directly or transitively, on a parked one.
+    first, second, third, expected = _CHAINS[name]
+    queue = _with_depends(queue_file(name), {second: first, third: second})
     scenario(_lines(NO_STATUS_LEAD))
-    ids = _open_ids(queue)
-    parked = ids[0]
-    State.open(queue, cfg).park(parked, "Which port should the server use?")
-    blocked = blocked_by(parse_queue(queue), {parked})
-    expected = next(sid for sid in ids if sid != parked and sid not in blocked)
+    State.open(queue, cfg).park(first, "Which port should the server use?")
     run(queue, cfg)
     assert _ran_on(queue, cfg, "sess-lead-2") == {expected}
-    assert State.open(queue, cfg).section(parked).status == "parked"
+    assert State.open(queue, cfg).section(first).status == "parked"
 
 
 def test_a_section_parked_mid_queue_is_passed_over_for_the_next_unblocked_one(
     cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
-    queue = queue_file(WORKBOARD)
+    # Breaks when: the loop never weighs dependencies, so s1.2, which depends on the parked
+    # s1.1.2, runs next.
+    queue = _with_depends(queue_file(WORKBOARD), {"s1.2": "s1.1.2"})
     scenario(_lines(NO_STATUS_LEAD))
-    ids = _open_ids(queue)
     state = State.open(queue, cfg)
-    state.mark_done(ids[0])
-    state.park(ids[1], "Keep the v1 routes?")
-    blocked = blocked_by(parse_queue(queue), {ids[1]})
-    expected = next(sid for sid in ids[2:] if sid not in blocked)
+    state.mark_done("s1.1.1")
+    state.park("s1.1.2", "Keep the v1 routes?")
     run(queue, cfg)
-    assert _ran_on(queue, cfg, "sess-lead-2") == {expected}
+    assert _ran_on(queue, cfg, "sess-lead-2") == {"s2"}
 
 
 def test_each_pass_re_parses_the_queue(
@@ -359,18 +376,30 @@ def test_with_only_parked_sections_left_the_loop_waits_instead_of_stopping(
 
 
 def test_a_stop_file_created_while_waiting_stops_with_stop_file(
-    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     parked = _open_ids(queue)[0]
+    # The stop's ping stamps the wall time as its first act, before any import, so the time
+    # measured ends when the loop has seen the stop file and begun its ping, not when the
+    # ping's own work and `run`'s return are done.
+    stamps = tmp_path / "ping-stamps.txt"
+    stamp = "import time, sys; t = time.time(); f = open(sys.argv[1], 'a'); f.write(repr(t) + chr(10)); f.close()"
+    cfg = dataclasses.replace(cfg, ping_command=[sys.executable, "-I", "-S", "-c", stamp, str(stamps), "{message}"])
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
         time.sleep(SETTLE)
         assert loop.still_running()
+        touched = time.time()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+        # A check every `poll_seconds` sees the stop file within one wait: a wait of a fixed
+        # second or more misses this bound.
+        seen = [float(line) for line in stamps.read_text().splitlines()]
+        assert len(seen) == 1
+        assert seen[0] - touched < 7 * cfg.poll_seconds
     finally:
         state.stop_file.touch()
         loop.thread.join(15)
@@ -439,10 +468,13 @@ def test_waiting_sends_no_ping(
 # It then runs the fake on the scenario's first `split` lines, and, when `split` is above 0,
 # watches for up to WATCH seconds for a path the prompt names that did not exist when the lead
 # started (the retire flag), before running the fake on the rest. Every stream line it emits
-# is the fake's, from the scenario `RELAY_FAKE_SCENARIO` names.
+# is the fake's, from the scenario `RELAY_FAKE_SCENARIO` names. Given a fifth argument, the
+# shim first creates that path, before it records anything.
 _SHIM = r"""
 import json, os, re, subprocess, sys, time
 rec, fake, split, watch = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+if len(sys.argv) > 5:
+    open(sys.argv[5], "a").close()
 prompt = sys.stdin.read()
 runs = [n for n in os.listdir(rec) if n.startswith("run-") and n.endswith(".json")]
 out = os.path.join(rec, "run-%d.json" % len(runs))
@@ -487,13 +519,21 @@ DONE_SPEND = Spend(tokens=(3 + 1200 + 5000 + 40) + (7 + 100 + 900 + 25), dollars
 NO_STATUS_SPEND = Spend(tokens=5 + 0 + 2000 + 10, dollars=0.0)
 
 
-def _shimmed(cfg: Config, tmp_path: Path, split: int = 0) -> Config:
-    """`cfg` with its lead behind the recording shim, recording to `<tmp_path>/records`."""
+def _shimmed(cfg: Config, tmp_path: Path, split: int = 0, touch: Path | None = None) -> Config:
+    """`cfg` with its lead behind the recording shim, recording to `<tmp_path>/records`; each
+    lead creates `touch` as it starts, when given."""
     rec = tmp_path / "records"
     rec.mkdir(exist_ok=True)
     fake = cfg.lead_command[0]
     lead = [sys.executable, "-c", _SHIM, str(rec), fake, str(split), str(WATCH)]
+    if touch is not None:
+        lead.append(str(touch))
     return dataclasses.replace(cfg, lead_command=lead)
+
+
+def _shimmed_runs(tmp_path: Path) -> int:
+    """How many leads the recording shim has seen."""
+    return len(list((tmp_path / "records").glob("run-*.json")))
 
 
 def _record(tmp_path: Path, n: int) -> dict[str, object]:
@@ -595,6 +635,18 @@ def test_live_spend_counts_this_gos_ledger_spend_toward_the_budget(
     assert _record(tmp_path, 0)["appeared"] != []
 
 
+def test_live_spend_leaves_ledger_spend_from_before_this_go_out_of_the_budget(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: on_event weighs the live spend against the all-time ledger (since=None).
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    cfg = dataclasses.replace(cfg, token_budget=10_000)
+    _ledger_line(State.open(queue, cfg), time.time() - 3600, 5000, 0.0)
+    run(queue, _shimmed(cfg, tmp_path, split=2))
+    assert _record(tmp_path, 0)["appeared"] == []
+
+
 # Behavior 9: - `kill` at `hard_ceiling`.
 
 
@@ -635,6 +687,12 @@ def test_each_lead_runs_spend_is_appended_to_the_ledger(
     total = _ledger(queue, cfg).total(None)
     assert total.tokens == n * DONE_SPEND.tokens
     assert total.dollars == pytest.approx(n * DONE_SPEND.dollars)
+    # One readable line per lead run, each holding that run's own spend.
+    assert _ledger(queue, cfg).unreadable() == []
+    entries = [json.loads(line) for line in (State.open(queue, cfg).stop_file.parent / "ledger.jsonl").read_text().splitlines()]
+    assert len(entries) == n
+    assert all(e["tokens"] == DONE_SPEND.tokens for e in entries)
+    assert all(e["dollars"] == pytest.approx(DONE_SPEND.dollars) for e in entries)
 
 
 def test_a_failed_lead_runs_spend_is_appended_to_the_ledger_too(
@@ -894,6 +952,13 @@ def test_a_recut_status_runs_the_recut_command_once_with_the_recut_brief(
     assert RECUT_REASON in brief
     assert sid in brief
     assert str(run_dir) in brief
+    # The log named is the RECUT lead's own run log, `<run_dir>/<n>.jsonl`.
+    logs = sorted(set(re.findall(re.escape(str(run_dir).rstrip("/")) + r"/\d+\.jsonl", brief)))
+    assert len(logs) == 1, logs
+    log = Path(logs[0])
+    assert log.exists()
+    assert "sess-lead-4" in log.read_text()
+    assert RECUT_REASON in log.read_text()
 
 
 def test_after_a_recut_the_loop_re_parses_the_queue_and_counts_no_failure(
@@ -975,8 +1040,9 @@ def test_needs_owner_parks_the_section_with_its_question_and_the_loop_goes_on(
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     ids = _open_ids(queue)
-    blocked = blocked_by(parse_queue(queue), {ids[0]})
-    expected = next(sid for sid in ids[1:] if sid not in blocked)
+    # The workboard queue gives no section a dependency, so parking s1.1.1 blocks nothing and
+    # the next section in queue order runs.
+    expected = "s1.1.2"
     cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     section = State.open(queue, cfg).section(ids[0])
@@ -1113,9 +1179,12 @@ def test_a_failure_recorded_before_this_go_counts_toward_the_second(
 # calls `ping.stopped` before returning.
 
 
+# In RETIRED_LEAD, the assistant message (line 1) brings the live spend to RETIRED_SPEND.tokens,
+# and the result (line 2) brings its dollars to RETIRED_SPEND.dollars: the shim watches for the
+# retire flag after the line that passes each budget.
 @pytest.mark.parametrize(
-    "budget",
-    [{"token_budget": RETIRED_SPEND.tokens - 1}, {"dollar_budget": 0.1}],
+    ("budget", "split"),
+    [({"token_budget": RETIRED_SPEND.tokens - 1}, 2), ({"dollar_budget": 0.1}, 3)],
     ids=["tokens", "dollars"],
 )
 def test_a_budget_triggered_retire_ends_the_pass_with_budget_and_runs_no_fresh_lead(
@@ -1124,15 +1193,21 @@ def test_a_budget_triggered_retire_ends_the_pass_with_budget_and_runs_no_fresh_l
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
     budget: dict[str, object],
+    split: int,
 ) -> None:
-    # Breaks when: a lead retired on budget is followed by a fresh lead like any RETIRED.
+    # Breaks when: a lead retired on budget is followed by a fresh lead like any RETIRED, or by
+    # a next pass; or when on_event never retires the lead on its live spend.
     queue = queue_file(WORKBOARD)
-    scenario(_lines(DONE_LEAD))
+    scenario(_lines(RETIRED_LEAD))
     _only_first_open(queue, cfg)
     cfg = dataclasses.replace(cfg, **budget)
-    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    # The lead creates the stop file as it starts: a next pass would stop at step 1 with
+    # STOP_FILE, so only the pass ending on the budget-triggered retire returns BUDGET.
+    stop_file = State.open(queue, cfg).stop_file
+    cfg = _shimmed(cfg, tmp_path, split=split, touch=stop_file)
     assert run(queue, cfg) == ExitCode.BUDGET
-    assert len(_runs(tmp_path, "lead")) == 1
+    assert _shimmed_runs(tmp_path) == 1
+    assert _record(tmp_path, 0)["appeared"] != []
 
 
 def test_a_context_triggered_retire_does_not_end_the_pass_with_budget(
@@ -1202,6 +1277,7 @@ def test_a_budget_triggered_retire_sends_one_stopped_ping(
     cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD)])
     assert run(queue, cfg) == ExitCode.BUDGET
     assert len(_pings(tmp_path)) == 1
+    assert _pings(tmp_path)[0][0].startswith("relay ")
 
 
 def test_a_stop_file_while_waiting_sends_one_stopped_ping(
@@ -1223,3 +1299,64 @@ def test_a_stop_file_while_waiting_sends_one_stopped_ping(
     pings = _pings(tmp_path)
     assert len(pings) == 1
     assert pings[0][0].startswith("relay ")
+
+
+def _stopped_message(cfg: Config, base: Path, variant: str, scenario: Callable[[list[str]], Path]) -> str:
+    """Run the WORKBOARD queue, in a directory of its own under `base`, to the stop `variant`
+    names, and return its one stopped ping with that directory's path written as `<dir>`."""
+    where = base / variant
+    where.mkdir()
+    queue = where / WORKBOARD
+    queue.write_bytes((FIXTURES / WORKBOARD).read_bytes())
+    record = where / "pings.jsonl"
+    cfg = dataclasses.replace(
+        cfg,
+        state_root=where / "state",
+        ping_command=[sys.executable, "-c", _RECORD, str(record), "{message}"],
+    )
+    if variant == "budget-retire":
+        _only_first_open(queue, cfg)
+        cfg = dataclasses.replace(cfg, token_budget=RETIRED_SPEND.tokens - 1)
+        assert run(queue, _sequenced(cfg, where, [_step(RETIRED_LEAD)])) == ExitCode.BUDGET
+    elif variant == "stop-file-waiting":
+        scenario(_lines(DONE_LEAD))
+        state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
+        loop = _Background(queue, cfg)
+        try:
+            time.sleep(SETTLE)
+            assert loop.still_running()
+            state.stop_file.touch()
+            assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
+        finally:
+            state.stop_file.touch()
+            loop.thread.join(15)
+    else:
+        codes = {"stop-file": ExitCode.STOP_FILE, "budget": ExitCode.BUDGET,
+                 "queue-empty": ExitCode.QUEUE_EMPTY, "failed-twice": ExitCode.FAILED_TWICE}
+        scenario(_lines(NO_STATUS_LEAD if variant == "failed-twice" else DONE_LEAD))
+        assert run(queue, _stop_on(variant, queue, cfg)) == codes[variant]
+    pings = _pings(where)
+    assert len(pings) == 1, (variant, pings)
+    message = pings[0][0]
+    assert message.startswith("relay "), message
+    for path in {str(where.resolve()), str(where)}:
+        message = message.replace(path, "<dir>")
+    return message
+
+
+def test_each_kind_of_stop_sends_a_stopped_ping_unlike_every_other_kinds(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: ping.stopped is called with one reason for every stop, or two kinds of stop
+    # share one, so the owner cannot tell from the ping why Relay stopped.
+    kinds = {
+        "stop-file": ["stop-file", "stop-file-waiting"],
+        "budget": ["budget", "budget-retire"],
+        "queue-empty": ["queue-empty"],
+        "failed-twice": ["failed-twice"],
+    }
+    messages = {kind: [_stopped_message(cfg, tmp_path, v, scenario) for v in variants] for kind, variants in kinds.items()}
+    for kind, mine in messages.items():
+        for other, theirs in messages.items():
+            if other != kind:
+                assert not set(mine) & set(theirs), (kind, mine, other, theirs)
