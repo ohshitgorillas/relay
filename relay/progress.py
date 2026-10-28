@@ -70,15 +70,15 @@ def retiring(
     if who == "ask":
         return
     if why == "context":
-        _write(f"lead {sid}: asked to retire at {tokens} context tokens")
+        _write(f"{who} {sid}: asked to retire at {tokens} context tokens")
     else:
-        _write(f"lead {sid}: asked to retire, budget spent")
+        _write(f"{who} {sid}: asked to retire, budget spent")
 
 
 def killing(sid: str, tokens: int, who: Kind = "lead") -> None:
     if who == "ask":
         return
-    _write(f"lead {sid}: killed at {tokens} context tokens, past the hard ceiling")
+    _write(f"{who} {sid}: killed at {tokens} context tokens, past the hard ceiling")
 
 
 def recut_started(sid: str, reason: str) -> None:
