@@ -9,11 +9,21 @@ from typing import Callable
 
 import pytest
 
+import relay.state as state_module
 from relay.config import Config
 from relay.errors import LockedError
 from relay.state import SectionState, State
 
 QUEUE = "workboard-queue.md"
+
+
+def _patch_replace(monkeypatch: pytest.MonkeyPatch, fake: Callable[..., None]) -> None:
+    """Swap `os.replace` for `fake`, however `relay.state` imported it (`os.replace` or `from os import replace`)."""
+    real = os.replace
+    for name, value in list(vars(state_module).items()):
+        if value is real:
+            monkeypatch.setattr(state_module, name, fake)
+    monkeypatch.setattr(os, "replace", fake)
 
 
 def _dir(state: State) -> Path:
@@ -190,12 +200,12 @@ def test_every_write_replaces_a_file_in_the_queues_directory_from_a_temp_file(
         calls.append((Path(os.fsdecode(src)), Path(os.fsdecode(dst))))
         real_replace(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", recording_replace)
+    _patch_replace(monkeypatch, recording_replace)
     WRITES[write](state)
     assert calls
     for src, dst in calls:
         assert src != dst
-        assert dst.parent == _dir(state)
+        assert dst.is_relative_to(_dir(state))
         assert not src.exists()
 
 
@@ -208,7 +218,7 @@ def test_a_write_whose_replace_fails_leaves_the_earlier_record_intact(
     def failing_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
         raise OSError("replace failed")
 
-    monkeypatch.setattr(os, "replace", failing_replace)
+    _patch_replace(monkeypatch, failing_replace)
     with pytest.raises(OSError):
         state.park("s1", "Which port?")
     monkeypatch.undo()
