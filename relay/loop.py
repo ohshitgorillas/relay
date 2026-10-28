@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from relay import git, ping, progress
+from relay import git, ping, progress, research
 from relay.check import owner_text, run_checks
 from relay.config import Config
-from relay.errors import ExitCode
+from relay.errors import ExitCode, ResearchError
 from relay.ledger import Kind, Ledger, Spend
-from relay.prompts import check_feedback, lead_prompt, recut_brief
+from relay.prompts import ask_brief, check_feedback, lead_prompt, recut_brief, research_brief
 from relay.queue import Section, blocked_by, parse_queue
 from relay.runner import RunResult, run_agent
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
@@ -100,17 +100,38 @@ def _run_section(
     if current.check_pending:
         _verify(cfg, queue, state, ledger, cwd, section, state.pending_check_log(sid))
         return None
+    m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
+    if spent:
+        return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
     resume = current.last_session or state.last_session_any
     answer = state.take_answer(sid)
     feedback = state.take_check_feedback(sid)
-    prompt = lead_prompt(queue, section, resume, answer, retire_flag, feedback)
-    watch = _watcher(cfg, ledger, since, "lead", sid, cwd)
+    prompt = lead_prompt(
+        queue,
+        section,
+        resume,
+        answer,
+        retire_flag,
+        feedback,
+        research.block(m) if m is not None else None,
+    )
 
     retire_flag.unlink(missing_ok=True)
     progress.lead_started(sid, resume, answer is not None)
-    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, watch.on_event, retire_flag)
+    result, watch = _run(
+        cfg,
+        state,
+        ledger,
+        since,
+        "lead",
+        sid,
+        cfg.lead_command,
+        prompt,
+        cwd,
+        retire_flag,
+        m.commit if m is not None else None,
+    )
     session = result.stream.session_id
-    ledger.append("lead", sid, session, result.stream.spend)
     state.set_last_log(sid, result.log)
     if session is not None:
         state.set_last_session(sid, session)
@@ -143,6 +164,117 @@ def _run_section(
     return None
 
 
+def _section_cwd(cwd: Path, sid: str) -> Path:
+    """Where a section's check and research run: its worktree, else `cwd`."""
+    return git.section_worktree(cwd, sid) or cwd
+
+
+def _run(
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float | None,
+    kind: Kind,
+    sid: str,
+    argv: list[str],
+    text: str,
+    cwd: Path,
+    flag: Path,
+    map_commit: str | None = None,
+) -> tuple[RunResult, _Watch]:
+    """The one agent run: watch it, run it, ledger it. Returns the result and its watch."""
+    watch = _watcher(cfg, ledger, since, kind, sid, cwd)
+    result = run_agent(argv, text, cwd, state.run_dir, watch.on_event, flag)
+    ledger.append(
+        kind,
+        sid,
+        result.stream.session_id,
+        result.stream.spend,
+        map_commit,
+        result.stream.activity.agents,
+    )
+    return result, watch
+
+
+def _research(
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    queue: Path,
+    section: Section,
+) -> tuple[research.Map | None, bool]:
+    """The section's map and whether the budget ran out in research; None on no map.
+
+    Holds the section's research lock, so a `relay ask` never meets a map half-refreshed.
+    """
+    sid = section.id
+    where = _section_cwd(cwd, sid)
+    with state.research_lock(sid):
+        saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.stale(saved, where):
+            progress.map_reused(sid, saved)
+            return saved, False
+        state.drop_map(sid)
+        commit = git.head(where)
+        if commit is None:
+            return None, False
+        flag = state.research_flag(sid)
+        flag.unlink(missing_ok=True)
+        progress.research_started(sid, where)
+        result, watch = _run(
+            cfg,
+            state,
+            ledger,
+            since,
+            "research",
+            sid,
+            cfg.research_command,
+            research_brief(queue, section, flag, cfg),
+            where,
+            flag,
+        )
+        state.set_research_session(sid, result.stream.session_id)
+        failed = result.killed or result.exit_code != 0
+        m = None if failed else research.parse_map(sid, commit, result.stream.result_text, cfg)
+        if m is not None:
+            research.save(m, state.map_path(sid))
+        progress.research_finished(sid, result, m)
+        return m, watch.budget_hit
+
+
+def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
+    """Put `question` to the section's researcher and return its answer; ResearchError without one."""
+    state = State.open(queue, cfg)
+    with state.research_lock(sid):
+        session = state.section(sid).research_session
+        if session is None:
+            raise ResearchError(f"section {sid} has no researcher to ask")
+        state.run_dir.mkdir(parents=True, exist_ok=True)
+        cwd = _git_top(queue.parent)
+        flag = state.research_flag(sid)
+        flag.unlink(missing_ok=True)
+        result, _ = _run(
+            cfg,
+            state,
+            Ledger(state.ledger_path),
+            None,
+            "ask",
+            sid,
+            [*cfg.research_command, "--resume", session],
+            ask_brief(question, flag, cfg),
+            _section_cwd(cwd, sid),
+            flag,
+        )
+        if result.killed or result.exit_code != 0:
+            raise ResearchError(f"the researcher for section {sid} failed")
+        answer = research.parse_answer(result.stream.result_text, cfg)
+        if answer is None:
+            raise ResearchError(f"the researcher for section {sid} gave no answer")
+        return answer
+
+
 @dataclass
 class _Watch:
     on_event: Callable[[StreamState], Literal["go", "retire", "kill"]]
@@ -151,7 +283,7 @@ class _Watch:
 
 
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float, who: Kind, sid: str, repo: Path
+    cfg: Config, ledger: Ledger, since: float | None, who: Kind, sid: str, repo: Path
 ) -> _Watch:
     """The run_agent callback, with flags set when a budget ran out or an idle lead was killed."""
     retiring = [False]
@@ -167,7 +299,7 @@ def _watcher(
             progress.killing(sid, stream.context_tokens)
             return "kill"
         why: Literal["context", "budget"] | None = None
-        if ledger.over(cfg, stream.spend, since) is not None:
+        if since is not None and ledger.over(cfg, stream.spend, since) is not None:
             watch.budget_hit = True
             why = "budget"
         elif stream.context_tokens >= cfg.context_limit:
@@ -211,7 +343,7 @@ def _verify(
 ) -> None:
     """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
     sid = section.id
-    where = git.section_worktree(cwd, sid) or cwd
+    where = _section_cwd(cwd, sid)
     progress.check_started(sid, len(section.checks), where)
     result = run_checks(cfg, section, where, check_log)
     ledger.append_check(sid, result)
@@ -254,11 +386,13 @@ def _recut(
     """Run the divvyer's recut; True when it failed and that was the section's second failure."""
     brief = recut_brief(queue, section, reason, lead.log)
     before = parse_queue(queue)
-    watch = _watcher(cfg, ledger, since, "recut", section.id, cwd)
     progress.recut_started(section.id, reason)
-    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, watch.on_event, retire_flag)
-    ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
+    result, _ = _run(
+        cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief, cwd, retire_flag
+    )
     after = parse_queue(queue)
+    if section.id not in {s.id for s in after}:
+        state.drop_map(section.id)
     changed = after != before
     progress.recut_finished(section.id, result, changed)
     known = {s.id for s in before}
