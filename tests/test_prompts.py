@@ -302,10 +302,13 @@ def test_lead_prompt_with_a_map_says_put_it_in_every_brief() -> None:
 
 
 def test_lead_prompt_with_a_map_routes_needs_through_relay_ask() -> None:
-    # Breaks when: the lead is not told to run `relay ask` and pass the answer on.
+    # Breaks when: the lead is not told to run `relay ask` and pass the answer on, or the
+    # command names another queue or section, or keeps the `<queue> <sid>` placeholders.
     prompt = _with_map()
-    assert "When an agent reports it needs more, run `relay ask " in prompt
-    assert MAP_ROUTE in prompt
+    route = f'When an agent reports it needs more, run `relay ask {QUEUE} s4 "<question>"`'
+    start = prompt.find(route)
+    assert start != -1
+    assert prompt.find(MAP_ROUTE, start + len(route)) != -1
 
 
 def test_lead_prompt_carries_the_map_block_verbatim() -> None:
@@ -359,7 +362,10 @@ def test_research_brief_holds_the_queue_path(fake_cfg: Config) -> None:
 
 def test_research_brief_holds_the_section_id_and_body_verbatim(fake_cfg: Config) -> None:
     # Breaks when: the section id is left out, or the body is reflowed, stripped or escaped.
-    brief = _research(fake_cfg)
+    # The flag path here holds no section id, so the id can only come from the section.
+    flag = Path("/state/relay/work-repo-docs-queue-md/runs/research-flag")
+    assert "s4" not in str(flag)
+    brief = research_brief(QUEUE, _section(), flag, _capped(fake_cfg))
     assert "s4" in brief
     assert BODY in brief
 
