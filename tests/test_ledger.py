@@ -497,6 +497,7 @@ def _check(verdict: str = "fail", exit_code: int | None = 1) -> CheckResult:
         tail="FAILED tests/test_a.py::test_a\n",
         log=Path("/state/runs/3.check"),
         verdict=verdict,
+        timeout=1800.0 if exit_code is None else None,
     )
 
 

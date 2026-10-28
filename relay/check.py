@@ -26,7 +26,11 @@ class CheckResult:
     tail: str
     log: Path | None
     verdict: Verdict
-    timeout: float = 0.0  # seconds the command was allowed; worded in owner_text on a timeout
+    timeout: float | None = None  # seconds the command was allowed; required when timed_out
+
+    def __post_init__(self) -> None:
+        if self.timed_out and self.timeout is None:
+            raise ValueError("a timed-out CheckResult records the limit it timed out at")
 
 
 def _tail(text: str) -> str:
@@ -51,12 +55,11 @@ def run_checks(cfg: Config, section: Section, cwd: Path, log: Path) -> CheckResu
         outcome = run_command(command, cwd, log, cfg.check_timeout)
         if outcome.exit_code == 0 and not outcome.timed_out:
             continue
-        tail = _tail(_read_from(log, offset) if log.exists() else "")
+        tail = _tail(_read_from(log, offset))
         verdict = classify(cfg, outcome.exit_code, outcome.timed_out, tail)
-        return CheckResult(
-            command, outcome.exit_code, outcome.timed_out, tail, log, verdict, cfg.check_timeout
-        )
-    return CheckResult(section.checks[-1], 0, False, "", log, "pass", cfg.check_timeout)
+        limit = cfg.check_timeout if outcome.timed_out else None
+        return CheckResult(command, outcome.exit_code, outcome.timed_out, tail, log, verdict, limit)
+    return CheckResult(section.checks[-1], 0, False, "", log, "pass")
 
 
 def classify(
@@ -70,7 +73,8 @@ def classify(
     return "fail"
 
 
-def _how(result: CheckResult) -> str:
+def outcome_text(result: CheckResult) -> str:
+    """The one wording of how a check ended: "timed out after <s>s" or "exit <n>"."""
     if result.timed_out:
         return f"timed out after {result.timeout:g}s"
     return f"exit {result.exit_code}"
@@ -78,7 +82,7 @@ def _how(result: CheckResult) -> str:
 
 def owner_text(result: CheckResult, failures: int) -> str:
     """The question parked for the owner: command, outcome, count, log, tail."""
-    parts = [f"Check failed: {result.command}", _how(result)]
+    parts = [f"Check failed: {result.command}", outcome_text(result)]
     if result.verdict == "fail":
         parts.append(f"failed check {failures}")
     parts.append(f"log: {result.log}")

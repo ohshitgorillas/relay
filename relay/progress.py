@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from relay.agents import Event, duration
+from relay.check import outcome_text
 from relay.config import Config
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
@@ -129,11 +130,11 @@ def check_finished(sid: str, result: "CheckResult") -> None:
     elif result.verdict == "none":
         what = "none to run"
     elif result.verdict == "outside":
-        what = f"outside the code: exit {result.exit_code}"
+        what = f"outside the code: {outcome_text(result)}"
     elif result.timed_out:
-        what = "timed out"
+        what = outcome_text(result)
     else:
-        what = f"failed: exit {result.exit_code}"
+        what = f"failed: {outcome_text(result)}"
     _write(f"check {sid}: {what}")
 
 

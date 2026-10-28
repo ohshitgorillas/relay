@@ -832,11 +832,13 @@ def test_check_finished_failed_shows_the_exit(capsys: pytest.CaptureFixture[str]
 
 
 def test_check_finished_timed_out(capsys: pytest.CaptureFixture[str]) -> None:
-    # Breaks when: a timed-out check reads "failed: exit None" instead of "timed out".
+    # Breaks when: a timed-out check reads "failed: exit None" or "failed: <outcome_text>"
+    # instead of "<outcome_text>", or its limit is not worded "timed out after <s>s" with s as %g
+    # (docs/superpowers/specs/relay-check-design.md:68 and :220).
     progress.check_finished(
-        "s4", _check(verdict="fail", exit_code=None, timed_out=True)
+        "s4", _check(verdict="fail", exit_code=None, timed_out=True, timeout=1800.0)
     )
-    assert _line(capsys) == "check s4: timed out"
+    assert _line(capsys) == "check s4: timed out after 1800s"
 
 
 def test_check_finished_outside_the_code(capsys: pytest.CaptureFixture[str]) -> None:

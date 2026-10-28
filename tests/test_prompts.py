@@ -187,6 +187,8 @@ def test_lead_prompt_with_check_feedback_keeps_everything_else() -> None:
 
 
 def _check_result(**changes: object) -> CheckResult:
+    if changes.get("timed_out") and "timeout" not in changes:
+        changes["timeout"] = 1800.0
     result = CheckResult(
         command="uv run pytest tests/test_x.py",
         exit_code=1,

@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from relay.check import outcome_text
 from relay.queue import Section
 from relay.status import KINDS, Kind, TEXT_NAMES
 
@@ -61,5 +62,4 @@ def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> s
 
 
 def check_feedback(result: "CheckResult") -> str:
-    how = "timed out" if result.timed_out else f"exit {result.exit_code}"
-    return f"{result.command}\n{how}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
+    return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"

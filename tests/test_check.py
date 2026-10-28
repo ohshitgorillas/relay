@@ -350,6 +350,8 @@ TAIL = "FAILED tests/test_x.py::test_y - AssertionError\n== one failed ==\n"
 
 
 def _result(**changes: object) -> CheckResult:
+    if changes.get("timed_out") and "timeout" not in changes:
+        changes["timeout"] = 1800.0
     result = CheckResult(
         command="make check",
         exit_code=1,
