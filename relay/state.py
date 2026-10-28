@@ -156,3 +156,11 @@ class State:
     @property
     def run_dir(self) -> Path:
         return self._dir / "runs"
+
+    @property
+    def ledger_path(self) -> Path:
+        return self._dir / "ledger.jsonl"
+
+    @property
+    def retire_flag(self) -> Path:
+        return self.run_dir / "retire"

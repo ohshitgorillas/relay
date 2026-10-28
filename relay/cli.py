@@ -78,7 +78,7 @@ def _status(args: argparse.Namespace) -> int:
     state = State.open(queue, cfg)
     for section in parse_queue(queue):
         print(f"{section.id}  {state.section(section.id).status}")
-    path = state.stop_file.parent / "ledger.jsonl"
+    path = state.ledger_path
     ledger = Ledger(path)
     week = ledger.total(time.time() - _WEEK)
     total = ledger.total(None)

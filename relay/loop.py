@@ -43,10 +43,10 @@ def run(queue: Path, cfg: Config) -> int:
 
 def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
     since = time.time()
-    ledger = Ledger(state.stop_file.parent / "ledger.jsonl")
+    ledger = Ledger(state.ledger_path)
     cwd = _git_top(queue.parent)
     state.run_dir.mkdir(parents=True, exist_ok=True)
-    retire_flag = state.run_dir / "retire"
+    retire_flag = state.retire_flag
 
     while True:
         if state.stop_file.exists():
