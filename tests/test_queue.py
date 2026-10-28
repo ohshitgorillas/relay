@@ -183,9 +183,21 @@ def test_checks_skip_lines_inside_a_fenced_block(queue_file: Callable[[str], Pat
 def test_came_from_is_the_header_from_id_and_it_is_removed_from_the_title(
     queue_file: Callable[[str], Path],
 ) -> None:
-    section = _check_sections(queue_file)["s4a"]
+    path = queue_file("check-queue.md")
+    section = {s.id: s for s in parse_queue(path)}["s4a"]
     assert section.came_from == "s4"
     assert "from:" not in section.title
+    # The same queue with s4a's whole `from: s4` field cut from its header: the title the
+    # parser gives that header is s4a's title with the field removed and nothing else.
+    header = "section s4a | lead | steps: 4 | from: s4 | size: "
+    text = path.read_text()
+    assert text.count(header) == 1
+    without = path.with_name("check-queue-without-from.md")
+    without.write_text(text.replace(header, "section s4a | lead | steps: 4 | size: "))
+    plain = {s.id: s for s in parse_queue(without)}["s4a"]
+    assert plain.came_from is None
+    assert plain.title
+    assert section.title == plain.title
 
 
 def test_came_from_is_none_without_a_from_field(queue_file: Callable[[str], Path]) -> None:

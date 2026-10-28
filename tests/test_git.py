@@ -55,16 +55,22 @@ S1_FOR_EACH_REF = "refs/heads/lead/s1 5555555555555555555555555555555555555555\n
 def _fake_capture(
     monkeypatch: pytest.MonkeyPatch, answer: tuple[int | None, str]
 ) -> list[tuple[list[str], Path, float]]:
-    """Replace `runner.capture` (and any name `relay.git` bound to it) with a recorder answering `answer`."""
+    """Replace `runner.capture` with a recorder answering `answer`.
+
+    Every name in `relay.git` bound to `runner.capture` is replaced too, whatever that name
+    is, so the fake holds however `relay.git` imports it.
+    """
     calls: list[tuple[list[str], Path, float]] = []
 
     def fake(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str]:
         calls.append((list(argv), Path(cwd), timeout))
         return answer
 
+    real = relay.runner.capture
     monkeypatch.setattr(relay.runner, "capture", fake)
-    if hasattr(relay.git, "capture"):
-        monkeypatch.setattr(relay.git, "capture", fake)
+    for name, value in list(vars(relay.git).items()):
+        if value is real:
+            monkeypatch.setattr(relay.git, name, fake)
     return calls
 
 
