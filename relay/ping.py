@@ -1,17 +1,29 @@
 """The one place an owner ping is worded and sent."""
 
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from relay.config import Config
 
 
 def ping(cfg: Config, message: str) -> None:
-    raise NotImplementedError
+    argv = [os.path.expanduser(a).replace("{message}", message) if a != "{message}" else message for a in cfg.ping_command]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        print(f"relay: ping failed: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        print(f"relay: ping failed (exit {result.returncode}): {result.stderr.strip()}", file=sys.stderr)
 
 
 def needs_owner(cfg: Config, queue: Path, sid: str, question: str) -> None:
-    raise NotImplementedError
+    ping(cfg, f"relay {queue.name}: section {sid} needs the owner: {question}")
 
 
 def stopped(cfg: Config, queue: Path, reason: str, detail: str) -> None:
-    raise NotImplementedError
+    ping(cfg, f"relay {queue.name}: stopped {reason}: {detail}")
