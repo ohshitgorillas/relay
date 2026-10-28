@@ -198,6 +198,11 @@ def test_came_from_is_the_header_from_id_and_it_is_removed_from_the_title(
     assert plain.came_from is None
     assert plain.title
     assert section.title == plain.title
+    # docs/superpowers/specs/relay-loop-design.md: every header field but `depends:` and
+    # `done` is kept in `title`, joined by ` | `; relay-check-design.md: `from:` is removed.
+    assert section.title == (
+        "lead | steps: 4 | size: lead: tokens: 900000.0 seconds: 600.0 overruns: 0 refusals: 0"
+    )
 
 
 def test_came_from_is_none_without_a_from_field(queue_file: Callable[[str], Path]) -> None:
