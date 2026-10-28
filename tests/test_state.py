@@ -288,3 +288,41 @@ def test_set_answer_on_a_parked_section_sets_status_back_to_open(queue: Path, fa
     section = State.open(queue, fake_cfg).section("s7")
     assert section.status == "open"
     assert section.answer == "Port 8080."
+
+
+# Order 15, behavior 1: `ledger_path` is `<dir>/ledger.jsonl` (design: Modules, `relay/state.py`).
+# Order 15, behavior 2: `retire_flag` is `<dir>/runs/retire`.
+# `getattr` with a default keeps a missing accessor an assertion failure, not an AttributeError.
+
+
+def test_ledger_path_is_ledger_jsonl_in_the_queues_directory(queue: Path, fake_cfg: Config) -> None:
+    state = State.open(queue, fake_cfg)
+    assert getattr(state, "ledger_path", None) == _dir(state) / "ledger.jsonl"
+
+
+def test_ledger_path_is_the_same_file_for_a_reopened_state_and_differs_per_queue(
+    queue: Path, other_queue: Path, fake_cfg: Config
+) -> None:
+    first = getattr(State.open(queue, fake_cfg), "ledger_path", None)
+    again = getattr(State.open(queue, fake_cfg), "ledger_path", None)
+    other = getattr(State.open(other_queue, fake_cfg), "ledger_path", None)
+    assert first is not None
+    assert first == again
+    assert first != other
+
+
+def test_retire_flag_is_retire_inside_the_run_dir(queue: Path, fake_cfg: Config) -> None:
+    state = State.open(queue, fake_cfg)
+    assert getattr(state, "retire_flag", None) == _dir(state) / "runs" / "retire"
+    assert getattr(state, "retire_flag", None) == state.run_dir / "retire"
+
+
+def test_retire_flag_is_the_same_file_for_a_reopened_state_and_differs_per_queue(
+    queue: Path, other_queue: Path, fake_cfg: Config
+) -> None:
+    first = getattr(State.open(queue, fake_cfg), "retire_flag", None)
+    again = getattr(State.open(queue, fake_cfg), "retire_flag", None)
+    other = getattr(State.open(other_queue, fake_cfg), "retire_flag", None)
+    assert first is not None
+    assert first == again
+    assert first != other
