@@ -751,8 +751,8 @@ def test_capture_kills_and_reaps_the_group_at_timeout(tmp_path: Path) -> None:
 # Runs one kill of a child in a fresh interpreter, with `os.kill`, `os.killpg` and
 # `os.waitpid` wrapped to record every call in order. `a["signum"]` is raised in Relay at
 # the first such call after the kill's first signal ("grace": the child ignores SIGTERM, so
-# Relay is in its grace wait) or after the child is reaped ("reaped": at Relay's next such
-# call, or as the kill returns when it makes none). The handler installed before Relay's
+# Relay is in its grace wait) or inside the reaping `waitpid` right after it returns
+# ("reaped": while Relay's kill is still running). The handler installed before Relay's
 # raises or returns per `a["earlier"]`.
 KILL_DRIVER = """
 import json, os, signal, sys
@@ -823,6 +823,7 @@ def waitpid(pid, options):
     if got[0] != 0 and got[0] == child():
         state["reaped"] = True
         events.append(["reaped", got[0]])
+        land()
     return got
 
 
@@ -843,8 +844,6 @@ try:
     else:
         runner.run_agent(a["argv"], "p\\n", cwd, Path(a["run_dir"]), lambda s: "kill",
                          Path(a["retire"]))
-    # A kill that makes no call after the reap still has the signal land after it.
-    land()
 except BaseException as exc:
     outcome = type(exc).__name__
 finally:
@@ -905,7 +904,10 @@ def test_a_signal_landing_mid_kill_leaves_the_child_signalled_and_reaped_once(
     try:
         driver.wait(timeout=60)
         assert out.exists(), "the driver ended without recording the kill"
-        events = json.loads(out.read_text())["events"]
+        record = json.loads(out.read_text())
+        events = record["events"]
+        # Relay kills the group first, then the earlier handler decides how Relay goes on.
+        assert record["outcome"] == ("Earlier" if earlier == "raises" else "returned")
         child = _pid(pidfile)
         kinds = [event[0] for event in events]
         assert "landed" in kinds, "the signal never landed during the kill"
