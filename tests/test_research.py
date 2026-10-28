@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,12 +30,22 @@ MAP_LINES = MAP_TEXT[
     MAP_TEXT.index("MAP\n") : MAP_TEXT.index("END MAP") + len("END MAP")
 ].splitlines()
 
+# That block as Map.body holds it: its lines from `MAP` to `END MAP`, both included.
+MAP_BLOCK = "\n".join(MAP_LINES)
+
 ANSWER_TEXT = (
     "Looked it up.\n"
     "\n"
     "ANSWER\n"
     "relay/git.py:12 | head runs git rev-parse HEAD in the section worktree\n"
     "END ANSWER\n"
+)
+
+# Its block's lines from `ANSWER` to `END ANSWER`, both included.
+ANSWER_BLOCK = (
+    "ANSWER\n"
+    "relay/git.py:12 | head runs git rev-parse HEAD in the section worktree\n"
+    "END ANSWER"
 )
 
 
@@ -60,6 +71,7 @@ def test_the_fixture_map_parses(fake_cfg: Config) -> None:
     assert m is not None
     assert m.sid == SID
     assert m.commit == COMMIT
+    assert m.body == MAP_BLOCK
 
 
 def test_parse_map_none_without_result_text(fake_cfg: Config) -> None:
@@ -135,6 +147,16 @@ def test_parse_map_judges_the_last_block(fake_cfg: Config) -> None:
     assert parse_map(SID, COMMIT, MAP_TEXT + "\n" + bad, fake_cfg) is None
 
 
+def test_parse_map_takes_a_good_last_block_after_a_bad_one(fake_cfg: Config) -> None:
+    # Breaks when parse_map rejects the text because an earlier block is malformed, or reads
+    # lines from the first `MAP` to the last `END MAP`.
+    bad = "MAP\nrelay/state.py:1 | the state directory\nRead this file first.\nEND MAP\n"
+    m = parse_map(SID, COMMIT, bad + "\n" + MAP_TEXT, fake_cfg)
+    assert m is not None
+    assert m.files == ("relay/git.py", "relay/loop.py", "relay/research.py")
+    assert m.body == MAP_BLOCK
+
+
 def test_parse_map_takes_the_block_at_the_line_cap(fake_cfg: Config) -> None:
     # Breaks when the line cap rejects a block exactly cfg.map_max_lines lines long.
     cfg = dataclasses.replace(fake_cfg, map_max_lines=len(MAP_LINES))
@@ -149,17 +171,13 @@ def test_parse_map_none_over_the_line_cap(fake_cfg: Config) -> None:
 
 def test_parse_map_takes_the_block_at_the_char_cap(fake_cfg: Config) -> None:
     # Breaks when the character cap rejects a block exactly cfg.map_max_chars characters long.
-    m = parse_map(SID, COMMIT, MAP_TEXT, fake_cfg)
-    assert m is not None
-    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(m.body))
+    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(MAP_BLOCK))
     assert parse_map(SID, COMMIT, MAP_TEXT, cfg) is not None
 
 
 def test_parse_map_none_over_the_char_cap(fake_cfg: Config) -> None:
     # Breaks when the character cap is not checked, or is not read from cfg.map_max_chars.
-    m = parse_map(SID, COMMIT, MAP_TEXT, fake_cfg)
-    assert m is not None
-    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(m.body) - 1)
+    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(MAP_BLOCK) - 1)
     assert parse_map(SID, COMMIT, MAP_TEXT, cfg) is None
 
 
@@ -227,19 +245,30 @@ def test_parse_answer_none_on_a_map_alone(fake_cfg: Config) -> None:
     assert parse_answer(MAP_TEXT, fake_cfg) is None
 
 
+def test_parse_answer_gives_the_block_from_answer_to_end_answer(
+    fake_cfg: Config,
+) -> None:
+    # Breaks when parse_answer returns the whole result text, or drops the `ANSWER` or
+    # `END ANSWER` line.
+    assert parse_answer(ANSWER_TEXT, fake_cfg) == ANSWER_BLOCK
+
+
+def test_parse_answer_takes_the_last_block(fake_cfg: Config) -> None:
+    # Breaks when parse_answer takes the first of two blocks, or spans from the first
+    # `ANSWER` to the last `END ANSWER`.
+    first = "ANSWER\nrelay/state.py:1 | an earlier answer\nEND ANSWER\n"
+    assert parse_answer(first + "\n" + ANSWER_TEXT, fake_cfg) == ANSWER_BLOCK
+
+
 def test_parse_answer_takes_the_block_at_the_char_cap(fake_cfg: Config) -> None:
     # Breaks when the character cap rejects an answer exactly cfg.map_max_chars characters long.
-    answer = parse_answer(ANSWER_TEXT, fake_cfg)
-    assert answer is not None
-    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(answer))
-    assert parse_answer(ANSWER_TEXT, cfg) == answer
+    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(ANSWER_BLOCK))
+    assert parse_answer(ANSWER_TEXT, cfg) == ANSWER_BLOCK
 
 
 def test_parse_answer_none_over_the_char_cap(fake_cfg: Config) -> None:
     # Breaks when the answer's cap is not checked, or is not read from cfg.map_max_chars.
-    answer = parse_answer(ANSWER_TEXT, fake_cfg)
-    assert answer is not None
-    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(answer) - 1)
+    cfg = dataclasses.replace(fake_cfg, map_max_chars=len(ANSWER_BLOCK) - 1)
     assert parse_answer(ANSWER_TEXT, cfg) is None
 
 
@@ -278,25 +307,23 @@ def test_save_makes_the_parent_directory(fake_cfg: Config, tmp_path: Path) -> No
 
 
 def test_save_moves_a_temp_file_into_place_with_os_replace(
-    fake_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    fake_cfg: Config, tmp_path: Path
 ) -> None:
-    # Breaks when save writes the map file in place rather than by temp file and os.replace.
-    m = _fixture_map(fake_cfg)
+    # Breaks when save writes the map file in place rather than by temp file and os.replace,
+    # or leaves its temp file behind.
     path = tmp_path / "maps" / "s1.map"
-    calls: list[tuple[Path, Path]] = []
-    real = os.replace
-
-    def spy(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
-        calls.append((Path(src), Path(dst)))
-        real(src, dst)
-
-    monkeypatch.setattr(os, "replace", spy)
-    save(m, path)
-    assert len(calls) == 1
-    src, dst = calls[0]
-    assert dst == path
-    assert src != path
-    assert not src.exists()
+    save(_fixture_map(fake_cfg, commit="1" * 40), path)
+    old_text = path.read_text()
+    old_inode = path.stat().st_ino
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        save(_fixture_map(fake_cfg), path)
+        # The old file stays whole: a new file takes its name rather than being written over.
+        assert os.pread(fd, len(old_text) + 1, 0).decode() == old_text
+    finally:
+        os.close(fd)
+    assert path.stat().st_ino != old_inode
+    assert path.read_text().splitlines()[0] == f"map {SID} at {COMMIT}"
     assert sorted(p.name for p in path.parent.iterdir()) == ["s1.map"]
 
 
@@ -499,8 +526,8 @@ def test_block_rule_says_start_from_the_map_and_report_rather_than_search(
     m = _fixture_map(fake_cfg)
     text = block(m)
     rule = text[: text.index(f"map {SID} at {COMMIT}")].lower()
-    for word in ("map", "line", "report", "search", "researcher"):
-        assert word in rule, word
+    for word in ("map", "lines", "report", "search", "researcher"):
+        assert re.search(rf"\b{word}\b", rule), word
 
 
 def test_block_names_the_section_and_commit_of_its_map(fake_cfg: Config) -> None:
