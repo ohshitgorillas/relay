@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from relay.config import Config
 from relay.check import CheckResult, outcome_text
 from relay.queue import Section
 from relay.status import KINDS, Kind, TEXT_NAMES
@@ -18,6 +19,7 @@ def lead_prompt(
     answer: str | None,
     retire_flag: Path,
     check_feedback: str | None = None,
+    map_block: str | None = None,
 ) -> str:
     parts = [
         "You are a lead. Carry the queue section below through development until it is done.",
@@ -59,3 +61,13 @@ def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> s
 
 def check_feedback(result: CheckResult) -> str:
     return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
+
+
+def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> str:
+    """The researcher's brief: queue, section, caps, MAP form and the flag rule."""
+    raise NotImplementedError
+
+
+def ask_brief(question: str, flag: Path, cfg: Config) -> str:
+    """The follow-up brief: question, ANSWER form, cap and the flag rule."""
+    raise NotImplementedError

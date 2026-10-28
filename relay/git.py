@@ -37,3 +37,13 @@ def heads(repo: Path) -> dict[str, str]:
         if ref and obj:
             found[ref] = obj
     return found
+
+
+def head(cwd: Path) -> str | None:
+    """`git rev-parse HEAD` in `cwd`; None when git fails."""
+    raise NotImplementedError
+
+
+def changed(cwd: Path, commit: str, paths: tuple[str, ...]) -> bool | None:
+    """`git diff --name-only <commit> -- <paths>` in `cwd`: False when empty, True when output, None when git fails."""
+    raise NotImplementedError

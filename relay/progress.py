@@ -8,6 +8,7 @@ from typing import Literal
 from relay.agents import Event, duration
 from relay.check import CheckResult, outcome_text
 from relay.config import Config
+from relay.research import Map
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
 from relay.status import LeadStatus
@@ -89,7 +90,7 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
     _write(f"recut {sid}: finished {outcome} {_spend(result)}")
 
 
-def agent_event(who: Literal["lead", "recut"], sid: str, event: Event) -> None:
+def agent_event(who: Literal["lead", "recut", "research", "ask"], sid: str, event: Event) -> None:
     agent = event.agent
     if event.kind == "started":
         what = f"agent {agent.name} started"
@@ -141,3 +142,15 @@ def check_failed(sid: str, failures: int) -> None:
 
 def retired_idle(sid: str, tokens: int) -> None:
     _write(f"lead {sid}: retired at {tokens} context tokens, no commit since the retire flag")
+
+
+def research_started(sid: str, cwd: Path) -> None:
+    raise NotImplementedError
+
+
+def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
+    raise NotImplementedError
+
+
+def map_reused(sid: str, m: Map) -> None:
+    raise NotImplementedError

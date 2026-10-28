@@ -13,7 +13,11 @@ from typing import TYPE_CHECKING, Literal
 from relay.config import Config
 
 if TYPE_CHECKING:
+    from relay.agents import Agent
     from relay.check import CheckResult
+
+
+Kind = Literal["lead", "recut", "research", "ask"]
 
 
 @dataclass(frozen=True)
@@ -42,10 +46,12 @@ class Ledger:
 
     def append(
         self,
-        kind: Literal["lead", "recut"],
+        kind: Kind,
         section: str,
         session: str | None,
         spend: Spend,
+        map_commit: str | None = None,  # the map the run's prompt carried; null when none
+        agents: tuple["Agent", ...] = (),  # each subagent: {"name", "task_id", "total_tokens"}
     ) -> None:
         entry = {
             "time": time.time(),

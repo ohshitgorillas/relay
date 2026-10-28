@@ -36,6 +36,7 @@ class SectionState:
     check_failures: int = 0
     check_feedback: str | None = None
     check_pending: bool = False
+    research_session: str | None = None  # the researcher a follow-up resumes
 
 
 def _fresh() -> SectionState:
@@ -204,6 +205,27 @@ class State:
     @property
     def ledger_path(self) -> Path:
         return self._dir / "ledger.jsonl"
+
+    def map_path(self, sid: str) -> Path:
+        """<dir>/maps/<sid>.map"""
+        raise NotImplementedError
+
+    def research_flag(self, sid: str) -> Path:
+        """run_dir / "research-<sid>": the research runs' retire flag."""
+        raise NotImplementedError
+
+    def set_research_session(self, sid: str, session: str | None) -> None:
+        raise NotImplementedError
+
+    def drop_map(self, sid: str) -> None:
+        """Clear research_session and delete map_path(sid)."""
+        raise NotImplementedError
+
+    @contextlib.contextmanager
+    def research_lock(self, sid: str) -> Iterator[None]:
+        """Blocking flock on <dir>/research-<sid>.lock."""
+        raise NotImplementedError
+        yield
 
     @property
     def retire_flag(self) -> Path:

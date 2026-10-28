@@ -40,6 +40,9 @@ class Config:
     idle_ceiling: int = 0  # 0 asks for the default, 13/10 of context_limit
     check_timeout: float = 1800
     check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
+    research_command: list[str] | None = None  # default set in __post_init__ and load_config
+    map_max_lines: int = 150
+    map_max_chars: int = 12_000
 
     def __post_init__(self) -> None:
         if self.idle_ceiling == 0:
