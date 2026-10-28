@@ -460,3 +460,223 @@ def test_go_with_an_idle_ceiling_out_of_range_exits_with_usage_and_never_runs_th
     _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
     assert _exit(["go", str(queue), "--idle-ceiling", value]) == ExitCode.USAGE
     assert calls == []
+
+
+# `relay ask <queue> <section> <question>` (relay-research design, Modules, `relay/cli.py` and
+# `relay/loop.py` `ask`; Order 7): the answer printed, the session resumed, an `ask` ledger line;
+# only the answer on stdout, its progress nowhere; ResearchError (exit 1) when the section has
+# no research_session, the run fails or is killed, or there is no answer.
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+ASK_STREAM = "stream-ask.jsonl"  # session "sess-research-1", one assistant message, an ANSWER block
+ASK_SESSION = "sess-research-1"
+ASK_ANSWER = (
+    "ANSWER\n"
+    "relay/loop.py:208-213 | ask resumes the researcher under the research lock\n"
+    "relay/cli.py:228 | _COMMANDS routes ask to _ask\n"
+    "END ANSWER"
+)
+ASK_CONTEXT = 3 + 1200 + 5000  # the ask stream's one assistant message's context
+ASK_SPEND = Spend(tokens=3 + 1200 + 5000 + 40, dollars=0.125)
+NO_ANSWER_STREAM = "stream-error.jsonl"  # a result with no ANSWER block
+ASK_SID = "s2"
+QUESTION = "Where does the ask command resume the researcher?"
+
+# A research command that reads its prompt on stdin, appends `{"argv", "prompt"}` (argv after
+# its own three arguments) as one JSON line to the record path, runs the fake `claude` on the
+# same prompt with its stdout passed through, then exits with the given status.
+_ASK_SHIM = """\
+import json, subprocess, sys
+record, fake, code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+prompt = sys.stdin.read()
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[4:], "prompt": prompt}) + chr(10))
+subprocess.run([fake], input=prompt, text=True, check=True)
+sys.exit(code)
+"""
+
+
+def _ask_config(home: Path, cfg: Config, record: Path, exit_code: int = 0, **overrides: int) -> None:
+    """Rewrite the fake home's config file with `cfg`'s values, `overrides` on top, and a
+    research command that records each run to `record` and exits `exit_code`."""
+    research = [sys.executable, "-c", _ASK_SHIM, str(record), cfg.lead_command[0], str(exit_code)]
+    values: dict[str, object] = {
+        "context_limit": cfg.context_limit,
+        "hard_ceiling": cfg.hard_ceiling,
+        "poll_seconds": cfg.poll_seconds,
+        "map_max_chars": cfg.map_max_chars,
+    }
+    values.update(overrides)
+    text = "".join(f"{key} = {value}\n" for key, value in values.items())
+    (home / ".config" / "relay" / "config.toml").write_text(
+        text
+        + f"lead_command = {_toml_list(cfg.lead_command)}\n"
+        + f"recut_command = {_toml_list(cfg.recut_command)}\n"
+        + f"ping_command = {_toml_list(cfg.ping_command)}\n"
+        + f"research_command = {_toml_list(research)}\n"
+        + f"state_root = {json.dumps(str(cfg.state_root))}\n"
+    )
+
+
+def _asks(record: Path) -> list[dict[str, object]]:
+    if not record.exists():
+        return []
+    return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def _ledger_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
+    path = State.open(queue, cfg).ledger_path
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.fixture
+def asked(
+    queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Section s2 with a researcher session, the ask stream scripted, the shim research command
+    configured; returns the shim's record path."""
+    monkeypatch.chdir(tmp_path)
+    record = tmp_path / "ask-record.jsonl"
+    _ask_config(home, fake_cfg, record)
+    State.open(queue, fake_cfg).set_research_session(ASK_SID, ASK_SESSION)
+    scenario((FIXTURES_DIR / ASK_STREAM).read_text().splitlines())
+    return record
+
+
+
+def test_ask_prints_the_answer_and_exits_0(
+    asked: Path, queue: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: `relay ask` is not a command, prints nothing, or prints the result's prose
+    # around the ANSWER block, or the block without its ANSWER / END ANSWER lines.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert capsys.readouterr().out.rstrip("\n") == ASK_ANSWER
+
+
+def test_ask_resumes_the_sections_research_session_with_the_question(
+    asked: Path, queue: Path
+) -> None:
+    # Breaks when: ask starts a fresh researcher, resumes another section's or the lead's
+    # session, or leaves the question out of the brief.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    runs = _asks(asked)
+    assert len(runs) == 1
+    assert runs[0]["argv"][-2:] == ["--resume", ASK_SESSION]
+    assert QUESTION in str(runs[0]["prompt"])
+
+
+def test_ask_appends_one_ask_ledger_line_for_the_section_and_its_spend(
+    asked: Path, queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: the ask run is not ledgered, is ledgered under another kind or section, or
+    # its spend, session, map or agents are dropped.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    entries = _ledger_entries(queue, fake_cfg)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["kind"] == "ask"
+    assert entry["section"] == ASK_SID
+    assert entry["session"] == ASK_SESSION
+    assert entry["tokens"] == ASK_SPEND.tokens
+    assert entry["dollars"] == ASK_SPEND.dollars
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == []
+
+
+def test_ask_works_while_a_relay_go_holds_the_lock(
+    asked: Path, queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: ask takes the `relay go` lock, so it fails while the lead that asks runs.
+    holder = State.open(queue, fake_cfg)
+    holder.lock()
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert capsys.readouterr().out.rstrip("\n") == ASK_ANSWER
+
+
+def test_ask_prints_only_the_answer_and_no_progress(
+    asked: Path, queue: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: ask's run writes progress lines (agent events, started or finished lines)
+    # to stdout or stderr.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ASK_ANSWER + "\n"
+    assert captured.err == ""
+
+
+def test_ask_with_no_research_session_exits_1_and_runs_nothing(
+    queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: ask with no researcher to resume starts one anyway, exits 0 or another code,
+    # or prints an answer.
+    monkeypatch.chdir(tmp_path)
+    record = tmp_path / "ask-record.jsonl"
+    _ask_config(home, fake_cfg, record)
+    State.open(queue, fake_cfg).set_research_session("s3", ASK_SESSION)
+    scenario((FIXTURES_DIR / ASK_STREAM).read_text().splitlines())
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert capsys.readouterr().out == ""
+    assert _asks(record) == []
+    assert [e for e in _ledger_entries(queue, fake_cfg) if e.get("kind") == "ask"] == []
+
+
+def test_ask_whose_run_exits_non_zero_exits_1_and_prints_no_answer(
+    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a failed ask run's ANSWER block is still printed, or ask exits 0.
+    _ask_config(home, fake_cfg, asked, exit_code=1)
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_ask_whose_run_is_killed_at_the_hard_ceiling_exits_1_and_prints_no_answer(
+    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the context ceilings do not watch an ask run, or a killed run's answer is used.
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        context_limit=ASK_CONTEXT - 200,
+        idle_ceiling=ASK_CONTEXT - 100,
+        hard_ceiling=ASK_CONTEXT,
+    )
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_ask_whose_result_holds_no_answer_exits_1(
+    asked: Path,
+    queue: Path,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a result with no ANSWER block exits 0, or prints its prose as the answer.
+    scenario((FIXTURES_DIR / NO_ANSWER_STREAM).read_text().splitlines())
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_ask_whose_answer_is_over_map_max_chars_exits_1(
+    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the answer's cap is not cfg.map_max_chars, so an over-cap answer is printed.
+    _ask_config(home, fake_cfg, asked, map_max_chars=len(ASK_ANSWER) - 1)
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert capsys.readouterr().out == ""
