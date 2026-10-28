@@ -658,6 +658,18 @@ def test_recut_finished_killed_with_queue_unchanged(
     assert _line(capsys) == "recut s5: finished killed (1 tokens, $0.00)"
 
 
+@pytest.mark.parametrize("changed", [True, False], ids=["recut", "unchanged"])
+@pytest.mark.parametrize("exit_code", [-9, 137, 1, 0], ids=["sigkill", "137", "1", "0"])
+def test_recut_finished_killed_whatever_its_exit_code(
+    exit_code: int, changed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: "killed" is read from the exit code (None, -9) rather than result.killed, so a
+    # killed recut that came back with a code reads "exit <code>" or a queue outcome.
+    result = _result(exit_code=exit_code, killed=True, tokens=42, dollars=0.5)
+    progress.recut_finished("s5", result, changed)
+    assert _line(capsys) == "recut s5: finished killed (42 tokens, $0.50)"
+
+
 # Behavior 13: def needs_answer(sid: str, question: str) -> None: ...
 # "section <sid>: needs an answer: <question>"
 
