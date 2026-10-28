@@ -76,6 +76,12 @@ def _kill_and_reap(proc: subprocess.Popen) -> None:
         time.sleep(0.02)
 
 
+def _kill_live(live: list[subprocess.Popen]) -> None:
+    """Kill and reap the live child once: it leaves `live` first, so no guard kills it again."""
+    if live:
+        _kill_and_reap(live.pop(0))
+
+
 def run_agent(
     argv: list[str],
     stdin_text: str,
@@ -132,11 +138,11 @@ def run_agent(
                             retired = True
                             retire_flag.touch()
                 if killed:
-                    _kill_and_reap(proc)
+                    _kill_live(live)
                     exit_code = None
                 else:
                     exit_code = proc.wait()
-                    _kill_and_reap(proc)  # sweep stragglers in the group
+                    _kill_live(live)  # sweep stragglers in the group
             finally:
                 if proc.stdout is not None:
                     proc.stdout.close()
@@ -155,8 +161,7 @@ def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
     previous: dict[int, object] = {}
 
     def on_signal(signum: int, _frame: object) -> None:
-        if live:
-            _kill_and_reap(live[0])
+        _kill_live(live)
         signal.signal(signum, previous[signum])
         os.kill(os.getpid(), signum)
 
@@ -166,8 +171,7 @@ def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
     try:
         yield
     except BaseException:
-        if live:
-            _kill_and_reap(live[0])
+        _kill_live(live)
         raise
     finally:
         live.clear()
@@ -193,7 +197,7 @@ def run_command(command: str, cwd: Path, log: Path, timeout: float) -> CommandRe
             timed_out = False
         except subprocess.TimeoutExpired:
             exit_code, timed_out = None, True
-        _kill_and_reap(proc)  # the group dies with the shell, or at the timeout
+        _kill_live(live)  # the group dies with the shell, or at the timeout
     return CommandResult(exit_code=exit_code, timed_out=timed_out)
 
 
@@ -220,7 +224,7 @@ def capture(argv: list[str], cwd: Path, timeout: float) -> tuple[int | None, str
                 result: tuple[int | None, str] = (proc.returncode, out)
             except subprocess.TimeoutExpired:
                 result = (None, "")
-            _kill_and_reap(proc)
+            _kill_live(live)
         finally:
             if proc.stdout is not None:
                 proc.stdout.close()
