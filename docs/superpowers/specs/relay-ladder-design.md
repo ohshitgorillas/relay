@@ -4,19 +4,19 @@ Status: approved.
 
 ## Why
 
-When a lead ends `RECUT`, Relay has one move: the divvyer's recut (`relay/loop.py:127-129`). When a section from a recut asks again, Relay parks it and pings the owner (`relay/loop.py:121-126`). The owner then stops Relay, runs the architect and divvyer by hand, and restarts. Nothing in `relay/` runs the architect, reads a design path, caps a section's spend, or wakes a parked section. A section that waits on another can only park as `NEEDS-OWNER` (`relay/loop.py:130-133`), and it stays parked until the owner answers (`relay/loop.py:62-77`).
+When a lead ends `RECUT`, Relay has one move: the divvyer's recut (`relay/loop.py:155-157`). When a section from a recut asks again, Relay parks it and pings the owner (`relay/loop.py:151-154`). The owner then stops Relay, runs the architect and divvyer by hand, and restarts. Nothing in `relay/loop.py` runs the architect, reads the queue's design path, caps a section's spend, or wakes a parked section. A section that waits on another can only park as `NEEDS-OWNER` (`relay/loop.py:158-159`), and it stays parked until the owner answers (`relay/loop.py:64-80`).
 
-Copies and gaps this design closes. Line numbers are HEAD's `relay/loop.py`.
+Copies and gaps this design closes. Line numbers are HEAD's.
 
-- **What happens after RECUT**: two branches decide it, `relay/loop.py:121-126` and `relay/loop.py:127-129`, with the rule hidden in an `elif` order. The choice of rung moves to one pure function.
-- **Starting an agent run**: copies at `relay/loop.py:101-107` (lead) and `relay/loop.py:198-201` (recut). The research design's `_run` (`docs/superpowers/specs/relay-research-design.md`, Modules, `relay/loop.py`) replaces both. The architect run goes through that helper and gets no copy of its own.
-- **Agent commands**: built only in `relay/config.py`. `recut_command` derives from `lead_command` at `relay/config.py:163`. The architect's command follows the same pattern.
-- **Status words**: one list, `relay/status.py:6`, with text names at `relay/status.py:10`. The lead prompt prints the list from there (`relay/prompts.py:46-49`).
-- **Run kinds**: `relay/ledger.py:20`. A ledger line carries no rung (`relay/ledger.py:56-63`). Nothing sums one section's spend: `total` sums every line (`relay/ledger.py:125-136`).
-- **Budget retire**: one decision point, the watcher's `ledger.over` call (`relay/loop.py:157`; `relay/loop.py:170` in the working tree). A section cap retires at the same point.
-- **Queue header fields**: read only at `relay/queue.py:63-74`. That code reads `depends:`, `from:` and `done`. The queue's head line `design <path> | order <path> | main <commit>` (`docs/baley-queue.md:1`, `docs/queue.md:1`) is skipped, because `parse_queue` starts at the first `section` line (`relay/queue.py:45-51`). A lead section's header names its design steps (`docs/baley-queue.md:2`, `steps: 1, 2, 3, 4, 5, 6`), and that field ends up in the title.
-- **Held sections**: `blocked_by` (`relay/queue.py:98-110`) reads only the parked set the loop builds at `relay/loop.py:63`.
-- **Lineage**: `from_recut` (`relay/state.py:35`) is set only by `_recut` (`relay/loop.py:208-212`).
+- **What happens after RECUT**: two branches decide it, `relay/loop.py:151-154` and `relay/loop.py:155-157`, with the rule hidden in an `elif` order. The choice of rung moves to one pure function.
+- **Starting an agent run**: every agent run goes through `_run` (`relay/loop.py:172-196`), from the research design. The architect run goes through that helper and gets no copy of its own.
+- **Agent commands**: built only in `relay/config.py`. `recut_command` derives from `lead_command` at `relay/config.py:62-63`. The architect's command follows the same pattern.
+- **Status words**: one list, `relay/status.py:6`, with text names at `relay/status.py:10`. The lead prompt prints the list from there (`relay/prompts.py:9`, `relay/prompts.py:57`).
+- **Run kinds**: `relay/ledger.py:21`. A ledger line carries a rung only when one is given (`relay/ledger.py:57`, `relay/ledger.py:71-72`). `section_spend` (`relay/ledger.py:168-170`) sums one section's lines; `total` sums every line (`relay/ledger.py:155-156`).
+- **Budget retire**: one decision point, the watcher's `ledger.over` call (`relay/loop.py:302`). A section cap retires at the same point.
+- **Queue header fields**: read only in `parse_queue` (`relay/queue.py:51-124`), which reads `depends:`, `from:`, `done`, `steps:` and `cap:` (`relay/queue.py:25-29`). The queue's head line `design <path> | order <path> | main <commit>` (`docs/baley-queue.md:1`, `docs/queue.md:1`) is read only by `queue_design` (`relay/queue.py:142-151`). A lead section's header names its design steps (`docs/baley-queue.md:2`, `steps: 1, 2, 3, 4, 5, 6`), and that field stays in the title.
+- **Held sections**: `blocked_by` (`relay/queue.py:127-139`) reads only the parked set the loop builds at `relay/loop.py:65`.
+- **Lineage**: `from_recut` (`relay/state.py:35`) is set only by `mark_from_recut` (`relay/state.py:210-212`), which only `_recut` calls (`relay/loop.py:404-406`).
 
 This design builds on two approved designs. From the check design it uses `_park`, `_verify`, the `_watcher` that returns `_Watch`, and `CHECK_LIMIT` (`relay/state.py:20`). From the research design it uses `_run` and `_section_cwd`. Both designs' loop steps land before this design's loop step. The three-failed-checks park (`_verify`) is unchanged and is one of rung 3's limits.
 
@@ -53,10 +53,11 @@ class Climb:
     why: str            # rung 3: the question parked for the owner; rungs 1 and 2: the progress text
 
 
-def climb(kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None) -> Climb:
+def climb(kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None, sid: str) -> Climb:
     """RECUT on a section that is neither from_recut nor design_changed: rung 1.
     RECUT on a from_recut section, or DESIGN, when not design_changed and design is not None: rung 2.
-    design_changed: rung 3, "the ladder ran out: section <sid> already had its design change".
+    design_changed: rung 3, "the ladder ran out: section <sid> already had its design change",
+    with <sid> the `sid` argument.
     design None at rung 2: rung 3, "no design to amend: the queue names none"."""
 
 
@@ -237,7 +238,7 @@ def woken(sid: str, blocker: str) -> None: ...             # "section <sid>: wok
 ```python
 def _climb(queue, cfg, state, ledger, since, cwd, section, kind: Literal["RECUT", "DESIGN"],
            text: str, lead: RunResult) -> _Stop | None:
-    """ladder.climb(kind, state.section(sid), design). Rung 1: _recut with rung 1, and on failure
+    """ladder.climb(kind, state.section(sid), design, sid), with sid the section's id. Rung 1: _recut with rung 1, and on failure
     _fail (the second failure returns _failed_twice). Rung 2: _design_change with the problem from
     split_reason. Rung 3: _park(climb.why)."""
 
