@@ -3346,3 +3346,192 @@ def test_a_recut_that_adds_an_id_nested_under_the_section_counts_as_a_failure_of
     assert len(_runs(tmp_path, "recut")) == 1
     assert State.open(queue, cfg).section("s1").failures == 1
     assert "section s1: failed (1 of 2)" in _texts(capsys.readouterr().out)
+
+
+# Research behaviors (relay-research design, Order 7): `_research` maps a section's code before
+# its lead (relay-research-design.md:201-206, 216-218). Each test puts the researcher behind the
+# sequencing shim, recording to `<tmp_path>/plans/research`, and runs the queue from the main
+# checkout of `git_repo`, whose `lead/s1` worktree holds the files the map names, committed.
+# The researcher's stream `tests/fixtures/stream-research.jsonl` (session "sess-research-1",
+# two reader subagents) ends on the map text of `tests/fixtures/research-map.txt`.
+
+RESEARCH_RUN = "stream-research.jsonl"
+AGENTS_LEAD = "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents
+_MAP_TEXT = (FIXTURES / "research-map.txt").read_text()
+# The map's body: its lines from `MAP` to `END MAP`, both included (relay-research-design.md:44).
+MAP_BODY = _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
+# Every path the map names (relay-research-design.md:43).
+MAPPED_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
+# The lead's subagents in AGENTS_LEAD as a ledger line records them (relay-research-design.md:143).
+LEAD_AGENTS = [
+    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
+    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+]
+
+
+def _mapped_worktree(repo: GitRepo) -> str:
+    """Commit every file the map names in the `lead/s1` worktree; return that worktree's HEAD."""
+    wt = repo.worktrees["s1"]
+    for name in MAPPED_FILES:
+        path = wt / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {name}\n")
+    repo.git("add", *MAPPED_FILES, cwd=wt)
+    return repo.commit(cwd=wt, message="mapped files")
+
+
+def _research_queue(repo: GitRepo) -> Path:
+    """The check fixture queue (sections s1 and s2) in the repository's main checkout."""
+    queue = repo.root / CHECK_QUEUE
+    queue.write_bytes((FIXTURES / CHECK_QUEUE).read_bytes())
+    return queue
+
+
+def _researched(cfg: Config, tmp_path: Path, leads: list[dict[str, object]]) -> Config:
+    """`cfg` with its leads taking `leads` and each research run taking RESEARCH_RUN."""
+    fake = cfg.lead_command[0]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    research = _plan(tmp_path, fake, "research", [_step(RESEARCH_RUN)], False)
+    return dataclasses.replace(cfg, research_command=research)
+
+
+def _research_runs(tmp_path: Path) -> list[dict[str, object]]:
+    """The records of every research run, in run order."""
+    return _runs(tmp_path, "research")
+
+
+def _run_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
+    """The ledger's lines other than check lines, in file order."""
+    path = State.open(queue, cfg).stop_file.parent / "ledger.jsonl"
+    entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return [e for e in entries if e.get("kind") != "check"]
+
+
+# Research behavior 1: research before a lead, its map in the lead prompt, the lead's ledger
+# line carrying the map commit and agents.
+
+
+def test_research_runs_before_the_lead_and_its_map_goes_into_the_lead_prompt(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the lead runs with no research before it, or its prompt lacks the map block.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(AGENTS_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    research = _research_runs(tmp_path)
+    assert len(research) == 1
+    assert _body(queue, "s1") in str(research[0]["prompt"])
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 1
+    prompt = str(leads[0]["prompt"])
+    assert f"map s1 at {commit}" in prompt
+    assert MAP_BODY in prompt
+    kinds = [(e["kind"], e["section"]) for e in _run_entries(queue, cfg)]
+    assert kinds == [("research", "s1"), ("lead", "s1")]
+
+
+def test_the_leads_ledger_line_carries_the_map_commit_and_its_agents(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the lead's ledger line holds a null map or no agents though its prompt carried
+    # a map and the lead dispatched subagents.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(AGENTS_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    leads = [e for e in _run_entries(queue, cfg) if e["kind"] == "lead"]
+    assert len(leads) == 1
+    assert leads[0]["session"] == "sess-agents-1"
+    assert leads[0].get("map") == commit
+    assert leads[0].get("agents") == LEAD_AGENTS
+
+
+# Research behavior 2: no research on a `check_pending` pass.
+
+
+def test_a_check_pending_pass_runs_no_research_and_the_next_leads_pass_does(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_research` runs on the pass that only reruns s1's pending check, or not
+    # before s2's lead.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    State.open(queue, cfg).set_check_pending("s1", True)
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert _checks_ran(tmp_path) == ["first ran", "second ran"]
+    research = _research_runs(tmp_path)
+    assert len(research) == 1
+    assert _body(queue, "s2") in str(research[0]["prompt"])
+    assert _body(queue, "s1") not in str(research[0]["prompt"])
+    entries = _run_entries(queue, cfg)
+    assert [(e["kind"], e["section"]) for e in entries] == [("research", "s2"), ("lead", "s2")]
+
+
+# Research behavior 3: reuse after a retire with the mapped files unchanged, refresh after one
+# changed, both in the section worktree.
+
+
+def test_a_fresh_lead_after_a_retire_reuses_the_map_when_its_files_are_unchanged(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the second pass reruns the researcher though no mapped file changed, the
+    # fresh lead starts without the saved map, or research runs outside the section worktree.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    research = _research_runs(tmp_path)
+    assert len(research) == 1
+    assert Path(str(research[0]["cwd"])).resolve() == git_repo.worktrees["s1"]
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 2
+    for lead in leads:
+        assert f"map s1 at {commit}" in str(lead["prompt"])
+        assert MAP_BODY in str(lead["prompt"])
+    texts = _texts(capsys.readouterr().out)
+    assert f"research s1: map at {commit} still current, reused" in texts, texts
+    assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "lead"]
+
+
+def test_a_fresh_lead_after_a_retire_that_changed_a_mapped_file_gets_a_fresh_map(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the second pass reuses a map whose file the retired lead changed, or the
+    # refreshing research runs outside the section worktree.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    edited = tmp_path / "edited-git.py"
+    edited.write_text("# relay/git.py, edited by the lead\n")
+    changed = (edited, git_repo.worktrees["s1"] / "relay" / "git.py")
+    cfg = _researched(cfg, tmp_path, [_step(RETIRED_LEAD, write=changed), _step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    research = _research_runs(tmp_path)
+    assert len(research) == 2
+    for record in research:
+        assert Path(str(record["cwd"])).resolve() == git_repo.worktrees["s1"]
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 2
+    assert f"map s1 at {commit}" in str(leads[1]["prompt"])
+    assert MAP_BODY in str(leads[1]["prompt"])
+    texts = _texts(capsys.readouterr().out)
+    assert not any(t.endswith("still current, reused") for t in texts), texts
+    assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "research", "lead"]
