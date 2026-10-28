@@ -293,8 +293,8 @@ def test_the_decision_architect_stream_reports_an_unapproved_design_with_two_dec
     assert len(report.decisions) == 2
     for line in report.decisions:
         assert "| recommend: " in line and "| alternative: " in line, line
-    # Each decision is the indented line under DECISIONS, as written.
-    assert tuple(line.strip() for line in report.decisions) == (
+    # Each decision is the indented line under DECISIONS, as written, compared exactly.
+    assert report.decisions == (
         "1 | Should two() return 2 when one.py is absent? | recommend: no, fail loudly"
         " | alternative: return 2",
         "2 | Should three() ship in this release? | recommend: yes"
@@ -337,8 +337,8 @@ def test_the_unfiled_architect_stream_reports_one_unfiled_line_and_no_decision()
     assert report.approved is False
     assert report.decisions == ()
     assert decision_numbers(report) == ()
-    # The unfiled line is the indented line under UNFILED, as written.
-    assert tuple(line.strip() for line in report.unfiled) == (
+    # The unfiled line is the indented line under UNFILED, as written, compared exactly.
+    assert report.unfiled == (
         "1 | Who owns one.py once both sections use it? | recommend: section s1"
         " | alternative: a new shared section",
     )

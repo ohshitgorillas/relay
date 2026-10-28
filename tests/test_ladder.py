@@ -240,11 +240,13 @@ def test_parse_report_unfiled_holds_each_indented_line_under_unfiled() -> None:
     )
     report = parse_report(text)
     assert report is not None
-    assert [line.strip() for line in report.unfiled] == [
+    # Each line is the indented line under its heading, as written, compared exactly: the
+    # design's form `<n> | question | ...` starts at the text, so the indent is not kept.
+    assert list(report.unfiled) == [
         "relay/cli.py prints the wrong word | a later step",
         "the ledger has no rung for asks",
     ]
-    assert [line.strip() for line in report.decisions] == [
+    assert list(report.decisions) == [
         "1 | which cap | recommend: per section | alternative: per queue",
     ]
 
@@ -262,7 +264,8 @@ def test_parse_report_without_unfiled_has_none() -> None:
     report = parse_report(text)
     assert report is not None
     assert report.unfiled == ()
-    assert [line.strip() for line in report.decisions] == [
+    # Each decision is the indented line under DECISIONS, as written, compared exactly.
+    assert list(report.decisions) == [
         "1 | which cap | recommend: per section | alternative: per queue",
         "2 | which word | recommend: WAITING | alternative: HELD",
     ]
