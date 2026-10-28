@@ -1,5 +1,7 @@
 design /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | order /Users/atom/dev/relay/docs/superpowers/specs/relay-loop-design.md | main e9d466a
 landed 6 | b8471fa
+landed 7 | 0b59081
+landed 8 | 7afb1a1
 section s1.1 | lead | steps: 1 | size: lead: tokens: 1010049.9 seconds: 675.1 overruns: 0 refusals: 0
   s1.1.d1 | builder | steps: 1 | writes: pyproject.toml, relay/__init__.py, relay/errors.py, relay/config.py, relay/queue.py | size: builder: tokens: 339852.8 seconds: 190.2 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s1.1.d1
@@ -54,41 +56,30 @@ section s3.1.1 | lead | steps: 5 | size: lead: tokens: 1033483.8 seconds: 679.8 
     design: docs/superpowers/specs/relay-loop-design.md Order 5
     behavior: False when the queue itself marks the section done
     view: stubgen .pyi of relay/queue.py
-section s4 | lead | steps: 7, 8 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
-  s4.d1 | test-writer | steps: 7 | writes: tests/test_state.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s4.d1
+section s4.1 | lead | steps: 8a, 8b | size: lead: tokens: 1063606.3 seconds: 682.0 overruns: 0 refusals: 0
+  s4.1.d1 | test-writer | steps: 8a | writes: tests/test_ledger.py | size: test-writer: tokens: 552672.8 seconds: 166.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/s4/docs/queue.md s4.1.d1
+    resume 8100c9af-6f09-4c9b-9f34-8bf9c7dbd230
     red
-    design: docs/superpowers/specs/relay-loop-design.md Order 7
-    behavior: `relay/state.py`: Relay's own record for one queue, kept under `state_root/<slug of the queue's absolute path>/`.
-    view: stubgen .pyi of relay/state.py
-    behavior: It holds per-section status, failure counts, parked questions, owner answers, the last session id per section, the stop file and the lock.
-    view: stubgen .pyi of relay/state.py
-    behavior: Every write goes through a temp file and `os.replace`.
-    view: stubgen .pyi of relay/state.py
-    behavior: fcntl.flock on <dir>/lock; raises LockedError
-    view: stubgen .pyi of relay/state.py
-    behavior: also sets status back to "open"
-    view: stubgen .pyi of relay/state.py
-  s4.d2 | test-writer | steps: 7 | writes: tests/test_ledger.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s4.d2
-    red
-    design: docs/superpowers/specs/relay-loop-design.md Order 7
-    behavior: It appends one JSON line per finished run (lead or recut), stamped with its POSIX time, to `<state dir>/ledger.jsonl`.
+    design: docs/superpowers/specs/relay-loop-design.md Order 8a
+    behavior: A corrupt or torn ledger never stops Relay and never needs a hand fix; no ledger method raises on the file's content.
     view: stubgen .pyi of relay/ledger.py
-    behavior: Budgets count only the current `relay go`: the loop passes its own start time as `since`.
+    behavior: If the file is non-empty and its last byte is not `\n`, `append` first writes `\n`, which closes off a line torn by a crash so the new entry starts on a line of its own.
     view: stubgen .pyi of relay/ledger.py
-  s4.d3 | builder | steps: 8 | writes: relay/state.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s4.d3
+    behavior: `total`, `over` and `unreadable` treat a line as unreadable when it is not JSON, is not a JSON object, lacks `time`, `tokens` or `dollars`, or holds a `bool` or non-number in one of them.
+    view: stubgen .pyi of relay/ledger.py
+    behavior: An empty line is unreadable too. `total` and `over` skip unreadable lines and sum the rest.
+    view: stubgen .pyi of relay/ledger.py
+    behavior: 1-based numbers of the unreadable lines
+    view: stubgen .pyi of relay/ledger.py
+    behavior: Relay never rewrites, truncates or deletes the ledger.
+    view: stubgen .pyi of relay/ledger.py
+  s4.1.d2 | builder | steps: 8b | writes: relay/ledger.py | size: builder: tokens: 331697.9 seconds: 182.7 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/s4/docs/queue.md s4.1.d2
     design: docs/superpowers/specs/relay-loop-design.md
-    step: 8. State and ledger: build. `builder` writes `relay/state.py` and `relay/ledger.py`.
-    paths: relay/state.py
-    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_state.py
-  s4.d4 | builder | steps: 8 | writes: relay/ledger.py | size: builder: tokens: 358791.8 seconds: 198.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/queue.md s4.d4
-    design: docs/superpowers/specs/relay-loop-design.md
-    step: 8. State and ledger: build. `builder` writes `relay/state.py` and `relay/ledger.py`.
+    step: 8b. Ledger recovery: build. `builder` writes `relay/ledger.py`: `append`, `total` and `over` as above, `unreadable`, and no `RelayError` raised on file content.
     paths: relay/ledger.py
-    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_state.py tests/test_ledger.py
+    check: PYTHONDONTWRITEBYTECODE=1 uv run python -m pytest -p no:cacheprovider --tb=no -rA tests/test_ledger.py
 section s5 | lead | steps: 9, 10 | size: lead: tokens: 971308.7 seconds: 672.0 overruns: 0 refusals: 0
   s5.d1 | test-writer | steps: 9 | writes: tests/test_stream.py | size: test-writer: tokens: 553091.2 seconds: 164.9 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/queue.md s5.d1
