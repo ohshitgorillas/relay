@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from relay.agents import Event, duration
 from relay.config import Config
 from relay.runner import RunResult
-from relay.state import FAILURE_LIMIT
+from relay.state import CHECK_LIMIT, FAILURE_LIMIT
 from relay.status import LeadStatus
 
 if TYPE_CHECKING:
@@ -119,16 +119,27 @@ def ended(queue: Path, code: int, reason: str, detail: str) -> None:
 
 
 def check_started(sid: str, command_count: int, cwd: Path) -> None:
-    raise NotImplementedError
+    noun = "check" if command_count == 1 else "checks"
+    _write(f"check {sid}: running {command_count} {noun} in {cwd}")
 
 
 def check_finished(sid: str, result: "CheckResult") -> None:
-    raise NotImplementedError
+    if result.verdict == "pass":
+        what = "passed"
+    elif result.verdict == "none":
+        what = "none to run"
+    elif result.verdict == "outside":
+        what = f"outside the code: exit {result.exit_code}"
+    elif result.timed_out:
+        what = "timed out"
+    else:
+        what = f"failed: exit {result.exit_code}"
+    _write(f"check {sid}: {what}")
 
 
 def check_failed(sid: str, failures: int) -> None:
-    raise NotImplementedError
+    _write(f"section {sid}: check failed ({failures} of {CHECK_LIMIT})")
 
 
 def retired_idle(sid: str, tokens: int) -> None:
-    raise NotImplementedError
+    _write(f"lead {sid}: retired at {tokens} context tokens, no commit since the retire flag")

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
-from relay.prompts import lead_prompt, recut_brief
+from relay.check import CheckResult
+from relay.prompts import check_feedback, lead_prompt, recut_brief
 from relay.queue import Section
 
 QUEUE = Path("/work/repo/docs/queue.md")
@@ -122,3 +124,102 @@ def test_recut_brief_carries_the_lead_run_log_path() -> None:
     # Breaks when: the lead's run log path is left out of the brief.
     brief = recut_brief(QUEUE, _section(), "three modules, not one step", LEAD_LOG)
     assert str(LEAD_LOG) in brief
+
+
+# Check design (docs/superpowers/specs/relay-check-design.md, Modules `relay/prompts.py`;
+# Order 5). Behavior 7: As now, plus, when check_feedback is set:
+
+CHECK_SENTENCE = (
+    "Relay ran this section's check after your DONE and it failed. "
+    "Fix the section and end with DONE again:"
+)
+FEEDBACK = (
+    "make check\nexit 2\n/state/relay/work-repo-docs-queue-md/runs/3.check\n"
+    "FAILED tests/test_x.py::test_y - AssertionError\n  indented {braces} 100%\n"
+)
+CHECK_LOG = Path("/state/relay/work-repo-docs-queue-md/runs/3.check")
+CHECK_TAIL = "FAILED tests/test_x.py::test_y - AssertionError\n== 1 failed ==\n"
+
+
+def _with_feedback(feedback: str | None = FEEDBACK) -> str:
+    return lead_prompt(
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        check_feedback=feedback,
+    )
+
+
+def test_lead_prompt_with_check_feedback_says_the_check_failed() -> None:
+    # Breaks when: the check-failed instruction is left out or worded otherwise.
+    assert CHECK_SENTENCE in _with_feedback()
+
+
+def test_lead_prompt_carries_the_check_feedback_verbatim() -> None:
+    # Breaks when: the feedback is dropped, stripped, re-indented or escaped.
+    assert FEEDBACK in _with_feedback()
+
+
+def test_lead_prompt_puts_the_feedback_after_the_instruction() -> None:
+    # Breaks when: the feedback comes before the sentence that introduces it.
+    prompt = _with_feedback()
+    start = prompt.find(CHECK_SENTENCE)
+    assert start != -1
+    assert prompt.find(FEEDBACK, start + len(CHECK_SENTENCE)) != -1
+
+
+def test_lead_prompt_with_check_feedback_keeps_everything_else() -> None:
+    # Breaks when: setting check_feedback replaces the prompt instead of adding to it.
+    prompt = _with_feedback()
+    assert FEEDBACK in prompt
+    assert prompt.startswith("You are a lead")
+    assert str(QUEUE) in prompt
+    assert BODY in prompt
+    assert "resume sess-lead-7" in prompt
+    assert str(RETIRE_FLAG) in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 8: the log path and the tail, for the lead.
+
+
+def _check_result(**changes: object) -> CheckResult:
+    result = CheckResult(
+        command="uv run pytest tests/test_x.py",
+        exit_code=1,
+        timed_out=False,
+        tail=CHECK_TAIL,
+        log=CHECK_LOG,
+        verdict="fail",
+    )
+    return dataclasses.replace(result, **changes)
+
+
+def test_check_feedback_holds_the_command() -> None:
+    # Breaks when: the failing command is left out of the lead's feedback.
+    assert "uv run pytest tests/test_x.py" in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_exit_code() -> None:
+    # Breaks when: the exit is left out or not worded "exit <n>".
+    assert "exit 1" in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_log_path() -> None:
+    # Breaks when: the check log's path is left out.
+    assert str(CHECK_LOG) in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_tail() -> None:
+    # Breaks when: the end of the failing command's output is left out or altered.
+    assert CHECK_TAIL.rstrip("\n") in check_feedback(_check_result())
+
+
+def test_check_feedback_for_a_timeout_says_timed_out() -> None:
+    # Breaks when: a timed-out check is worded "exit None" instead of "timed out".
+    text = check_feedback(_check_result(exit_code=None, timed_out=True))
+    assert "timed out" in text
+    assert "exit None" not in text

@@ -18,6 +18,7 @@ import pytest
 
 from relay import progress
 from relay.agents import Agent, Event
+from relay.check import CheckResult
 from relay.config import Config
 from relay.ledger import Spend
 from relay.runner import RunResult
@@ -46,6 +47,18 @@ def _result(
         stream=stream,
         log=Path("/nonexistent/1.jsonl"),
     )
+
+
+def _check(**changes: object) -> CheckResult:
+    result = CheckResult(
+        command="make check",
+        exit_code=0,
+        timed_out=False,
+        tail="ok\n",
+        log=Path("/nonexistent/1.check"),
+        verdict="pass",
+    )
+    return dataclasses.replace(result, **changes)
 
 
 def _agent(**changes: object) -> Agent:
@@ -93,6 +106,10 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("failed", lambda: progress.failed("s1", 1)),
         ("waiting", lambda: progress.waiting(["s1", "s2"])),
         ("ended", lambda: progress.ended(queue, 0, "done", "every section closed")),
+        ("check_started", lambda: progress.check_started("s1", 2, Path("/work/wt/s1"))),
+        ("check_finished", lambda: progress.check_finished("s1", _check())),
+        ("check_failed", lambda: progress.check_failed("s1", 1)),
+        ("retired_idle", lambda: progress.retired_idle("s1", 130_000)),
     ]
 
 
@@ -109,6 +126,10 @@ NAMES = [
     "failed",
     "waiting",
     "ended",
+    "check_started",
+    "check_finished",
+    "check_failed",
+    "retired_idle",
 ]
 
 
@@ -778,4 +799,73 @@ def test_agent_finished_without_a_reported_time_says_so(capsys: pytest.CaptureFi
     progress.agent_event("recut", "s3", Event("finished", agent, 0))
     assert _line(capsys) == (
         "recut s3: agent builder stopped time unknown, context 0: Build s2.d1 stub (recut + 0 agents)"
+    )
+
+
+# Check design (docs/superpowers/specs/relay-check-design.md, Modules `relay/progress.py`;
+# Order 5). Behavior 9: Progress lines for checks and idle retire
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_check_started_names_the_section_count_and_cwd(
+    count: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the section id, the number of checks or the directory is missing or misworded.
+    progress.check_started("s4", count, Path("/work/relay-wt/s4"))
+    noun = "check" if count == 1 else "checks"
+    assert _line(capsys) in (
+        f"check s4: running {count} check(s) in /work/relay-wt/s4",
+        f"check s4: running {count} {noun} in /work/relay-wt/s4",
+    )
+
+
+def test_check_finished_passed(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a passing check is not reported "passed".
+    progress.check_finished("s4", _check(verdict="pass", exit_code=0))
+    assert _line(capsys) == "check s4: passed"
+
+
+def test_check_finished_failed_shows_the_exit(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a failed check omits its exit code or is misworded.
+    progress.check_finished("s4", _check(verdict="fail", exit_code=2))
+    assert _line(capsys) == "check s4: failed: exit 2"
+
+
+def test_check_finished_timed_out(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a timed-out check reads "failed: exit None" instead of "timed out".
+    progress.check_finished(
+        "s4", _check(verdict="fail", exit_code=None, timed_out=True)
+    )
+    assert _line(capsys) == "check s4: timed out"
+
+
+def test_check_finished_outside_the_code(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: an outside verdict is reported as a plain failure or drops its exit code.
+    progress.check_finished("s4", _check(verdict="outside", exit_code=127))
+    assert _line(capsys) == "check s4: outside the code: exit 127"
+
+
+def test_check_finished_none_to_run(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a section with no check line is reported passed or failed.
+    result = _check(command=None, exit_code=None, tail="", log=None, verdict="none")
+    progress.check_finished("s4", result)
+    assert _line(capsys) == "check s4: none to run"
+
+
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_check_failed_shows_the_count_of_three(
+    failures: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the check failure count is missing, fixed, or not shown "of 3".
+    progress.check_failed("s4", failures)
+    assert _line(capsys) == f"section s4: check failed ({failures} of 3)"
+
+
+def test_retired_idle_names_the_tokens_and_no_commit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the idle retire line omits the context token count or is misworded.
+    progress.retired_idle("s4", 131072)
+    assert _line(capsys) == (
+        "lead s4: retired at 131072 context tokens, no commit since the retire flag"
     )

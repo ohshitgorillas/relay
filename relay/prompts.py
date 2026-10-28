@@ -31,6 +31,11 @@ def lead_prompt(
         parts.append(f"resume {resume}")
     if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
+    if check_feedback is not None:
+        parts.append(
+            "Relay ran this section's check after your DONE and it failed. "
+            "Fix the section and end with DONE again:\n" + check_feedback
+        )
     parts.append(
         "Retire contract: on reaching a safe point, after a step's commit, check whether "
         f"the file {retire_flag} exists. If it exists, stop and end with RETIRED. "
@@ -56,4 +61,5 @@ def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> s
 
 
 def check_feedback(result: "CheckResult") -> str:
-    raise NotImplementedError
+    how = "timed out" if result.timed_out else f"exit {result.exit_code}"
+    return f"{result.command}\n{how}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
