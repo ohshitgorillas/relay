@@ -35,6 +35,13 @@ def test_ping_runs_ping_command_with_message_in_place(fake_cfg: Config, tmp_path
     record = tmp_path / "sent.jsonl"
     ping(_recording_cfg(fake_cfg, record), "section s3 parked")
     assert _sent(record) == [["section s3 parked"]]
+    # "{message}" is replaced where it stands, so arguments after it keep their places.
+    inner = tmp_path / "inner.jsonl"
+    cfg = dataclasses.replace(
+        fake_cfg, ping_command=[sys.executable, "-c", _RECORD, str(inner), "--title", "{message}", "--end"]
+    )
+    ping(cfg, "section s3 parked")
+    assert _sent(inner) == [["--title", "section s3 parked", "--end"]]
 
 
 def test_ping_passes_message_as_one_argument_unexpanded(fake_cfg: Config, tmp_path: Path) -> None:
