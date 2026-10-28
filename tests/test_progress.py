@@ -6,11 +6,12 @@ Lines are read with pytest's `capsys` and matched after their `HH:MM:SS ` prefix
 from __future__ import annotations
 
 import dataclasses
+import os
 import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import pytest
 
@@ -137,23 +138,45 @@ class _Stdout:
 # written. Each line starts with the local time as `HH:MM:SS ` (design: Modules).
 
 
+@pytest.fixture(params=["XYZ-14", "ABC+12"], ids=["utc-plus-14", "utc-minus-12"])
+def far_zone(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Set the host's local zone (POSIX `TZ`) 12 or more hours from UTC for the test, then restore it."""
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = request.param
+    time.tzset()
+    try:
+        yield request.param
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
 @pytest.mark.parametrize("name", NAMES)
-def test_each_line_starts_with_the_local_time(
+def test_each_line_starts_with_the_local_time_in_the_hosts_zone(
     name: str,
+    far_zone: str,
     queue_file: Callable[[str], Path],
     fake_cfg: Config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: a function writes no time prefix, a UTC time, or a time not as HH:MM:SS.
     call = _call(name, queue_file, fake_cfg)
-    before = time.strftime("%H:%M:%S", time.localtime())
+    before = time.time()
     call()
-    after = time.strftime("%H:%M:%S", time.localtime())
+    after = time.time()
     out = _out(capsys)
     match = PREFIX.match(out)
     assert match is not None
     stamp = out[:8]
-    assert before <= stamp <= after or stamp in (before, after)
+    local = {time.strftime("%H:%M:%S", time.localtime(t)) for t in (before, after)}
+    utc = {time.strftime("%H:%M:%S", time.gmtime(t)) for t in (before, after)}
+    # The zone is 12 or more hours from UTC, so the local and UTC clocks never read alike.
+    assert not local & utc
+    assert stamp not in utc
+    assert min(local) <= stamp <= max(local) or stamp in local
 
 
 # Behavior 2: Each line goes to `sys.stdout`, flushed at once.
