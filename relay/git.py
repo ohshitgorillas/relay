@@ -41,9 +41,15 @@ def heads(repo: Path) -> dict[str, str]:
 
 def head(cwd: Path) -> str | None:
     """`git rev-parse HEAD` in `cwd`; None when git fails."""
-    raise NotImplementedError
+    code, out = runner.capture(["git", "rev-parse", "HEAD"], cwd, _TIMEOUT)
+    if code != 0:
+        return None
+    return out.strip() or None
 
 
 def changed(cwd: Path, commit: str, paths: tuple[str, ...]) -> bool | None:
     """`git diff --name-only <commit> -- <paths>` in `cwd`: False when empty, True when output, None when git fails."""
-    raise NotImplementedError
+    code, out = runner.capture(["git", "diff", "--name-only", commit, "--", *paths], cwd, _TIMEOUT)
+    if code != 0:
+        return None
+    return bool(out.strip())

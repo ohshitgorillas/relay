@@ -49,6 +49,12 @@ class Config:
             object.__setattr__(
                 self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
             )
+        if self.research_command is None:
+            object.__setattr__(
+                self,
+                "research_command",
+                [*self.lead_command, "--agent", "researcher", "--model", "opus[1m]"],
+            )
 
 
 _KEYS = frozenset(
@@ -65,6 +71,9 @@ _KEYS = frozenset(
         "idle_ceiling",
         "check_timeout",
         "check_outside",
+        "research_command",
+        "map_max_lines",
+        "map_max_chars",
     }
 )
 
@@ -153,6 +162,10 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     else:
         raise ConfigError(f"config value 'state_root' must be a non-empty string: {state_value!r}")
 
+    map_max_lines = _int(merged, "map_max_lines", Config.map_max_lines)
+    map_max_chars = _int(merged, "map_max_chars", Config.map_max_chars)
+    assert map_max_lines is not None and map_max_chars is not None
+
     cfg = Config(
         token_budget=_int(merged, "token_budget", None),
         dollar_budget=_number(merged, "dollar_budget", None),
@@ -168,6 +181,13 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         idle_ceiling=idle_ceiling,
         check_timeout=check_timeout,
         check_outside=_patterns(merged, "check_outside", list(_DEFAULT_CHECK_OUTSIDE)),
+        research_command=_command(
+            merged,
+            "research_command",
+            [*lead_command, "--agent", "researcher", "--model", "opus[1m]"],
+        ),
+        map_max_lines=map_max_lines,
+        map_max_chars=map_max_chars,
     )
     if not cfg.context_limit < cfg.idle_ceiling < cfg.hard_ceiling:
         raise ConfigError(
