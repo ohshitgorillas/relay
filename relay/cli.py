@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     go.add_argument("--token-budget", type=int)
     go.add_argument("--dollar-budget", type=float)
     go.add_argument("--context-limit", type=int)
+    go.add_argument("--idle-ceiling", type=int)
     commands.add_parser("stop").add_argument("queue", type=Path)
     answer = commands.add_parser("answer")
     answer.add_argument("queue", type=Path)
@@ -54,6 +55,7 @@ def _go(args: argparse.Namespace) -> int:
             "token_budget": args.token_budget,
             "dollar_budget": args.dollar_budget,
             "context_limit": args.context_limit,
+            "idle_ceiling": args.idle_ceiling,
         }
     )
     return loop.run(args.queue.resolve(), cfg)

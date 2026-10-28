@@ -15,6 +15,7 @@ from relay.errors import (
     QueueFormatError,
     RelayError,
 )
+from tests.conftest import DEFAULT_CHECK_OUTSIDE
 
 DEFAULT_LEAD = [
     "claude", "-p", "--output-format", "stream-json", "--verbose",
@@ -100,11 +101,15 @@ def test_no_path_reads_home_config_toml(home: Path) -> None:
 
 
 def test_file_values_are_loaded(tmp_path: Path, home: Path) -> None:
+    # relay-check-design.md, Modules `relay/config.py`: ConfigError unless
+    # context_limit < idle_ceiling < hard_ceiling, so these ceilings name an idle_ceiling
+    # between them (the 13/10 default, 104000, would lie above hard_ceiling).
     path = _toml(
         tmp_path,
         "token_budget = 500000\n"
         "dollar_budget = 7.5\n"
         "context_limit = 80000\n"
+        "idle_ceiling = 85000\n"
         "hard_ceiling = 90000\n"
         "poll_seconds = 1.0\n"
         'lead_command = ["my-claude", "-p"]\n'
@@ -116,6 +121,7 @@ def test_file_values_are_loaded(tmp_path: Path, home: Path) -> None:
     assert cfg.token_budget == 500_000
     assert cfg.dollar_budget == 7.5
     assert cfg.context_limit == 80_000
+    assert cfg.idle_ceiling == 85_000
     assert cfg.hard_ceiling == 90_000
     assert cfg.poll_seconds == 1.0
     assert cfg.lead_command == ["my-claude", "-p"]
@@ -172,3 +178,142 @@ def test_wrong_type_in_file_raises_config_error(tmp_path: Path, home: Path) -> N
 def test_bad_cli_override_raises_config_error(tmp_path: Path, home: Path) -> None:
     with pytest.raises(ConfigError):
         load_config(_toml(tmp_path, ""), {"token_budget": "many"})
+
+
+# The check keys (design: relay-check-design.md, Modules `relay/config.py`; Order 3).
+# Behavior: ConfigError unless context_limit < idle_ceiling < hard_ceiling.
+
+CEILINGS = "context_limit = 100000\nhard_ceiling = 200000\n"
+
+
+def _load_ok(path: Path, overrides: dict[str, object]) -> Config:
+    """load_config on a config the design accepts: a ConfigError here is a failed claim."""
+    try:
+        return load_config(path, overrides)
+    except ConfigError as exc:
+        raise AssertionError(f"documented config rejected: {exc}") from exc
+
+
+def test_idle_ceiling_defaults_to_thirteen_tenths_of_context_limit(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _load_ok(_toml(tmp_path, ""), {}).idle_ceiling == 130_000
+    cfg = _load_ok(_toml(tmp_path, "context_limit = 50001\n"), {})
+    assert cfg.idle_ceiling == 65_001
+    cfg = _load_ok(_toml(tmp_path, ""), {"context_limit": 60000})
+    assert cfg.idle_ceiling == 78_000
+
+
+def test_idle_ceiling_between_context_limit_and_hard_ceiling_is_loaded(
+    tmp_path: Path, home: Path
+) -> None:
+    path = _toml(tmp_path, CEILINGS + "idle_ceiling = 100001\n")
+    assert _load_ok(path, {}).idle_ceiling == 100_001
+    path = _toml(tmp_path, CEILINGS + "idle_ceiling = 199999\n")
+    assert _load_ok(path, {}).idle_ceiling == 199_999
+
+
+@pytest.mark.parametrize("idle", [99_999, 100_000, 200_000, 250_000])
+def test_idle_ceiling_outside_context_limit_and_hard_ceiling_raises_config_error(
+    tmp_path: Path, home: Path, idle: int
+) -> None:
+    assert _load_ok(_toml(tmp_path, CEILINGS + "idle_ceiling = 150000\n"), {}).idle_ceiling == 150_000
+    path = _toml(tmp_path, CEILINGS + f"idle_ceiling = {idle}\n")
+    with pytest.raises(ConfigError):
+        load_config(path, {})
+
+
+@pytest.mark.parametrize("idle", [100_000, 200_000])
+def test_idle_ceiling_override_at_a_bound_raises_config_error(
+    tmp_path: Path, home: Path, idle: int
+) -> None:
+    path = _toml(tmp_path, "")
+    assert _load_ok(path, {"idle_ceiling": 150_000}).idle_ceiling == 150_000
+    with pytest.raises(ConfigError):
+        load_config(path, {"idle_ceiling": idle})
+
+
+def test_default_idle_ceiling_not_below_hard_ceiling_raises_config_error(
+    tmp_path: Path, home: Path
+) -> None:
+    path = _toml(tmp_path, "context_limit = 100000\nhard_ceiling = 120000\n")
+    with pytest.raises(ConfigError):
+        load_config(path, {})
+
+
+# Behavior: seconds per check command.
+
+
+def test_check_timeout_defaults_to_1800_seconds_and_is_read_from_the_file(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _load_ok(_toml(tmp_path, ""), {}).check_timeout == 1800
+    assert _load_ok(_toml(tmp_path, "check_timeout = 42.5\n"), {}).check_timeout == 42.5
+
+
+def test_check_timeout_override_beats_the_file(tmp_path: Path, home: Path) -> None:
+    path = _toml(tmp_path, "check_timeout = 42.5\n")
+    assert _load_ok(path, {"check_timeout": 7.25}).check_timeout == 7.25
+
+
+def test_check_timeout_of_the_wrong_type_raises_config_error(tmp_path: Path, home: Path) -> None:
+    assert _load_ok(_toml(tmp_path, "check_timeout = 60.0\n"), {}).check_timeout == 60.0
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, 'check_timeout = "half an hour"\n'), {})
+
+
+# Behavior: regexes; default below; ConfigError on a pattern re.compile rejects.
+
+
+def test_check_outside_defaults_to_the_documented_patterns_and_is_read_from_the_file(
+    tmp_path: Path, home: Path
+) -> None:
+    assert _load_ok(_toml(tmp_path, ""), {}).check_outside == DEFAULT_CHECK_OUTSIDE
+    path = _toml(tmp_path, "check_outside = ['quota exceeded', '(?i)rate limit']\n")
+    assert _load_ok(path, {}).check_outside == ["quota exceeded", "(?i)rate limit"]
+
+
+@pytest.mark.parametrize("pattern", ["(unclosed", "[a-", "*leading"])
+def test_check_outside_pattern_re_compile_rejects_raises_config_error(
+    tmp_path: Path, home: Path, pattern: str
+) -> None:
+    assert _load_ok(_toml(tmp_path, "check_outside = ['fine']\n"), {}).check_outside == ["fine"]
+    path = _toml(tmp_path, f"check_outside = ['fine', '{pattern}']\n")
+    with pytest.raises(ConfigError):
+        load_config(path, {})
+
+
+def test_check_outside_bad_pattern_override_raises_config_error(
+    tmp_path: Path, home: Path
+) -> None:
+    path = _toml(tmp_path, "")
+    assert _load_ok(path, {"check_outside": ["fine"]}).check_outside == ["fine"]
+    with pytest.raises(ConfigError):
+        load_config(path, {"check_outside": ["(unclosed"]})
+
+
+# Behavior: All three keys join `_KEYS`.
+
+
+def test_all_three_check_keys_are_read_from_the_file(tmp_path: Path, home: Path) -> None:
+    path = _toml(
+        tmp_path,
+        "idle_ceiling = 150000\ncheck_timeout = 90.0\ncheck_outside = ['offline']\n",
+    )
+    cfg = _load_ok(path, {})
+    assert cfg.idle_ceiling == 150_000
+    assert cfg.check_timeout == 90.0
+    assert cfg.check_outside == ["offline"]
+
+
+def test_all_three_check_keys_take_overrides_over_the_file(tmp_path: Path, home: Path) -> None:
+    path = _toml(
+        tmp_path,
+        "idle_ceiling = 150000\ncheck_timeout = 90.0\ncheck_outside = ['offline']\n",
+    )
+    cfg = _load_ok(
+        path, {"idle_ceiling": 160000, "check_timeout": 12.0, "check_outside": ["down"]}
+    )
+    assert cfg.idle_ceiling == 160_000
+    assert cfg.check_timeout == 12.0
+    assert cfg.check_outside == ["down"]

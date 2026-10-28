@@ -127,3 +127,87 @@ def test_blocked_by_joins_the_dependents_of_every_parked_id() -> None:
 def test_blocked_by_does_not_count_a_parked_id_that_depends_on_nothing_parked() -> None:
     sections = [_section("s1"), _section("s2"), _section("s3", "s2")]
     assert blocked_by(sections, {"s1"}) == set()
+
+
+# Check lines and the recut note (design: relay-check-design.md, Modules `relay/queue.py`;
+# Order 3). Behavior: each `check:` or `done-check:` line's command, in body order.
+
+
+def _check_sections(queue_file: Callable[[str], Path]) -> dict[str, Section]:
+    return {s.id: s for s in parse_queue(queue_file("check-queue.md"))}
+
+
+def test_checks_hold_each_check_and_done_check_command_in_body_order(
+    queue_file: Callable[[str], Path],
+) -> None:
+    sections = _check_sections(queue_file)
+    assert sections["s1"].checks == (
+        "uv run python -m pytest tests/test_one.py",
+        "make check && echo ok",
+        "python3 -c 'print(1)'",
+    )
+    assert sections["s4a"].checks == ("uv run python -m pytest tests/test_four.py",)
+
+
+def test_checks_are_empty_for_a_section_with_no_check_line(
+    queue_file: Callable[[str], Path],
+) -> None:
+    sections = _check_sections(queue_file)
+    assert list(sections) == ["s1", "s2", "s4a"]
+    assert sections["s2"].checks == ()
+    assert sections["s1"].checks != ()
+
+
+# Behavior: leading whitespace allowed, fenced blocks skipped.
+
+
+def test_checks_take_an_indented_line_and_one_at_the_line_start(
+    queue_file: Callable[[str], Path],
+) -> None:
+    checks = _check_sections(queue_file)["s1"].checks
+    assert "uv run python -m pytest tests/test_one.py" in checks
+    assert "python3 -c 'print(1)'" in checks
+
+
+def test_checks_skip_lines_inside_a_fenced_block(queue_file: Callable[[str], Path]) -> None:
+    checks = _check_sections(queue_file)["s1"].checks
+    assert "make check && echo ok" in checks
+    assert "echo inside a fence" not in checks
+    assert "echo inside a fence too" not in checks
+    assert len(checks) == 3
+
+
+# Behavior: the header field `from: <id>`, removed from the title.
+
+
+def test_came_from_is_the_header_from_id_and_it_is_removed_from_the_title(
+    queue_file: Callable[[str], Path],
+) -> None:
+    section = _check_sections(queue_file)["s4a"]
+    assert section.came_from == "s4"
+    assert "from:" not in section.title
+
+
+def test_came_from_is_none_without_a_from_field(queue_file: Callable[[str], Path]) -> None:
+    sections = _check_sections(queue_file)
+    assert sections["s4a"].came_from == "s4"
+    assert sections["s1"].came_from is None
+    assert sections["s2"].came_from is None
+
+
+# Behavior: A `from:` id must match `_ID`. It need not name a section still in the queue.
+
+
+def test_a_from_id_need_not_name_a_section_in_the_queue(
+    queue_file: Callable[[str], Path],
+) -> None:
+    sections = _check_sections(queue_file)
+    assert "s4" not in sections
+    assert sections["s4a"].came_from == "s4"
+
+
+def test_a_from_value_that_is_not_an_id_raises_queue_format_error(
+    queue_file: Callable[[str], Path],
+) -> None:
+    with pytest.raises(QueueFormatError):
+        parse_queue(queue_file("check-queue-bad-from.md"))
