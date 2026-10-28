@@ -99,6 +99,12 @@ class State:
 
 `relay/ledger.py`: the spend ledger. It appends one JSON line per finished run (lead or recut), stamped with its POSIX time, to `<state dir>/ledger.jsonl`. Budgets count only the current `relay go`: the loop passes its own start time as `since`. `relay status` shows the rolling 7-day total (`since` = now minus 7 days) beside the all-time total.
 
+A corrupt or torn ledger never stops Relay and never needs a hand fix; no ledger method raises on the file's content. Recovery works as follows:
+- `append` opens the file with `O_APPEND`. If the file is non-empty and its last byte is not `\n`, `append` first writes `\n`, which closes off a line torn by a crash so the new entry starts on a line of its own. It then writes the whole entry, `\n` included, in one `os.write` and calls `os.fsync`.
+- `total`, `over` and `unreadable` treat a line as unreadable when it is not JSON, is not a JSON object, lacks `time`, `tokens` or `dollars`, or holds a `bool` or non-number in one of them. An empty line is unreadable too. `total` and `over` skip unreadable lines and sum the rest.
+- Relay never rewrites, truncates or deletes the ledger. An unreadable line stays in place, is skipped on every read, and is listed by `relay status`.
+- The spend of a line lost to a crash is not counted toward any budget. That spend's size is unmeasured; it is at most one run's.
+
 ```python
 @dataclass(frozen=True)
 class Spend:
@@ -108,8 +114,9 @@ class Spend:
 class Ledger:
     def __init__(self, path: Path): ...
     def append(self, kind: Literal["lead", "recut"], section: str, session: str | None, spend: Spend) -> None: ...
-    def total(self, since: float | None) -> Spend: ...   # since = POSIX timestamp of the window start
+    def total(self, since: float | None) -> Spend: ...   # since = POSIX timestamp of the window start; skips unreadable lines
     def over(self, cfg: Config, live: Spend, since: float | None) -> Literal["tokens", "dollars"] | None: ...
+    def unreadable(self) -> list[int]: ...               # 1-based numbers of the unreadable lines; [] when the file is absent
 ```
 
 `relay/stream.py`: reads the `claude -p --output-format stream-json` event lines. This is the only code that knows that schema.
@@ -208,7 +215,8 @@ def main(argv: list[str] | None = None) -> int: ...
 # relay go <queue.md> [--token-budget N] [--dollar-budget D] [--context-limit N]
 # relay stop <queue.md>                     creates the stop file
 # relay answer <queue.md> <section-id> <text>   sets the answer, reopens the section
-# relay status <queue.md>                   prints each section's state and the ledger's rolling 7-day and all-time totals
+# relay status <queue.md>                   prints each section's state, the ledger's rolling 7-day and all-time totals,
+#                                           and, when Ledger.unreadable() is non-empty, one line naming the ledger path and those line numbers as skipped
 ```
 
 The lead and the recut run with `cwd` set to the git top level of the queue's directory. Relay never commits, never cleans the work tree and never edits the queue. Leads and the divvyer keep git and the queue as the record of what is finished.
@@ -225,7 +233,7 @@ Relay replaces nothing: no copy exists in the tree.
 | Claude stream-json schema, token and cost counting | `relay/stream.py` | parsing stream-json events or reading `usage` / `total_cost_usd` anywhere else |
 | Divvyer queue format | `relay/queue.py` | reading or regex-matching the queue file anywhere else; writing the queue anywhere |
 | Relay state, stop file, lock, run dirs | `relay/state.py` | paths under `state_root` built anywhere else; any non-atomic state write |
-| Spend summing and budget checks | `relay/ledger.py` | summing tokens or dollars anywhere else |
+| Spend summing, budget checks, ledger reading, writing and recovery | `relay/ledger.py` | summing tokens or dollars, opening `ledger.jsonl`, or judging a ledger line readable anywhere else; any rewrite, truncation or deletion of the ledger anywhere |
 | Lead status-line contract | `relay/status.py` (parse) and `relay/prompts.py` (wording) | the status words or their regex written in any other module |
 | Agent prompt and brief text | `relay/prompts.py` | prompt strings in `loop.py` or `cli.py` |
 | Owner pings | `relay/ping.py` | calling `claude-ping` or wording a ping anywhere else |
@@ -243,6 +251,8 @@ Relay replaces nothing: no copy exists in the tree.
 6. Queue parser: build. `builder` writes `relay/queue.py`.
 7. State and ledger: red tests. `test-writer` writes `tests/test_state.py` and `tests/test_ledger.py`.
 8. State and ledger: build. `builder` writes `relay/state.py` and `relay/ledger.py`.
+8a. Ledger recovery: red tests. `test-writer` writes `tests/test_ledger.py`, covering the torn-tail close-off in `append`, every unreadable-line kind skipped by `total` and `over`, `unreadable`, and that the ledger file's existing bytes are never changed.
+8b. Ledger recovery: build. `builder` writes `relay/ledger.py`: `append`, `total` and `over` as above, `unreadable`, and no `RelayError` raised on file content.
 9. Stream and runner: red tests. `test-writer` writes `tests/test_stream.py` and `tests/test_runner.py`.
 10. Stream and runner: build. `builder` writes `relay/stream.py` and `relay/runner.py`.
 11. Status, prompts and ping: red tests. `test-writer` writes `tests/test_status.py`, `tests/test_prompts.py` and `tests/test_ping.py`.
