@@ -577,3 +577,149 @@ def test_killing(capsys: pytest.CaptureFixture[str]) -> None:
         _line(capsys)
         == "lead s3: killed at 200001 context tokens, past the hard ceiling"
     )
+
+
+# Behavior 11: def recut_started(sid: str, reason: str) -> None: ...
+# "recut <sid>: started: <reason>"
+
+
+def test_recut_started_names_the_section_and_reason(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the recut start line drops the section id or the reason, or is misworded.
+    progress.recut_started("s5.1", "two leads needed")
+    assert _line(capsys) == "recut s5.1: started: two leads needed"
+
+
+# Behavior 12: def recut_finished(sid: str, result: RunResult, changed: bool) -> None: ...
+# "recut <sid>: finished <outcome> (<tokens> tokens, $<dollars>)"; outcome "killed", "exit <code>",
+# "with the queue unchanged" or "with the queue recut", the first that holds
+
+
+def test_recut_finished_with_the_queue_recut(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a clean recut that changed the queue is misworded, or its spend is not shown to 2 places.
+    progress.recut_finished("s5", _result(tokens=3456, dollars=0.7), True)
+    assert (
+        _line(capsys) == "recut s5: finished with the queue recut (3456 tokens, $0.70)"
+    )
+
+
+def test_recut_finished_with_the_queue_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a clean recut that left the queue alone is reported as recut.
+    progress.recut_finished("s5", _result(tokens=12, dollars=0.004), False)
+    assert (
+        _line(capsys)
+        == "recut s5: finished with the queue unchanged (12 tokens, $0.00)"
+    )
+
+
+def test_recut_finished_non_zero_exit_beats_changed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a recut that exited non-zero is reported by whether the queue changed.
+    progress.recut_finished("s5", _result(exit_code=2, tokens=8, dollars=1.0), True)
+    assert _line(capsys) == "recut s5: finished exit 2 (8 tokens, $1.00)"
+
+
+def test_recut_finished_non_zero_exit_with_queue_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: "with the queue unchanged" is checked ahead of a non-zero exit.
+    progress.recut_finished("s5", _result(exit_code=1, tokens=8, dollars=1.0), False)
+    assert _line(capsys) == "recut s5: finished exit 1 (8 tokens, $1.00)"
+
+
+def test_recut_finished_killed_beats_everything(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a killed recut is reported by its exit code or the queue's state instead of "killed".
+    result = _result(exit_code=None, killed=True, tokens=210000, dollars=4.5)
+    progress.recut_finished("s5", result, True)
+    assert _line(capsys) == "recut s5: finished killed (210000 tokens, $4.50)"
+
+
+def test_recut_finished_killed_with_queue_unchanged(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a killed recut that left the queue alone reads "exit None" or "with the queue unchanged".
+    result = _result(exit_code=None, killed=True, tokens=1, dollars=0.0)
+    progress.recut_finished("s5", result, False)
+    assert _line(capsys) == "recut s5: finished killed (1 tokens, $0.00)"
+
+
+# Behavior 13: def needs_answer(sid: str, question: str) -> None: ...
+# "section <sid>: needs an answer: <question>"
+
+
+def test_needs_answer_names_the_section_and_question(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the line drops the section id or the question, or is misworded.
+    progress.needs_answer("s6.2", "Ship under relay or baton?")
+    assert _line(capsys) == "section s6.2: needs an answer: Ship under relay or baton?"
+
+
+# Behavior 14: def failed(sid: str, failures: int) -> None: ...
+# "section <sid>: failed (<failures> of 2)"
+
+
+@pytest.mark.parametrize("failures", [1, 2])
+def test_failed_shows_the_count_of_two(
+    failures: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the failure count is missing, fixed, or not shown "of 2".
+    progress.failed("s7", failures)
+    assert _line(capsys) == f"section s7: failed ({failures} of 2)"
+
+
+# Behavior 15: def waiting(parked: list[str]) -> None: ...
+# "waiting for answers on <id>, <id>"
+
+
+def test_waiting_on_one_section(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a single parked id is misworded or carries a stray separator.
+    progress.waiting(["s8"])
+    assert _line(capsys) == "waiting for answers on s8"
+
+
+def test_waiting_on_several_sections_lists_them_comma_separated(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: parked ids are dropped, reordered, or joined other than by ", ".
+    progress.waiting(["s8", "s2.1", "s9"])
+    assert _line(capsys) == "waiting for answers on s8, s2.1, s9"
+
+
+# Behavior 16: def ended(queue: Path, code: int, reason: str, detail: str) -> None: ...
+# "relay go <queue name>: ended <reason>: <detail> (exit <code>)"
+
+
+def test_ended_names_queue_reason_detail_and_code(
+    queue_file: Callable[[str], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the queue name, reason, detail or exit code is missing or misworded.
+    queue = queue_file("workboard-queue.md")
+    progress.ended(queue, 3, "crashed", "KeyError: 's1'")
+    line = _line(capsys)
+    assert line in tuple(
+        f"relay go {q}: ended crashed: KeyError: 's1' (exit 3)" for q in _queues(queue)
+    )
+
+
+def test_ended_with_code_zero(
+    queue_file: Callable[[str], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a clean end omits "(exit 0)" or shows another code.
+    queue = queue_file("m2-rest-queue.md")
+    progress.ended(queue, 0, "done", "every section closed")
+    line = _line(capsys)
+    assert line in tuple(
+        f"relay go {q}: ended done: every section closed (exit 0)"
+        for q in _queues(queue)
+    )
