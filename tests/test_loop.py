@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from typing import Callable
 import pytest
 
 import relay.ping
+import relay.queue
 import relay.runner
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
@@ -303,19 +305,76 @@ def test_a_section_parked_mid_queue_is_passed_over_for_the_next_unblocked_one(
     assert _ran_on(queue, cfg, "sess-lead-2") == {"s2"}
 
 
+def _replace_queue(queue: Path, name: str) -> None:
+    """Replace `queue` with the fixture `name` in one rename, so no reader sees it half written."""
+    staged = queue.with_name(queue.name + ".staged")
+    staged.write_bytes((FIXTURES / name).read_bytes())
+    os.replace(staged, queue)
+
+
+def _between_passes(monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]) -> Callable[[float], None]:
+    """Wrap `parse_queue` in every loaded `relay` module that holds it; return `apply`.
+
+    `apply(timeout)` makes `change` happen once, in the loop's own thread just before its next
+    queue parse, so no pass both read the queue from before `change` and sees state from after
+    it. A loop that never parses again gets `change` from the test thread after `timeout`."""
+    original = relay.queue.parse_queue
+    armed = threading.Event()
+    applied = threading.Event()
+    once = threading.Lock()
+    # Set on the thread running `change`, so a `parse_queue` that `change` itself reaches goes
+    # straight to the original instead of waiting on `once`, which that thread holds.
+    changing = threading.local()
+
+    def apply_once() -> None:
+        with once:
+            if not applied.is_set():
+                changing.active = True
+                try:
+                    change()
+                finally:
+                    changing.active = False
+                applied.set()
+
+    def wrapped(*args: object, **kwargs: object) -> object:
+        if armed.is_set() and not getattr(changing, "active", False):
+            apply_once()
+        return original(*args, **kwargs)
+
+    for name, module in list(sys.modules.items()):
+        if (name == "relay" or name.startswith("relay.")) and getattr(module, "parse_queue", None) is original:
+            monkeypatch.setattr(module, "parse_queue", wrapped)
+
+    def apply(timeout: float) -> None:
+        armed.set()
+        if not applied.wait(timeout):
+            apply_once()
+
+    return apply
+
+
 def test_each_pass_re_parses_the_queue(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue = queue_file(WORKBOARD)
     scenario(_lines(NO_STATUS_LEAD))
     parked = _open_ids(queue)[0]
     state = _park_all_but_done(queue, cfg, parked)
+
+    def replace_and_answer() -> None:
+        _replace_queue(queue, M2)
+        State.open(queue, cfg).set_answer(parked, "Use port 8080.")
+
+    apply = _between_passes(monkeypatch, replace_and_answer)
     loop = _Background(queue, cfg)
     try:
         time.sleep(SETTLE)
         assert loop.still_running()
-        queue.write_bytes((FIXTURES / M2).read_bytes())
-        State.open(queue, cfg).set_answer(parked, "Use port 8080.")
+        apply(5.0)
         loop.finish()
     finally:
         state.stop_file.touch()
