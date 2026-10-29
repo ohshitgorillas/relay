@@ -24,7 +24,9 @@ Relay reads a queue written by Guild's `divvyer`: a Markdown file of sections, e
 
 When only parked sections are left, Relay waits, checking every `poll_seconds` for an answer or the stop file. Every stop sends the owner a ping saying why.
 
-Relay never commits, never cleans the work tree, and never edits the queue. Leads and the divvyer run from the git top level of the queue's directory and keep git and the queue as the record of what is finished.
+Relay never commits or cleans the work tree. Leads and the divvyer own queue authorship; Relay's sole queue-write exception is restoring the exact pre-invocation bytes and permission mode after a failed recut. Leads and the divvyer run from the git top level of the queue's directory and keep git and the queue as the record of what is finished.
+
+A recut must finish without a kill, non-zero exit or backend error and produce a parseable, changed queue. Failed invocations, malformed, empty or missing output, and unchanged sections restore the original queue and count as failures; a second failure stops the run. Invocation exceptions restore the original before propagating. If restoration itself fails, Relay stops rather than continuing with failed queue edits. Backend finalization errors, including missing required Codex telemetry, also fail lead and recut invocations even when the child exits successfully.
 
 ## Requirements
 
