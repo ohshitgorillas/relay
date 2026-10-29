@@ -25,8 +25,37 @@ from relay.stream import StreamState
 from relay.ledger import Spend
 from dataclasses import replace
 from relay.backends import replay
+import relay.files as publication
+import relay.runner as runner_module
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def test_runner_telemetry_uses_shared_publication_and_replays_final_snapshot(
+    fake_cfg: Config, tmp_path: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when runner bypasses shared publication or replay ignores the finalized snapshot.
+    calls = []
+    original = publication.atomic_write
+
+    def publish(path, data, *, mode=None):
+        calls.append((path, data))
+        json.loads(data)
+        path.write_bytes(data)
+
+    for name, value in list(vars(runner_module).items()):
+        if value is original:
+            monkeypatch.setattr(runner_module, name, publish)
+    monkeypatch.setattr(publication, "atomic_write", publish)
+    command = [sys.executable, "-c", "print('wire answer')"]
+    backend = PollingBackend(command)
+    result = run_agent(command, "", tmp_path, run_dir, _go, tmp_path / "retire",
+                       backend=backend, cfg=replace(fake_cfg, backend="generic"))
+    assert calls, "runner bypassed shared atomic publication"
+    snapshots = [(path, data) for path, data in calls if b"final answer" in data]
+    assert snapshots
+    assert all(path.parent == run_dir for path, _ in snapshots)
+    assert replay(result.log) == result.stream
 
 LINES = [
     json.dumps({"type": "system", "subtype": "init", "session_id": "sess-r"}),
@@ -165,19 +194,35 @@ def test_run_agent_reaps_the_child_before_it_returns(
 def test_on_event_is_given_the_stream_state_fed_up_to_each_line_and_the_result_carries_it(
     fake: list[str], tmp_path: Path, run_dir: Path
 ) -> None:
-    seen: list[object] = []
+    seen: list[StreamState] = []
 
-    def on_event(state: object) -> str:
+    def on_event(state: StreamState) -> str:
         seen.append(copy.deepcopy(state))
         return "go"
 
     result = run_agent(fake, "p\n", tmp_path, run_dir, on_event, tmp_path / "retire")
-    # Every line of LINES changes the state (session, three context sizes, the result),
-    # so a state fed line by line differs from one event to the next.
+    # Design callback contract: quiet polls may repeat the last snapshot.
+    # Each line still changes state (session, three context sizes, the result),
+    # so callbacks must expose the transitions even with duplicates between them.
     assert len(seen) >= 2
-    for before, after in zip(seen, seen[1:]):
-        assert before != after
+    assert sum(before != after for before, after in zip(seen, seen[1:])) >= len(LINES) - 1
     assert result.stream == seen[-1]
+    # Breaks when a parsed observation is omitted or delivered out of order,
+    # including when an initial quiet callback masks the missing transition.
+    observations: list[tuple[str | None, int, str | None]] = []
+    for state in seen:
+        observation = (state.session_id, state.context_tokens, state.result_text)
+        if not observations or observation != observations[-1]:
+            observations.append(observation)
+    if observations[0] == (None, 0, None):
+        observations = observations[1:]
+    assert observations == [
+        ("sess-r", 0, None),
+        ("sess-r", 10, None),
+        ("sess-r", 20, None),
+        ("sess-r", 30, None),
+        ("sess-r", 30, "DONE"),
+    ]
 
 
 def test_run_result_stream_is_fed_from_this_childs_lines(
@@ -501,9 +546,22 @@ def test_backend_poll_reaches_callback_while_stdout_is_quiet(
 def test_backend_finish_and_unique_output_are_used_for_every_run(
     fake_cfg: Config, tmp_path: Path, run_dir: Path
 ) -> None:
-    # Breaks when finish is skipped, its state is discarded, or outputs are reused.
+    # Breaks when finish is skipped, its state is discarded, outputs are reused,
+    # or finish receives another run's output.
     command = [sys.executable, "-c", "print('wire answer')"]
-    backend = PollingBackend(command)
+    finished_texts: list[str] = []
+
+    class OutputReadingBackend(PollingBackend):
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            command = super().argv(role, cfg, cwd, output)
+            output.write_text(f"output for run {len(self.outputs)}")
+            return command
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            finished_texts.append(output.read_text())
+            return super().finish(state, output)
+
+    backend = OutputReadingBackend(command)
     results = [run_agent(command, "handoff", tmp_path, run_dir, _go,
                          tmp_path / "retire", backend=backend, cfg=fake_cfg)
                for _ in range(2)]
@@ -512,6 +570,7 @@ def test_backend_finish_and_unique_output_are_used_for_every_run(
     assert all(path.parent == run_dir for path in backend.outputs)
     assert all(result.stream.result_text == "final answer" for result in results)
     assert all(result.stream.spend == Spend(654, 0.0) for result in results)
+    assert finished_texts == ["output for run 1", "output for run 2"]
 
 
 def test_replay_restores_runner_telemetry_beside_legacy_claude_logs(

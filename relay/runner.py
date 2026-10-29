@@ -8,7 +8,6 @@ import os
 import selectors
 import signal
 import subprocess
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -18,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 from relay.stream import StreamState
 from relay.ledger import Spend
+from relay.files import atomic_write
 
 if TYPE_CHECKING:
     from relay.backends.base import Backend
@@ -110,15 +110,7 @@ def run_agent(
 
     def snapshot() -> None:
         payload = json.dumps(asdict(state), default=list) + "\n"
-        fd, temporary = tempfile.mkstemp(dir=run_dir, prefix=telemetry.name + ".")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, telemetry)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
+        atomic_write(telemetry, payload.encode("utf-8"))
 
     def observe() -> None:
         nonlocal state, killed, retired

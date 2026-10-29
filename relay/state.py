@@ -6,15 +6,14 @@ import contextlib
 import fcntl
 import hashlib
 import json
-import os
 import re
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO, Callable, Iterator, Literal, TypeVar
 
 from relay.config import Config
 from relay.errors import LockedError
+from relay.files import atomic_write
 
 FAILURE_LIMIT = 2
 
@@ -73,16 +72,7 @@ class State:
             return {"sections": {}, "last_any": None}
 
     def _save(self, record: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=_RECORD + ".")
-        try:
-            with os.fdopen(fd, "w") as handle:
-                json.dump(record, handle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._dir / _RECORD)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        atomic_write(self._dir / _RECORD, json.dumps(record).encode("utf-8"))
 
     @contextlib.contextmanager
     def _write_guard(self) -> Iterator[None]:
