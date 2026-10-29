@@ -59,8 +59,9 @@ def lead_prompt(
             "and pass on its answer; on a non-zero exit the agent reads for itself.\n\n" + map_block
         )
     parts.append(
-        "Retire contract: on reaching a safe point, after a step's commit, check whether "
-        f"the file {retire_flag} exists. If it exists, stop and end with RETIRED. "
+        "Retire contract: before every dispatch and after every commit, whether it "
+        f"succeeded or failed, check whether the file {retire_flag} exists. If it exists, "
+        "dispatch nothing new, wait for agents already running, and end with RETIRED. "
         "A session grown heavy, past about 100k tokens of context, also stops at its "
         "next safe point and ends with RETIRED, never RECUT: Relay starts a fresh lead "
         "on the same section, which resumes from this session. RECUT is only for a "
