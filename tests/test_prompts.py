@@ -7,7 +7,15 @@ from pathlib import Path
 
 from relay.check import CheckResult
 from relay.config import Config
-from relay.prompts import ask_brief, check_feedback, lead_prompt, recut_brief, research_brief
+from relay.prompts import (
+    ask_brief,
+    check_feedback,
+    design_answer_brief,
+    design_brief,
+    lead_prompt,
+    recut_brief,
+    research_brief,
+)
 from relay.queue import Section
 from tests.conftest import FIXTURES
 
@@ -447,3 +455,203 @@ def test_ask_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
     brief = _ask(fake_cfg)
     assert f"When the file {RESEARCH_FLAG} exists" in brief
     assert "send no more readers" in brief
+
+
+# Ladder design (docs/superpowers/specs/relay-ladder-design.md, Modules `relay/prompts.py`,
+# "The architect's brief" and Homes; Order 6).
+
+DESIGN = Path("/work/repo/docs/superpowers/specs/relay-check-design.md")
+APPROVAL = "I am sick of this paperwork bullshit. Make it stop."
+EVIDENCE = [
+    Path("/state/relay/work-repo-docs-queue-md/runs/3.jsonl"),
+    Path("/work/repo/tests/test_loop.py"),
+]
+PROBLEM = "`_verify` parks after one failed check, not three; tests/test_loop.py fails on it"
+GUESS_FIX = "move CHECK_LIMIT into relay/config.py"
+
+
+def _stepped(steps: tuple[str, ...] = ("6", "7"), body: str = BODY, title: str = "Ledger recovery") -> Section:
+    return Section(
+        id="s4",
+        title=title,
+        body=body,
+        depends_on=("s3",),
+        open=True,
+        steps=steps,
+    )
+
+
+# Behavior 2 to 5: As now, plus a status rule: the problem after RECUT: or DESIGN:, the guess
+# after ` | guess: `, DESIGN and WAITING: <id>.
+
+
+def test_lead_prompt_states_the_guess_separator() -> None:
+    # Breaks when: the lead is not told that a fix it has in mind follows only after " | guess: ".
+    assert " | guess: " in _lead()
+
+
+def test_lead_prompt_says_when_design_and_waiting_apply() -> None:
+    # Breaks when: the lead is not told DESIGN is for a lack no recut can supply, or that
+    # WAITING: <id> is for a section that cannot go on until queue section <id> lands.
+    prompt = _lead()
+    assert "DESIGN: " in prompt
+    assert "no recut can supply" in prompt
+    assert "WAITING: <id>" in prompt
+    assert "until queue section <id> lands" in prompt
+
+
+def test_lead_prompt_says_the_problem_names_its_evidence_and_design_step() -> None:
+    # Breaks when: the rule that the problem names what fails, its evidence and its design step
+    # is left out.
+    prompt = _lead().lower()
+    assert "what fails" in prompt
+    assert "evidence" in prompt
+    assert "design step" in prompt
+
+
+def test_lead_prompt_with_the_status_rule_keeps_everything_else() -> None:
+    # Breaks when: the status rule replaces the old forms instead of adding to them.
+    prompt = _lead()
+    assert " | guess: " in prompt
+    assert prompt.startswith("You are a lead")
+    assert BODY in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 1 and 6: design_brief is three lines and nothing else; it carries the problem, the
+# steps and the evidence paths, and the guess appears nowhere in it.
+
+
+def test_design_brief_is_the_three_lines_and_nothing_else() -> None:
+    # Breaks when: a line is added, dropped or worded otherwise, the steps or evidence are joined
+    # other than with ", ", or the section body is copied in.
+    brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order 6, 7, cannot go on: "
+        f"{PROBLEM} Evidence: {EVIDENCE[0]}, {EVIDENCE[1]}.",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_brief_with_no_steps_says_steps_unnamed() -> None:
+    # Breaks when: an empty `steps:` gives an empty Order or is worded other than "steps unnamed".
+    brief = design_brief(DESIGN, QUEUE, _stepped(steps=()), PROBLEM, EVIDENCE[:1], APPROVAL)
+    assert brief.splitlines()[1] == (
+        f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order steps unnamed, "
+        f"cannot go on: {PROBLEM} Evidence: {EVIDENCE[0]}."
+    )
+
+
+def test_design_brief_carries_the_given_design_queue_and_approval() -> None:
+    # Breaks when: the design, queue or approval words are fixed rather than taken from the call.
+    design = Path("/other/docs/superpowers/specs/relay-ping-design.md")
+    queue = Path("/other/docs/baley-queue.md")
+    brief = design_brief(design, queue, _stepped(steps=("2",)), PROBLEM, EVIDENCE[:1], "approved by the owner")
+    lines = brief.splitlines()
+    assert lines[0] == f"rulings {design}"
+    assert f"at {queue}, under this design's Order 2, " in lines[1]
+    assert lines[2] == "approve: approved by the owner"
+
+
+def test_design_brief_holds_no_guess_from_the_section() -> None:
+    # Breaks when: the section's title or body, which may carry a lead's guess, reaches the
+    # architect's brief, or the problem, steps or evidence paths are dropped.
+    body = f"## Check limit\n\nRECUT: {PROBLEM}{' | guess: '}{GUESS_FIX}\n"
+    section = _stepped(body=body, title=f"Check limit, guess: {GUESS_FIX}")
+    brief = design_brief(DESIGN, QUEUE, section, PROBLEM, EVIDENCE, APPROVAL)
+    assert PROBLEM in brief
+    assert "Order 6, 7," in brief
+    assert str(EVIDENCE[0]) in brief
+    assert str(EVIDENCE[1]) in brief
+    assert GUESS_FIX not in brief
+    assert "guess" not in brief
+
+
+# Behavior 7 and 8: design_answer_brief: `rulings <design>`, the answer lines for the numbers as
+# written, or `<n>: <answer>` / `new: <answer>` when there is none, then `approve: <approval>`.
+
+
+def test_design_answer_brief_keeps_the_answer_lines_for_the_numbers_as_written() -> None:
+    # Breaks when: a numbered line is reworded, a line for another number or an unnumbered line is
+    # kept, "10:" is taken as "1:", or the rulings or approve line is left out.
+    answer = "Thanks.\n1: take the recommendation, {braces} 100%\n10: not asked\n2: the alternative\n3: unasked"
+    brief = design_answer_brief(DESIGN, (1, 2), answer, APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "1: take the recommendation, {braces} 100%",
+        "2: the alternative",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_one_number_and_no_numbered_line_numbers_the_answer() -> None:
+    # Breaks when: an unnumbered answer to a single decision is not given that decision's number.
+    brief = design_answer_brief(DESIGN, (3,), "go with the recommendation", APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "3: go with the recommendation",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_several_numbers_and_no_numbered_line_says_new() -> None:
+    # Breaks when: an unnumbered answer to several decisions is not passed as `new: <answer>`.
+    brief = design_answer_brief(DESIGN, (1, 2), "do both the cheap way", APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "new: do both the cheap way",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_no_numbers_says_new() -> None:
+    # Breaks when: an answer with no decisions to number is not passed as `new: <answer>`.
+    brief = design_answer_brief(DESIGN, (), "add a cap line", "approved by the owner")
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "new: add a cap line",
+        "approve: approved by the owner",
+    ]
+
+
+# Behavior 9: recut_brief: as now, plus when design is set, the amended-design sentence.
+
+AMENDED = (
+    f"The design {DESIGN} was amended for this problem. "
+    "Cut this section's work again from it, its new Order steps included."
+)
+
+
+def test_recut_brief_with_a_design_says_it_was_amended() -> None:
+    # Breaks when: the design is ignored, worded otherwise, or names another path.
+    brief = recut_brief(QUEUE, _section(), "three modules, not one step", LEAD_LOG, design=DESIGN)
+    assert AMENDED in brief
+
+
+def test_recut_brief_without_a_design_leaves_the_sentence_out() -> None:
+    # Breaks when: the amended sentence is written though design is None or left at its default,
+    # or is never written at all.
+    assert AMENDED in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG, design=DESIGN)
+    assert "was amended for this problem" not in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG)
+    assert "was amended for this problem" not in recut_brief(
+        QUEUE, _section(), "three modules", LEAD_LOG, design=None
+    )
+
+
+def test_recut_brief_with_a_design_keeps_everything_else() -> None:
+    # Breaks when: setting design replaces the recut brief instead of adding to it, or drops or
+    # rewords any of the brief as it is without a design (the queue path, the section, the reason,
+    # the log path): with design set the brief is the no-design brief plus the amended sentence.
+    reason = "three modules, not one step: split stream from runner"
+    brief = recut_brief(QUEUE, _section(sid="s7"), reason, LEAD_LOG, design=DESIGN)
+    plain = recut_brief(QUEUE, _section(sid="s7"), reason, LEAD_LOG)
+    assert AMENDED in brief
+    assert "recut" in brief
+    assert "s7" in brief
+    assert reason in brief
+    assert str(LEAD_LOG) in brief
+    assert str(QUEUE) in brief
+    assert brief.count(AMENDED) == 1
+    assert brief.replace(AMENDED, " ").split() == plain.split()
