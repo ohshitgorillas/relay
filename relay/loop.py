@@ -19,6 +19,7 @@ from relay.prompts import (
     check_feedback,
     design_answer_brief,
     design_brief,
+    design_retry_brief,
     lead_prompt,
     recut_brief,
     research_brief,
@@ -129,6 +130,7 @@ def _run_section(
     backend = backends.get_backend(previous_backend)
     answer = state.take_answer(sid)
     feedback = state.take_check_feedback(sid)
+    guidance = state.take_guidance(sid)
     prompt = lead_prompt(
         queue,
         section,
@@ -140,6 +142,7 @@ def _run_section(
         research.block(m) if m is not None else None,
         handoff_hint=backend.resume_hint(resume) if resume is not None else None,
         backend=cfg.backend,
+        guidance=guidance,
     )
 
     retire_flag.unlink(missing_ok=True)
@@ -550,9 +553,10 @@ def _design_change(
     _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
 
 
-def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, Path, str | None] | None:
-    """(branch, worktree, head commit) of the lead's code: the BRANCH line of its report, else the
-    worktree on lead/<sid>; None when neither is found."""
+def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, str | None] | None:
+    """(branch, head commit) of the lead's code: the BRANCH line of its report, else the worktree
+    on lead/<sid>; None when neither is found. The architect reads it through git by branch and
+    commit, never by the worktree's path, which lies outside its repository."""
     found = ladder.lead_branch(report)
     if found is None:
         tree = git.section_worktree(cwd, sid)
@@ -560,7 +564,7 @@ def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, Path, str 
             return None
         found = (f"lead/{sid}", tree)
     branch, tree = found
-    return branch, tree, git.head(tree) if tree.is_dir() else None
+    return branch, git.head(tree) if tree.is_dir() else None
 
 
 def _design_answer(
@@ -621,18 +625,48 @@ def _architect(
     problem: str,
     lead_log: Path,
 ) -> None:
-    """The one architect run on `design` with `brief`; then act on its report."""
+    """The architect run on `design` with `brief`, run once more when it files no report (its
+    final message and the reason added to the brief) unless the budget or the section's cap is
+    spent; then act on its report."""
     sid = section.id
-    progress.design_started(sid, design, section.steps, problem)
-    result, _ = _run(
-        cfg, state, ledger, since, "design", sid, cfg.design_command, brief,
-        _git_top(design.parent), retire_flag, None, 2,
-    )
-    report = ladder.parse_report(result.stream.result_text)
-    progress.design_finished(sid, result, report)
+    result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, brief, problem)
+    if _no_report(result, report):
+        if _over_cap(cfg, queue, state, ledger, section):
+            return
+        if ledger.over(cfg, Spend(0, 0.0), since) is None:
+            progress.design_no_report(sid, again=True)
+            retry = design_retry_brief(brief, ladder.said(result.stream.result_text))
+            result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
     _design_outcome(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
     )
+
+
+def _architect_run(
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    brief: str,
+    problem: str,
+) -> tuple[RunResult, ladder.DesignReport | None]:
+    """One architect run on `design` with `brief`: its result and its parsed report."""
+    progress.design_started(section.id, design, section.steps, problem)
+    result, _ = _run(
+        cfg, state, ledger, since, "design", section.id, cfg.design_command, brief,
+        _git_top(design.parent), retire_flag, None, 2,
+    )
+    report = ladder.parse_report(result.stream.result_text)
+    progress.design_finished(section.id, result, report)
+    return result, report
+
+
+def _no_report(result: RunResult, report: ladder.DesignReport | None) -> bool:
+    """The architect ran to a clean end and filed no parseable report."""
+    return report is None and not (result.killed or result.exit_code != 0 or result.stream.is_error)
 
 
 def _design_outcome(
@@ -650,7 +684,11 @@ def _design_outcome(
     result: RunResult,
     report: ladder.DesignReport | None,
 ) -> None:
-    """Park on a failed or undecided design change; on an approved one, recut from it at rung 2."""
+    """Park on a failed or undecided design change; on an approved one, recut from it at rung 2.
+    A clean run with no report (already rerun once) parks nothing: the section goes back to its
+    lead, no failure counted, with the architect's final message as guidance (owner's ruling,
+    29 Oct: never park over a technical gap). Each lead, architect and design pass then meets the
+    loop's budget check and the section's cap, the only bound on DESIGN after DESIGN."""
     sid = section.id
     if result.killed:
         what = "the architect was killed"
@@ -659,7 +697,10 @@ def _design_outcome(
     elif result.stream.is_error:
         what = "the architect backend reported an error"
     elif report is None:
-        what = f"the architect filed no report; its final message:\n{ladder.said(result.stream.result_text)}"
+        progress.design_no_report(sid, again=False)
+        state.set_design_open(sid, None)
+        state.set_guidance(sid, ladder.said(result.stream.result_text))
+        return
     elif report.rejected:
         what = "the architect rejected the brief as steering"
     elif report.decisions or report.unfiled:

@@ -13,6 +13,7 @@ from relay.prompts import (
     check_feedback,
     design_answer_brief,
     design_brief,
+    design_retry_brief,
     lead_prompt,
     recut_brief,
     research_brief,
@@ -550,19 +551,47 @@ def test_design_brief_carries_every_owner_answer_verbatim_as_new_lines() -> None
     assert lines[2:5] == [f"new: {answers[0]}", f"new: {answers[1]}", f"approve: {APPROVAL}"]
 
 
-def test_design_brief_names_the_lead_branch_worktree_and_head_commit() -> None:
-    # Breaks when: the architect, run in the main checkout, is not told the branch, worktree and
-    # commit holding the lead's code (Gauntlet s2: gauntlet/seams/images.py only on lead/m2-images).
-    tree = Path("/work/repo-wt/m2-images")
-    code = ("lead/m2-images", tree, "54f611a5")
+def test_design_brief_points_at_the_lead_code_by_branch_and_commit_not_by_worktree_path() -> None:
+    # Breaks when: the architect, run in the main checkout, is not told the branch and commit
+    # holding the lead's code (Gauntlet s2: gauntlet/seams/images.py only on lead/m2-images), or
+    # is pointed at the lead's worktree path, which architect.md forbids it to read as outside
+    # the repository, instead of `git show <sha>:<path>` / `git diff main...<sha>`.
+    code = ("lead/m2-images", "54f611a5")
     lead_new = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=code).splitlines()[1]
     assert lead_new.startswith("lead new: ")
-    assert f"branch lead/m2-images at 54f611a5, worktree {tree}" in lead_new
+    assert "branch lead/m2-images at 54f611a5 in this repository" in lead_new
     assert "`git show 54f611a5:<path>`" in lead_new
-    no_commit = design_brief(
-        DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", tree, None)
-    )
+    assert "`git diff main...54f611a5`" in lead_new
+    assert "worktree" not in lead_new
+    assert "repo-wt" not in lead_new
+    no_commit = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", None))
     assert "`git show lead/m2-images:<path>`" in no_commit
+    assert "`git diff main...lead/m2-images`" in no_commit
+
+
+def test_design_retry_brief_keeps_the_brief_and_adds_the_last_message_and_why_it_was_no_report() -> None:
+    # Breaks when: the architect's rerun loses the original brief, is not shown its previous final
+    # message, or is not told the missing BRIEF … END DESIGN block was the reason and that it
+    # must either make the change or end with a BRIEF block saying why none is needed.
+    brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
+    retry = design_retry_brief(brief, "Blocked: the cited log is outside the repository.")
+    assert retry.startswith(brief.rstrip())
+    assert "Blocked: the cited log is outside the repository." in retry
+    assert "no `BRIEF …` … `END DESIGN` block" in retry
+    assert "Either make the design change, or end with a BRIEF … END DESIGN block" in retry
+
+
+def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
+    # Breaks when: a section handed back after two reportless architect runs reaches its lead
+    # without the architect's final message, or a lead with no guidance is told of an architect.
+    said = "The design already covers step 21; the lead misread Order 3."
+    given = lead_prompt(
+        QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG, guidance=said
+    )
+    assert said in given
+    assert "filed no design change" in given
+    plain = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
+    assert "filed no design change" not in plain
 
 
 def test_design_brief_with_no_steps_says_steps_unnamed() -> None:

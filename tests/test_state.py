@@ -175,6 +175,16 @@ def test_every_answer_is_kept_in_order_after_take_answer(queue: Path, fake_cfg: 
     assert State.open(queue, fake_cfg).section("s5").answers == ["Use port 8080.", "Compress the spec.\nKeep the cap."]
 
 
+def test_guidance_is_kept_across_reopening_and_taken_once(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: a reportless architect's message, handed to the section's next lead, is lost on
+    # reopening, leaves the section anything but open, or reaches every later lead again.
+    State.open(queue, fake_cfg).set_guidance("s5", "Order 3 already covers it.")
+    state = State.open(queue, fake_cfg)
+    assert state.section("s5").status == "open"
+    assert state.take_guidance("s5") == "Order 3 already covers it."
+    assert state.take_guidance("s5") is None
+
+
 def test_take_answer_with_no_answer_returns_none(queue: Path, fake_cfg: Config) -> None:
     assert State.open(queue, fake_cfg).take_answer("s6") is None
 

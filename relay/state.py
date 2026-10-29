@@ -47,6 +47,7 @@ class SectionState:
     last_backend: str = "claude"
     research_backend: str = "claude"
     answers: list[str] = field(default_factory=list)  # every owner answer to this section, in order
+    guidance: str | None = None  # a reportless architect's final message, for the next lead
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -249,6 +250,19 @@ class State:
     def take_answer(self, sid: str) -> str | None:
         def change(s: SectionState, _r: dict) -> str | None:
             taken, s.answer = s.answer, None
+            return taken
+
+        return self._update(sid, change)
+
+    def set_guidance(self, sid: str, guidance: str) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.guidance = guidance
+
+        self._update(sid, change)
+
+    def take_guidance(self, sid: str) -> str | None:
+        def change(s: SectionState, _r: dict) -> str | None:
+            taken, s.guidance = s.guidance, None
             return taken
 
         return self._update(sid, change)

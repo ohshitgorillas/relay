@@ -27,6 +27,7 @@ def lead_prompt(
     *,
     handoff_hint: str | None = None,
     backend: str = "claude",
+    guidance: str | None = None,
 ) -> str:
     parts = [
         "You are a lead. Carry the queue section below through development until it is done.",
@@ -44,6 +45,12 @@ def lead_prompt(
         )
     if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
+    if guidance is not None:
+        parts.append(
+            "Relay ran the architect twice on this section's last DESIGN or RECUT and it filed no "
+            "design change. Its final message, as guidance: go on with the section, or end with "
+            f"RECUT: if its cut is wrong:\n{guidance}"
+        )
     if check_feedback is not None:
         parts.append(
             "Relay ran this section's check after your DONE and it failed. "
@@ -105,20 +112,21 @@ def design_brief(
     evidence: list[Path],
     approval: str,
     answers: list[str] | tuple[str, ...] = (),
-    code: tuple[str, Path, str | None] | None = None,
+    code: tuple[str, str | None] | None = None,
 ) -> str:
-    """rulings, lead new (with where the lead's code is), one `new:` per owner answer verbatim,
-    approve; then the section's text from the queue."""
+    """rulings, lead new (with where the lead's code is: its branch and commit in this repository,
+    read through git, never a path outside it), one `new:` per owner answer verbatim, approve;
+    then the section's text from the queue."""
     steps = ", ".join(section.steps) if section.steps else "steps unnamed"
     paths = ", ".join(str(path) for path in evidence)
     where = ""
     if code is not None:
-        branch, tree, commit = code
+        branch, commit = code
         at = f" at {commit}" if commit else ""
-        show = f"`git show {commit}:<path>`" if commit else f"`git show {branch}:<path>`"
+        ref = commit or branch
         where = (
-            f" The lead's code is on branch {branch}{at}, worktree {tree}, not in this checkout; "
-            f"read it with {show} or under that worktree."
+            f" The lead's code is on branch {branch}{at} in this repository, not in this checkout; "
+            f"read a file with `git show {ref}:<path>` and its changes with `git diff main...{ref}`."
         )
     owner = "".join(f"new: {answer}\n" for answer in answers)
     return (
@@ -128,6 +136,18 @@ def design_brief(
         f"{owner}"
         f"approve: {approval}\n"
         f"\nSection {section.id} as the queue has it:\n{section.body.rstrip()}\n"
+    )
+
+
+def design_retry_brief(brief: str, said: str) -> str:
+    """`brief`, then the previous architect run's final message and why it was no report."""
+    return (
+        f"{brief.rstrip()}\n\n"
+        "Your previous run on this brief filed no report: its final message had no "
+        "`BRIEF …` … `END DESIGN` block. Its final message:\n"
+        f"{said}\n\n"
+        "Either make the design change, or end with a BRIEF … END DESIGN block explaining why "
+        "none is needed.\n"
     )
 
 

@@ -4369,43 +4369,117 @@ def test_rung_3_a_rejected_or_unapproved_design_report_parks_the_section_as_a_de
     assert _entries(queue, cfg, "recut") == []
 
 
-def test_a_design_brief_carries_the_owner_answers_section_text_and_lead_code_and_a_reportless_architect_is_quoted(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
-) -> None:
-    # Breaks when (Gauntlet s2, runs 24-29): an owner answer the lead took never reaches the
-    # architect; the brief lacks the section's text or the branch, worktree and head commit of the
-    # lead's code named on its report's BRANCH line; or an architect that ends without a report
-    # parks the section, and pings the owner, without quoting what it said.
-    queue = _ladder(queue_file, cfg, tmp_path)
+def _lead_tree(tmp_path: Path) -> tuple[Path, str]:
+    """A git repository standing in for the lead's worktree, one commit in; (tree, head commit)."""
     tree = tmp_path / "lead-tree"
     tree.mkdir()
     for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "step 21"]):
         subprocess.run([*_GIT, *args], cwd=tree, check=True, capture_output=True)
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True).stdout.strip()
+    return tree, commit
+
+
+REPORTLESS = "Blocked: the cited Relay log is outside the repository.\n\nEND DESIGN"
+REPORTLESS_AGAIN = "Still blocked: Order 3 already covers step 21; the lead should go on."
+
+
+def test_a_reportless_architect_is_rerun_with_its_message_then_the_section_goes_back_to_its_lead_unparked(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when (owner's ruling, 29 Oct; Gauntlet s2, runs 24-29): an owner answer the lead took
+    # never reaches the architect; the brief lacks the section's text or the lead's branch and head
+    # commit, or points the architect at the lead's worktree path (outside its repository, which
+    # architect.md forbids it to read); a reportless architect is not rerun once with its final
+    # message and the reason; or after a second reportless run the section is parked or pinged
+    # for the owner, a failure is counted, or the next lead is not given the architect's message.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    tree, commit = _lead_tree(tmp_path)
     state = State.open(queue, cfg)
     state.set_answer("s1", "Compress the spec throughout.")
     state.set_answer("s1", "The cap stays at 40,000 bytes.")
     scenario(_lines(DONE_LEAD))
     status = f"BRANCH lead/m2-images {tree}\nEND LEAD\nDESIGN: {PROBLEM}"
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", status)))]
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", status))), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads)
-    said = "Blocked: the cited Relay log is outside the repository.\n\nEND DESIGN"
-    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", said)))])
+    architects = [
+        _step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS))),
+        _step(str(_status_lead(tmp_path, "sess-arch-2", REPORTLESS_AGAIN))),
+    ]
+    cfg = _with_architect(cfg, tmp_path, architects)
     cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
-    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
 
-    brief = str(_runs(tmp_path, "design")[0]["prompt"])
+    designs = _runs(tmp_path, "design")
+    assert len(designs) == 2
+    brief = str(designs[0]["prompt"])
     lines = brief.splitlines()
     assert "new: Compress the spec throughout." in lines
     assert "new: The cap stays at 40,000 bytes." in lines
-    assert f"branch lead/m2-images at {commit}, worktree {tree}" in lines[1]
+    assert f"branch lead/m2-images at {commit} in this repository" in lines[1]
+    assert f"`git show {commit}:<path>`" in lines[1]
+    assert f"`git diff main...{commit}`" in lines[1]
+    assert str(tree) not in brief
     s1 = next(sec for sec in parse_queue(queue) if sec.id == "s1")
     assert s1.body.rstrip() in brief
-    question = State.open(queue, cfg).section("s1").question
-    assert question is not None
-    assert "the architect filed no report" in question
-    assert "Blocked: the cited Relay log is outside the repository." in question
-    assert any("Blocked: the cited Relay log is outside the repository." in " ".join(p) for p in _pings(tmp_path))
+    retry = str(designs[1]["prompt"])
+    assert retry.startswith(brief.rstrip())
+    assert "Blocked: the cited Relay log is outside the repository." in retry
+    assert "no `BRIEF …` … `END DESIGN` block" in retry
+
+    # The one ping is the go's own stop; none asks the owner anything.
+    assert [" ".join(p) for p in _pings(tmp_path)] == ["relay ladder-queue.md: stopped failed twice: section s1 failed twice"]
+    assert _runs(tmp_path, "recut") == []
+    leads_run = _runs(tmp_path, "lead")
+    assert REPORTLESS_AGAIN in str(leads_run[1]["prompt"])
+    assert all(REPORTLESS_AGAIN not in str(r["prompt"]) for r in leads_run[2:])
+    section = State.open(queue, cfg).section("s1")
+    assert section.question is None
+    assert section.design_open is None
+    assert section.design_changed is False
+    # The two failures that end the go are the scripted status-less leads after the hand-back.
+    assert section.failures == 2
+    assert len(_entries(queue, cfg, "design")) == 2
+
+
+def test_an_architect_that_files_a_report_on_its_rerun_lands_the_design_change(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: an approved report on the architect's rerun is not acted on as one on its first
+    # run would be (the divvyer recuts from the amended design), or the architect runs a third time.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
+    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS))), _step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "design")) == 2
+    assert "was amended for this problem" in str(_runs(tmp_path, "recut")[0]["prompt"])
+    state = State.open(queue, cfg)
+    assert state.section("s1b").design_changed is True
+    assert state.section("s1").status != "parked"
+
+
+def test_a_lead_that_asks_for_design_after_design_against_a_reportless_architect_is_stopped_by_the_budget(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a section handed back to its lead after reportless architect runs, whose lead
+    # asks for DESIGN again and again, loops without the dollar budget ending the go, or is parked
+    # for the owner on the way (the budget is the only bound; owner's ruling, 29 Oct).
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
+    cfg = _sequenced(cfg, tmp_path, leads, cycle=True)
+    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS)))])
+    cfg = _stop_on_ping(cfg, queue)
+    cfg = dataclasses.replace(cfg, dollar_budget=0.075)
+    assert run(queue, cfg) == ExitCode.BUDGET
+    assert _runs(tmp_path, "recut") == []
+    assert len(_runs(tmp_path, "lead")) >= 2
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "open"
+    assert section.failures == 0
 
 
 def test_rung_3_a_design_decision_parks_with_its_recommendation_and_relay_answer_resumes_the_architect(
