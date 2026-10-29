@@ -4,18 +4,28 @@ from __future__ import annotations
 
 import stat
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 
-from relay import backends, ping, progress
+from relay import backends, git, ladder, ping, progress, research
+from relay.check import owner_text, run_checks
 from relay.config import Config
-from relay.errors import ExitCode, QueueFormatError
+from relay.errors import ExitCode, QueueFormatError, ResearchError
 from relay.files import atomic_write
-from relay.ledger import Ledger, Spend
-from relay.prompts import lead_prompt, recut_brief
-from relay.queue import Section, blocked_by, parse_queue
+from relay.ledger import Kind, Ledger, Spend
+from relay.prompts import (
+    ask_brief,
+    check_feedback,
+    design_answer_brief,
+    design_brief,
+    lead_prompt,
+    recut_brief,
+    research_brief,
+)
+from relay.queue import Section, blocked_by, parse_queue, queue_design
 from relay.runner import RunResult, run_agent
-from relay.state import FAILURE_LIMIT, State
+from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
@@ -62,17 +72,19 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
             return ExitCode.BUDGET, "over budget", f"the {over} budget is spent"
 
         sections = parse_queue(queue)
+        _wake(sections, state, cwd)
         parked = {s.id for s in sections if state.section(s.id).status == "parked"}
-        blocked = blocked_by(sections, parked)
+        waiting_ids = {s.id for s in sections if state.section(s.id).status == "waiting"}
+        blocked = blocked_by(sections, parked | waiting_ids)
         runnable = [
             s
             for s in sections
             if s.open and state.section(s.id).status == "open" and s.id not in blocked
         ]
         if not runnable:
-            if not parked:
+            if not parked and not waiting_ids:
                 return ExitCode.QUEUE_EMPTY, "queue empty", "every section is done"
-            waiting = sorted(parked)
+            waiting = sorted(parked | waiting_ids)
             if waiting != last_waiting:
                 progress.waiting(waiting)
                 last_waiting = waiting
@@ -97,63 +109,292 @@ def _run_section(
 ) -> _Stop | None:
     sid = section.id
     current = state.section(sid)
+    if current.check_pending:
+        _verify(cfg, queue, state, ledger, cwd, section, state.pending_check_log(sid))
+        return None
+    if _over_cap(cfg, queue, state, ledger, section):
+        return None
+    if current.design_open is not None:
+        answer = state.take_answer(sid)
+        if answer is not None:
+            _design_answer(
+                queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer
+            )
+            return None
+    m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
+    if spent:
+        return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
     resume = current.last_session or state.last_session_any
-    backend = backends.get_backend(cfg.backend)
+    previous_backend = current.last_backend if current.last_session else state.last_backend_any
+    backend = backends.get_backend(previous_backend)
     answer = state.take_answer(sid)
+    feedback = state.take_check_feedback(sid)
     prompt = lead_prompt(
-        queue, section, resume, current.last_report, answer, retire_flag,
+        queue,
+        section,
+        resume,
+        current.last_report,
+        answer,
+        retire_flag,
+        feedback,
+        research.block(m) if m is not None else None,
         handoff_hint=backend.resume_hint(resume) if resume is not None else None,
+        backend=cfg.backend,
     )
-    on_event, budget_hit = _watcher(cfg, ledger, since, "lead", sid)
 
     retire_flag.unlink(missing_ok=True)
     progress.lead_started(sid, resume, answer is not None)
-    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, on_event, retire_flag,
-                       backend=backend, cfg=cfg, role="lead")
+    result, watch = _run(
+        cfg,
+        state,
+        ledger,
+        since,
+        "lead",
+        sid,
+        cfg.lead_command,
+        prompt,
+        cwd,
+        retire_flag,
+        m.commit if m is not None else None,
+        cap=ladder.section_cap(cfg, section),
+    )
     session = result.stream.session_id
-    ledger.append("lead", sid, session, result.stream.spend)
+    state.set_last_log(sid, result.log)
     if session is not None:
-        state.set_last_session(sid, session)
+        state.set_last_session(sid, session, cfg.backend)
         state.set_last_report(sid, result.stream.result_text or None)
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
     failed = result.killed or result.exit_code != 0 or result.stream.is_error or status is None
-    if failed:
+    if watch.idle_retired and not result.stream.is_error:
+        pass  # handled as RETIRED: no failure recorded
+    elif failed:
         second, count = _fail(state, sid)
         progress.failed(sid, count)
         if second:
             return _failed_twice(sid)
     elif status.kind == "DONE":
-        state.mark_done(sid)
-    elif status.kind == "RECUT" and current.from_recut:
-        # A section a recut made gets no second recut: the owner decides what happens to it.
-        question = f"a section from a recut asked to recut again: {status.text}"
-        state.park(sid, question)
-        ping.needs_owner(cfg, queue, sid, question)
-        progress.needs_answer(sid, question)
-    elif status.kind == "RECUT":
-        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, status.text, result):
-            return _failed_twice(sid)
+        _verify(cfg, queue, state, ledger, cwd, section, state.check_log(result.log))
+    elif status.kind in ("RECUT", "DESIGN"):
+        stop = _climb(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, status.kind, status.text, result.log
+        )
+        if stop is not None:
+            return stop
+    elif status.kind == "WAITING":
+        _wait(queue, cfg, state, sections, section, status.text)
     elif status.kind == "NEEDS-OWNER":
-        state.park(sid, status.text)
-        ping.needs_owner(cfg, queue, sid, status.text)
-        progress.needs_answer(sid, status.text)
+        _park(cfg, queue, state, sid, status.text)
     # RETIRED: nothing to record; the next pass runs a fresh lead on the same section.
 
-    if budget_hit[0]:
+    if watch.budget_hit:
         return ExitCode.BUDGET, "over budget", "a lead was retired when the budget ran out"
     return None
 
 
+def _landed(blocker: str, sections: list[Section], state: State, cwd: Path) -> bool:
+    """A blocker in the queue has landed when done and its section worktree is not dirty; one
+    gone from the queue, when every section recut from it has landed (or none exists)."""
+    found = next((s for s in sections if s.id == blocker), None)
+    if found is None:
+        return all(_landed(s.id, sections, state, cwd) for s in sections if s.came_from == blocker)
+    if state.section(blocker).status != "done" and found.open:
+        return False
+    tree = git.section_worktree(cwd, blocker)
+    return tree is None or git.clean(tree) is not False
+
+
+def _wake(sections: list[Section], state: State, cwd: Path) -> None:
+    """Reopen each waiting section whose blocker has landed. No ping."""
+    for s in sections:
+        record = state.section(s.id)
+        blocker = record.waits_on
+        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd):
+            state.wake(s.id)
+            progress.woken(s.id, blocker)
+
+
+def _wait(
+    queue: Path, cfg: Config, state: State, sections: list[Section], section: Section, blocker: str
+) -> None:
+    """WAITING: hold the section on its blocker with no ping, or park it when that cannot work."""
+    sid = section.id
+    by_id = {s.id: s for s in sections}
+    known = blocker in by_id or any(s.came_from == blocker for s in sections)
+    reason = None
+    if not known:
+        reason = f"it waits on {blocker}, which is not in the queue"
+    elif blocker == sid:
+        reason = "it waits on itself"
+    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent)):
+        reason = f"it waits on {blocker}, which has already landed"
+    else:
+        seen: set[str] = set()
+        todo = [blocker]
+        while todo and reason is None:
+            cur = todo.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if cur == sid:
+                reason = f"it waits on {blocker}, which waits on it"
+            elif cur in by_id:
+                todo.extend(by_id[cur].depends_on)
+                onward = state.section(cur).waits_on
+                if onward is not None:
+                    todo.append(onward)
+            else:  # recut out of the queue: it lands through the sections cut from it
+                todo.extend(s.id for s in sections if s.came_from == cur)
+    if reason is not None:
+        _park(cfg, queue, state, sid, f"Section {sid} cannot wait: {reason}.")
+        return
+    state.wait(sid, blocker)
+    progress.section_waiting(sid, blocker)
+
+
+def _section_cwd(cwd: Path, sid: str) -> Path:
+    """Where a section's check and research run: its worktree, else `cwd`."""
+    return git.section_worktree(cwd, sid) or cwd
+
+
+def _run(
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float | None,
+    kind: Kind,
+    sid: str,
+    argv: list[str],
+    text: str,
+    cwd: Path,
+    flag: Path,
+    map_commit: str | None = None,
+    rung: int | None = None,
+    cap: float | None = None,
+) -> tuple[RunResult, _Watch]:
+    """The one agent run: watch it, run it, ledger it. Returns the result and its watch."""
+    watch = _watcher(cfg, ledger, since, kind, sid, cwd, cap)
+    backend = backends.get_backend(cfg.backend)
+    invocation = replace(cfg, research_command=argv) if kind == "ask" else cfg
+    result = run_agent(
+        argv, text, cwd, state.run_dir, watch.on_event, flag,
+        backend=backend, cfg=invocation, role=kind,
+    )
+    ledger.append(
+        kind,
+        sid,
+        result.stream.session_id,
+        result.stream.spend,
+        map_commit,
+        result.stream.activity.agents,
+        rung,
+    )
+    return result, watch
+
+
+def _research(
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    queue: Path,
+    section: Section,
+) -> tuple[research.Map | None, bool]:
+    """The section's map and whether the budget ran out in research; None on no map.
+
+    Holds the section's research lock, so a `relay ask` never meets a map half-refreshed.
+    """
+    sid = section.id
+    where = _section_cwd(cwd, sid)
+    with state.research_lock(sid):
+        saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.stale(saved, where):
+            progress.map_reused(sid, saved)
+            return saved, False
+        state.drop_map(sid)
+        commit = git.head(where)
+        if commit is None:
+            return None, False
+        flag = state.research_flag(sid)
+        flag.unlink(missing_ok=True)
+        progress.research_started(sid, where)
+        result, watch = _run(
+            cfg,
+            state,
+            ledger,
+            since,
+            "research",
+            sid,
+            cfg.research_command,
+            research_brief(queue, section, flag, cfg),
+            where,
+            flag,
+        )
+        state.set_research_session(sid, result.stream.session_id, cfg.backend)
+        failed = result.killed or result.exit_code != 0 or result.stream.is_error
+        m = None if failed else research.parse_map(sid, commit, result.stream.result_text, cfg)
+        if m is not None:
+            research.save(m, state.map_path(sid))
+        progress.research_finished(sid, result, m)
+        return m, watch.budget_hit
+
+
+def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
+    """Put `question` to the section's researcher and return its answer; ResearchError without one."""
+    state = State.open(queue, cfg)
+    with state.research_lock(sid):
+        current = state.section(sid)
+        session = current.research_session
+        if session is None:
+            raise ResearchError(f"section {sid} has no researcher to ask")
+        if not backends.get_backend(cfg.backend).capabilities.resume:
+            raise ResearchError(f"backend {cfg.backend} cannot resume a researcher")
+        if current.research_backend != cfg.backend:
+            raise ResearchError(
+                f"section {sid} researcher used {current.research_backend}; selected backend is {cfg.backend}"
+            )
+        state.run_dir.mkdir(parents=True, exist_ok=True)
+        cwd = _git_top(queue.parent)
+        flag = state.research_flag(sid)
+        flag.unlink(missing_ok=True)
+        result, _ = _run(
+            cfg,
+            state,
+            Ledger(state.ledger_path),
+            None,
+            "ask",
+            sid,
+            [*cfg.research_command, "--resume", session],
+            ask_brief(question, flag, cfg),
+            _section_cwd(cwd, sid),
+            flag,
+        )
+        if result.killed or result.exit_code != 0 or result.stream.is_error:
+            raise ResearchError(f"the researcher for section {sid} failed")
+        answer = research.parse_answer(result.stream.result_text, cfg)
+        if answer is None:
+            raise ResearchError(f"the researcher for section {sid} gave no answer")
+        return answer
+
+
+@dataclass
+class _Watch:
+    on_event: Callable[[StreamState], Literal["go", "retire", "kill"]]
+    budget_hit: bool = False
+    idle_retired: bool = False
+
+
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float, who: Literal["lead", "recut"], sid: str
-) -> tuple[Callable[[StreamState], Literal["go", "retire", "kill"]], list[bool]]:
-    """The run_agent callback, and a one-slot flag set when a budget ran out mid-run."""
-    hit = [False]
+    cfg: Config, ledger: Ledger, since: float | None, who: Kind, sid: str, repo: Path,
+    cap: float | None = None,
+) -> _Watch:
+    """The run_agent callback: `budget_hit` on a spent budget, `idle_retired` for an idle lead."""
     retiring = [False]
     shown = [0]  # agent events already printed
     capabilities = backends.get_backend(cfg.backend).capabilities
+    snapshot: list[dict[str, str]] = []  # branch heads when the retire flag first went up
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
         events = stream.activity.events
@@ -161,22 +402,80 @@ def _watcher(
             progress.agent_event(who, sid, event)
         shown[0] = len(events)
         if capabilities.context and stream.context_tokens >= cfg.hard_ceiling:
-            progress.killing(sid, stream.context_tokens)
+            progress.killing(sid, stream.context_tokens, who)
             return "kill"
-        if ledger.over(cfg, stream.spend, since, capabilities=capabilities) is not None:
-            hit[0] = True
-            if not retiring[0]:
-                retiring[0] = True
-                progress.retiring(sid, "budget", stream.context_tokens)
-            return "retire"
-        if capabilities.context and stream.context_tokens >= cfg.context_limit:
-            if not retiring[0]:
-                retiring[0] = True
-                progress.retiring(sid, "context", stream.context_tokens)
-            return "retire"
-        return "go"
+        why: Literal["context", "budget", "cap"] | None = None
+        if since is not None and ledger.over(cfg, stream.spend, since, capabilities=capabilities) is not None:
+            watch.budget_hit = True
+            why = "budget"
+        elif capabilities.dollars and cap is not None and ledger.section_spend(sid).dollars + stream.spend.dollars > cap:
+            why = "cap"
+        elif capabilities.context and stream.context_tokens >= cfg.context_limit:
+            why = "context"
+        if why is None:
+            return "go"
+        if not retiring[0]:
+            retiring[0] = True
+            progress.retiring(sid, why, stream.context_tokens, who)
+        if who not in ("recut", "design"):  # these edit files and need not commit: no commit-based idle kill
+            if not snapshot:
+                snapshot.append(git.heads(repo))
+            elif capabilities.context and stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
+                # `git.heads` is {} when git fails: an empty read proves no commit either way.
+                now = git.heads(repo)
+                if now and now == snapshot[0]:
+                    if who == "lead":  # a research or ask run killed here is a failed run
+                        watch.idle_retired = True
+                    progress.retired_idle(sid, stream.context_tokens, who)
+                    return "kill"
+        return "retire"
 
-    return on_event, hit
+    watch = _Watch(on_event=on_event)  # `on_event` reads `watch` when it runs, after this line
+    return watch
+
+
+def _park(
+    cfg: Config,
+    queue: Path,
+    state: State,
+    sid: str,
+    question: str,
+    design: tuple[str, tuple[int, ...]] | None = None,
+) -> None:
+    """Park `sid` with `question`, ping the owner and show the question: the one park.
+    `design` (path, numbers) marks the question as the open design decisions' (state.park)."""
+    state.park(sid, question, design)
+    ping.needs_owner(cfg, queue, sid, question)
+    progress.needs_answer(sid, question)
+
+
+def _verify(
+    cfg: Config,
+    queue: Path,
+    state: State,
+    ledger: Ledger,
+    cwd: Path,
+    section: Section,
+    check_log: Path,
+) -> None:
+    """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
+    sid = section.id
+    where = _section_cwd(cwd, sid)
+    progress.check_started(sid, len(section.checks), where)
+    result = run_checks(cfg, section, where, check_log)
+    ledger.append_check(sid, result)
+    progress.check_finished(sid, result)
+    if result.verdict in ("pass", "none"):
+        state.mark_done(sid)
+    elif result.verdict == "fail":
+        state.set_check_pending(sid, False)
+        count = state.record_check_failure(sid, check_feedback(result))
+        progress.check_failed(sid, count)
+        if count >= CHECK_LIMIT:
+            _park(cfg, queue, state, sid, owner_text(result, count))
+    else:
+        state.set_check_pending(sid, True)
+        _park(cfg, queue, state, sid, owner_text(result, state.section(sid).check_failures))
 
 
 def _fail(state: State, sid: str) -> tuple[bool, int]:
@@ -189,6 +488,180 @@ def _failed_twice(sid: str) -> _Stop:
     return ExitCode.FAILED_TWICE, "failed twice", f"section {sid} failed twice"
 
 
+def _climb(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    kind: Literal["RECUT", "DESIGN"],
+    text: str,
+    lead_log: Path,
+) -> _Stop | None:
+    """The ladder's move for a RECUT or DESIGN: rung 1 a recut, rung 2 a design change, rung 3 a park."""
+    sid = section.id
+    design = ladder.design_of(queue_design(queue), cwd)
+    step = ladder.climb(kind, state.section(sid), design, sid)
+    problem = ladder.split_reason(text)[0]
+    if step.rung == 1:
+        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log):
+            second, count = _fail(state, sid)
+            progress.failed(sid, count)
+            if second:
+                return _failed_twice(sid)
+    elif step.rung == 3:
+        _park(cfg, queue, state, sid, step.why)
+    else:
+        # ladder.climb gives rung 2 only with a design in hand.
+        _design_change(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log
+        )
+    return None
+
+
+def _design_change(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    problem: str,
+    lead_log: Path,
+) -> None:
+    """Run the architect on `design` for `problem`, then act on its report."""
+    if _over_cap(cfg, queue, state, ledger, section):
+        return
+    check_log = state.check_log(lead_log)
+    evidence = [lead_log, *([check_log] if check_log.exists() else [])]
+    brief = design_brief(design, queue, section, problem, evidence, cfg.design_approval)
+    _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
+
+
+def _design_answer(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design_open: str,
+    answer: str,
+) -> None:
+    """Run the architect with the owner's `answer` to the open decisions, then act on its report."""
+    sid = section.id
+    current = state.section(sid)
+    design = Path(design_open)
+    if not current.last_log:
+        # The recut needs the lead's log as evidence; none is recorded, so the design change cannot land.
+        state.set_design_open(sid, None)
+        what = "no lead log is recorded for the section"
+        _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
+        return
+    # A record parked before the numbers were stored has none: the brief then numbers the answer "new".
+    numbers = tuple(current.design_numbers or ())
+    brief = design_answer_brief(design, numbers, answer, cfg.design_approval)
+    problem = f"the owner ruled on the open design decisions: {answer}"
+    _architect(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
+        Path(current.last_log),
+    )
+
+
+def _over_cap(cfg: Config, queue: Path, state: State, ledger: Ledger, section: Section) -> bool:
+    """Park `section` and return True when its spend is over its dollar cap."""
+    cap = ladder.section_cap(cfg, section)
+    if cap is None or not backends.get_backend(cfg.backend).capabilities.dollars:
+        return False
+    spent = ledger.section_spend(section.id).dollars
+    if spent <= cap:
+        return False
+    _park(cfg, queue, state, section.id, ladder.cap_text(section.id, spent, cap))
+    return True
+
+
+def _architect(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    brief: str,
+    problem: str,
+    lead_log: Path,
+) -> None:
+    """The one architect run on `design` with `brief`; then act on its report."""
+    sid = section.id
+    progress.design_started(sid, design, section.steps, problem)
+    result, _ = _run(
+        cfg, state, ledger, since, "design", sid, cfg.design_command, brief,
+        _git_top(design.parent), retire_flag, None, 2,
+    )
+    report = ladder.parse_report(result.stream.result_text)
+    progress.design_finished(sid, result, report)
+    _design_outcome(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
+    )
+
+
+def _design_outcome(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    problem: str,
+    lead_log: Path,
+    result: RunResult,
+    report: ladder.DesignReport | None,
+) -> None:
+    """Park on a failed or undecided design change; on an approved one, recut from it at rung 2."""
+    sid = section.id
+    if result.killed:
+        what = "the architect was killed"
+    elif result.exit_code != 0:
+        what = f"the architect exited {result.exit_code}"
+    elif result.stream.is_error:
+        what = "the architect backend reported an error"
+    elif report is None:
+        what = "the architect filed no report"
+    elif report.rejected:
+        what = "the architect rejected the brief as steering"
+    elif report.decisions or report.unfiled:
+        _park(
+            cfg, queue, state, sid, ladder.decisions_text(sid, design, report),
+            (str(design), ladder.decision_numbers(report)),
+        )
+        return
+    elif not report.approved:
+        what = "the architect did not approve the design"
+    else:
+        state.set_design_open(sid, None)
+        state.mark_design_changed(sid)
+        if _recut(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
+        ):
+            _park(cfg, queue, state, sid, ladder.failed_text(sid, design, "the recut made no usable change"))
+        return
+    _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
+
+
 def _recut(
     queue: Path,
     cfg: Config,
@@ -199,20 +672,24 @@ def _recut(
     retire_flag: Path,
     section: Section,
     reason: str,
-    lead: RunResult,
+    lead_log: Path,
+    design: Path | None = None,
+    rung: Literal[1, 2] = 1,
 ) -> bool:
-    """Run the divvyer's recut; True when it failed and that was the section's second failure."""
-    brief = recut_brief(queue, section, reason, lead.log)
+    """Run a transactional recut; True when failed, with failure policy owned by the caller."""
+    brief = recut_brief(queue, section, reason, lead_log, design)
     original_queue = queue.read_bytes()
     original_mode = stat.S_IMODE(queue.stat().st_mode)
     before = parse_queue(queue)
-    on_event, _hit = _watcher(cfg, ledger, since, "recut", section.id)
     progress.recut_started(section.id, reason)
     changed = False
     after = before
+    known = {s.id for s in before}
     try:
-        result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag,
-                           backend=backends.get_backend(cfg.backend), cfg=cfg, role="recut")
+        result, _ = _run(
+            cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief,
+            cwd, retire_flag, None, rung,
+        )
         failed = result.killed or result.exit_code != 0 or result.stream.is_error
         if not failed:
             try:
@@ -221,22 +698,23 @@ def _recut(
                 failed = True
             else:
                 changed = after != before
-        failed = failed or not changed
+                nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
+                failed = not changed or nested
     except BaseException:
         atomic_write(queue, original_queue, mode=original_mode)
         raise
     if failed:
-        # Known-failed output must never reach the parser or the next loop pass.
+        # A failed restoration must propagate without attempting it again.
         atomic_write(queue, original_queue, mode=original_mode)
-    ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
+        changed = False
     progress.recut_finished(section.id, result, changed)
     if failed:
-        second, count = _fail(state, section.id)
-        progress.failed(section.id, count)
-        return second
-    # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
-    known = {s.id for s in before}
+        return True
+    if section.id not in {s.id for s in after}:
+        state.drop_map(section.id)
     for made in after:
         if made.id not in known or made.id == section.id:
             state.mark_from_recut(made.id)
+            if design is not None:
+                state.mark_design_changed(made.id)
     return False

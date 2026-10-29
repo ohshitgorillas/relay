@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from relay import agents
 from relay.backends.base import Capabilities
-from relay.backends.codex_session import SessionReader
+from relay.backends.codex_session import SessionReader, rollout_boundary
 from relay.errors import ConfigError
 from relay.ledger import Spend
 from relay.stream import StreamState
@@ -20,14 +20,17 @@ if TYPE_CHECKING:
 
 
 class CodexBackend:
-    capabilities = Capabilities(context=True, tokens=True, dollars=False, subagents=True)
+    capabilities = Capabilities(context=True, tokens=True, dollars=False, subagents=True, resume=True)
 
     def __init__(self) -> None:
         self.home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
         self.reader: SessionReader | None = None
 
     def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
-        filename = {"lead": "lead", "recut": "divvyer"}.get(role)
+        filename = {
+            "lead": "lead", "recut": "divvyer", "research": "researcher",
+            "ask": "researcher", "design": "architect",
+        }.get(role)
         if filename is None:
             raise ConfigError(f"unknown Codex role {role!r}")
         path = self.home / "agents" / f"{filename}.toml"
@@ -51,6 +54,16 @@ class CodexBackend:
             if not isinstance(value, bool):
                 raise ConfigError(f"invalid Codex role feature {key!r} in {path}")
             overrides.extend(["-c", f"features.{json.dumps(key)}={str(value).lower()}"])
+        if role == "ask":
+            command = cfg.research_command
+            if len(command) < 2 or command[-2] != "--resume":
+                raise ConfigError("Codex researcher follow-up requires a session to resume")
+            self.reader = SessionReader(
+                self.home, command[-1], boundary=rollout_boundary(self.home, command[-1])
+            )
+            return ["codex", "exec", "resume", "--json",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "-o", str(output), *overrides, command[-1], "-"]
         return ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox",
                 "-C", str(cwd), "-o", str(output), *overrides, "-"]
 
@@ -117,12 +130,14 @@ class CodexBackend:
     def poll(self, state: StreamState) -> StreamState:
         if state.session_id:
             if self.reader is None or self.reader.session_id != state.session_id:
-                self.reader = SessionReader(self.home, state.session_id)
-            return self.reader.poll(state)
-        return state
+                boundary = self.reader.boundary if self.reader is not None else None
+                self.reader = SessionReader(self.home, state.session_id, boundary=boundary)
+        return self.reader.poll(state) if self.reader is not None else state
 
     def finish(self, state: StreamState, output: Path) -> StreamState:
         state = self.poll(state)
+        if self.reader is not None:
+            state = self.reader.poll(state, force_scan=True)
         if self.reader is None or not self.reader.observed:
             state = replace(state, is_error=True)
         try:

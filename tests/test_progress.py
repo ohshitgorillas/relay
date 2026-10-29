@@ -12,17 +12,21 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Literal
 
 import pytest
 
 from relay import progress
 from relay.agents import Agent, Event
+from relay.check import CheckResult
 from relay.config import Config
+from relay.ladder import DesignReport
 from relay.ledger import Spend
+from relay.research import Map
 from relay.runner import RunResult
 from relay.status import LeadStatus
 from relay.stream import StreamState
+from tests.conftest import FIXTURES
 
 PREFIX = re.compile(r"^(\d{2}):(\d{2}):(\d{2}) ")
 
@@ -48,6 +52,18 @@ def _result(
     )
 
 
+def _check(**changes: object) -> CheckResult:
+    result = CheckResult(
+        command="make check",
+        exit_code=0,
+        timed_out=False,
+        tail="ok\n",
+        log=Path("/nonexistent/1.check"),
+        verdict="pass",
+    )
+    return dataclasses.replace(result, **changes)
+
+
 def _agent(**changes: object) -> Agent:
     agent = Agent("a1", "builder", "Build s2.d1 stub", context=21844, duration_ms=36943, status="completed")
     return dataclasses.replace(agent, **changes)
@@ -67,6 +83,31 @@ def _line(capsys: pytest.CaptureFixture[str]) -> str:
     match = PREFIX.match(out)
     assert match is not None
     return out[match.end() : -1]
+
+
+# The researcher's map in `tests/fixtures/research-map.txt` (design: Homes, test fixtures): its
+# body is the lines from `MAP` to `END MAP`, both included; its files every path an entry or link
+# names, sorted, no repeats.
+MAP_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_MAP_TEXT = (FIXTURES / "research-map.txt").read_text()
+MAP_BODY = _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
+MAP_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
+
+
+def _map(sid: str = "s1", commit: str = MAP_COMMIT) -> Map:
+    return Map(sid=sid, commit=commit, files=MAP_FILES, body=MAP_BODY)
+
+
+DESIGN = Path("/work/relay/docs/superpowers/specs/relay-ladder-design.md")
+
+
+def _report(
+    rejected: bool = False,
+    approved: bool = False,
+    decisions: tuple[str, ...] = (),
+    unfiled: tuple[str, ...] = (),
+) -> DesignReport:
+    return DesignReport(rejected=rejected, approved=approved, decisions=decisions, unfiled=unfiled)
 
 
 def _queues(queue: Path) -> tuple[str, ...]:
@@ -93,6 +134,20 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("failed", lambda: progress.failed("s1", 1)),
         ("waiting", lambda: progress.waiting(["s1", "s2"])),
         ("ended", lambda: progress.ended(queue, 0, "done", "every section closed")),
+        ("check_started", lambda: progress.check_started("s1", 2, Path("/work/wt/s1"))),
+        ("check_finished", lambda: progress.check_finished("s1", _check())),
+        ("check_failed", lambda: progress.check_failed("s1", 1)),
+        ("retired_idle", lambda: progress.retired_idle("s1", 130_000)),
+        ("research_started", lambda: progress.research_started("s1", Path("/work/wt/s1"))),
+        ("research_finished", lambda: progress.research_finished("s1", _result(), _map())),
+        ("map_reused", lambda: progress.map_reused("s1", _map())),
+        (
+            "design_started",
+            lambda: progress.design_started("s1", DESIGN, ("6", "7"), "the design lacks a cap"),
+        ),
+        ("design_finished", lambda: progress.design_finished("s1", _result(), _report(approved=True))),
+        ("section_waiting", lambda: progress.section_waiting("s1", "s2")),
+        ("woken", lambda: progress.woken("s1", "s2")),
     ]
 
 
@@ -109,6 +164,17 @@ NAMES = [
     "failed",
     "waiting",
     "ended",
+    "check_started",
+    "check_finished",
+    "check_failed",
+    "retired_idle",
+    "research_started",
+    "research_finished",
+    "map_reused",
+    "design_started",
+    "design_finished",
+    "section_waiting",
+    "woken",
 ]
 
 
@@ -779,3 +845,363 @@ def test_agent_finished_without_a_reported_time_says_so(capsys: pytest.CaptureFi
     assert _line(capsys) == (
         "recut s3: agent builder stopped time unknown, context 0: Build s2.d1 stub (recut + 0 agents)"
     )
+
+
+# Check design (docs/superpowers/specs/relay-check-design.md, Modules `relay/progress.py`;
+# Order 5). Behavior 9: Progress lines for checks and idle retire
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_check_started_names_the_section_count_and_cwd(
+    count: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the section id, the number of checks or the directory is missing or misworded.
+    progress.check_started("s4", count, Path("/work/relay-wt/s4"))
+    noun = "check" if count == 1 else "checks"
+    assert _line(capsys) in (
+        f"check s4: running {count} check(s) in /work/relay-wt/s4",
+        f"check s4: running {count} {noun} in /work/relay-wt/s4",
+    )
+
+
+def test_check_finished_passed(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a passing check is not reported "passed".
+    progress.check_finished("s4", _check(verdict="pass", exit_code=0))
+    assert _line(capsys) == "check s4: passed"
+
+
+def test_check_finished_failed_shows_the_exit(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a failed check omits its exit code or is misworded.
+    progress.check_finished("s4", _check(verdict="fail", exit_code=2))
+    assert _line(capsys) == "check s4: failed: exit 2"
+
+
+def test_check_finished_timed_out(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a timed-out check reads "failed: exit None" or "failed: <outcome_text>"
+    # instead of "<outcome_text>", or its limit is not worded "timed out after <s>s" with s as %g
+    # (docs/superpowers/specs/relay-check-design.md:68 and :220).
+    progress.check_finished(
+        "s4", _check(verdict="fail", exit_code=None, timed_out=True, timeout=1800.0)
+    )
+    assert _line(capsys) == "check s4: timed out after 1800s"
+
+
+def test_check_finished_outside_the_code(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: an outside verdict is reported as a plain failure or drops its exit code.
+    progress.check_finished("s4", _check(verdict="outside", exit_code=127))
+    assert _line(capsys) == "check s4: outside the code: exit 127"
+
+
+def test_check_finished_none_to_run(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a section with no check line is reported passed or failed.
+    result = _check(command=None, exit_code=None, tail="", log=None, verdict="none")
+    progress.check_finished("s4", result)
+    assert _line(capsys) == "check s4: none to run"
+
+
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_check_failed_shows_the_count_of_three(
+    failures: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the check failure count is missing, fixed, or not shown "of 3".
+    progress.check_failed("s4", failures)
+    assert _line(capsys) == f"section s4: check failed ({failures} of 3)"
+
+
+def test_retired_idle_names_the_tokens_and_no_commit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the idle retire line omits the context token count or is misworded.
+    progress.retired_idle("s4", 131072)
+    assert _line(capsys) == (
+        "lead s4: retired at 131072 context tokens, no commit since the retire flag"
+    )
+
+
+# Research design (docs/superpowers/specs/relay-research-design.md, Modules `relay/progress.py`;
+# Order 5). Behavior 1: Progress lines for research. Each also joins NAMES above, so it starts with
+# the local time, goes to stdout flushed, writes one line and swallows a failed write.
+
+
+def test_research_started_names_the_section_and_cwd(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: the section id or the directory is missing, or the line is not
+    # "research <sid>: mapping in <cwd>".
+    progress.research_started("s4.2", Path("/work/relay-wt/s4.2"))
+    assert _line(capsys) == "research s4.2: mapping in /work/relay-wt/s4.2"
+
+
+def test_research_finished_with_a_map_counts_its_lines_and_files(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the map's line count (its body, MAP to END MAP), its file count, its commit or
+    # the run's spend is missing or misworded.
+    assert len(MAP_BODY.splitlines()) == 7
+    progress.research_finished("s4", _result(tokens=5678, dollars=0.9), _map("s4"))
+    assert _line(capsys) == (
+        f"research s4: map of 7 lines, 3 files at {MAP_COMMIT} (5678 tokens, $0.90)"
+    )
+
+
+def test_research_finished_counts_the_maps_own_files(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the file count is fixed or counted from the body's lines rather than m.files.
+    m = dataclasses.replace(_map("s4"), files=("relay/git.py",))
+    progress.research_finished("s4", _result(tokens=1, dollars=0.0), m)
+    assert _line(capsys) == f"research s4: map of 7 lines, 1 files at {MAP_COMMIT} (1 tokens, $0.00)"
+
+
+def test_research_finished_without_a_map_says_the_lead_starts_without_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a run with no usable map is not worded "no usable map", drops its spend, or
+    # omits "; the lead starts without one".
+    progress.research_finished("s4", _result(tokens=4321, dollars=1.5), None)
+    assert _line(capsys) == (
+        "research s4: no usable map (4321 tokens, $1.50); the lead starts without one"
+    )
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "killed"), [(None, True), (2, False)], ids=["killed", "exit-2"]
+)
+def test_research_finished_without_a_map_after_a_failed_run(
+    exit_code: int | None, killed: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a killed or failed research run is reported other than "no usable map".
+    result = _result(exit_code=exit_code, killed=killed, tokens=9, dollars=0.25)
+    progress.research_finished("s4", result, None)
+    assert _line(capsys) == (
+        "research s4: no usable map (9 tokens, $0.25); the lead starts without one"
+    )
+
+
+def test_map_reused_names_the_section_and_commit(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: the section id or the map's commit is missing, or the line is not
+    # "research <sid>: map at <commit> still current, reused".
+    progress.map_reused("s4", _map("s4", commit="feedface" * 5))
+    assert _line(capsys) == f"research s4: map at {'feedface' * 5} still current, reused"
+
+
+# Research design, behavior 2: `agent_event(who: Literal["lead", "recut", "research", "ask"], ...)`.
+# The design's `relay/progress.py` section: "`relay ask` prints only the answer on stdout; its
+# progress goes nowhere."
+
+
+@pytest.mark.parametrize("kind", ["started", "finished"])
+def test_an_ask_runs_agent_events_print_nothing(
+    kind: Literal["started", "finished"], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: agent_event writes a line for an ask run's subagent, so `relay ask` prints more
+    # than its answer.
+    progress.agent_event("ask", "s4", Event(kind, _agent(name="reader"), 1))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+# Research design, behavior 3: an idle-ceiling retire line is labelled with the run's kind (lead,
+# research or ask) as the retire and kill lines are, and an ask run's idle retire line goes
+# nowhere: "`relay ask` prints only the answer on stdout; its progress goes nowhere."
+
+
+def test_an_ask_runs_idle_retire_line_prints_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: retired_idle writes a line for an ask run, so `relay ask` prints more than its
+    # answer on stdout.
+    progress.retired_idle("s4", 131072, who="ask")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+# Ladder design (docs/superpowers/specs/relay-ladder-design.md, Modules `relay/progress.py`;
+# Order 6). The new lines also join NAMES above, so each starts with the local time, goes to
+# stdout flushed, writes one line and swallows a failed write.
+#
+# Behavior 1: `lead_finished` as now; DESIGN and WAITING show _cut(text) as RECUT does.
+
+
+def test_lead_finished_design_shows_its_problem(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a DESIGN outcome drops ": <text>", as NEEDS-OWNER's does.
+    status = LeadStatus(kind="DESIGN", text="the design names no cap for a section")
+    progress.lead_finished("s2", _result(tokens=99, dollars=0.25), status)
+    assert _line(capsys) == (
+        "lead s2: finished DESIGN: the design names no cap for a section (99 tokens, $0.25)"
+    )
+
+
+def test_lead_finished_waiting_shows_the_section_it_waits_on(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a WAITING outcome drops ": <section id>".
+    status = LeadStatus(kind="WAITING", text="s1.2")
+    progress.lead_finished("s2", _result(tokens=7, dollars=2.0), status)
+    assert _line(capsys) == "lead s2: finished WAITING: s1.2 (7 tokens, $2.00)"
+
+
+@pytest.mark.parametrize("kind", ["DESIGN", "WAITING"])
+def test_lead_finished_cuts_a_design_or_waiting_text_to_its_first_line(
+    kind: Literal["DESIGN", "WAITING"], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the text's later lines reach the progress line, or the text is shown uncut.
+    status = LeadStatus(kind=kind, text="first line of it\nsecond line of it")
+    progress.lead_finished("s2", _result(tokens=5, dollars=0.5), status)
+    assert _line(capsys) in (
+        f"lead s2: finished {kind}: first line of it (5 tokens, $0.50)",
+        f"lead s2: finished {kind}: first line of it… (5 tokens, $0.50)",
+    )
+
+
+@pytest.mark.parametrize("kind", ["DESIGN", "WAITING"])
+def test_lead_finished_cuts_a_long_design_or_waiting_text_to_120_characters(
+    kind: Literal["DESIGN", "WAITING"], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a text over 120 characters is shown whole, or cut without its `…`.
+    text = "".join(f"part{i:03d} " for i in range(40))
+    progress.lead_finished("s2", _result(tokens=5, dollars=0.5), LeadStatus(kind=kind, text=text))
+    line = _line(capsys)
+    head = f"lead s2: finished {kind}: "
+    tail = " (5 tokens, $0.50)"
+    assert line.startswith(head)
+    assert line.endswith(tail)
+    assert _is_cut(line[len(head) : -len(tail)], text)
+
+
+# Behavior 2: def retiring(sid, why: Literal["context", "budget", "cap"], tokens) -> None: ...
+# "cap": "lead <sid>: asked to retire, section cap spent"
+
+
+def test_retiring_for_the_section_cap(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a cap retirement is worded as a budget or context one, or shows the token count.
+    progress.retiring("s3", "cap", 4200)
+    assert _line(capsys) == "lead s3: asked to retire, section cap spent"
+
+
+# Behavior 3: def design_started(sid, design: Path, steps: tuple[str, ...], problem: str) -> None: ...
+# "design <sid>: amending <design> Order <steps>: <problem cut>"
+
+
+def test_design_started_names_the_section_design_steps_and_problem(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the section id, the design path, a step or the problem is missing or misworded.
+    # The design gives only "Order <steps>", so the separator between steps is left open.
+    progress.design_started("s4", DESIGN, ("6", "7"), "the design names no cap for a section")
+    line = _line(capsys)
+    head = f"design s4: amending {DESIGN} Order "
+    tail = ": the design names no cap for a section"
+    assert line.startswith(head)
+    assert line.endswith(tail)
+    steps = line[len(head) : -len(tail)]
+    assert steps.startswith("6")
+    assert steps.endswith("7")
+    assert len(steps) > 2
+
+
+def test_design_started_with_one_step(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a single step carries a stray separator.
+    progress.design_started("s4", DESIGN, ("3",), "no wake for a waiting section")
+    assert _line(capsys) == f"design s4: amending {DESIGN} Order 3: no wake for a waiting section"
+
+
+def test_design_started_cuts_the_problem_to_its_first_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the problem's later lines reach the progress line.
+    progress.design_started("s4", DESIGN, ("6",), "no cap for a section\nsee the run log")
+    assert _line(capsys) in (
+        f"design s4: amending {DESIGN} Order 6: no cap for a section",
+        f"design s4: amending {DESIGN} Order 6: no cap for a section…",
+    )
+
+
+def test_design_started_cuts_a_long_problem_to_120_characters(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a problem over 120 characters is shown whole, or cut without its `…`.
+    problem = "".join(f"word{i:03d} " for i in range(40))
+    progress.design_started("s4", DESIGN, ("6",), problem)
+    line = _line(capsys)
+    head = f"design s4: amending {DESIGN} Order 6: "
+    assert line.startswith(head)
+    assert _is_cut(line[len(head) :], problem)
+
+
+# Behavior 4: def design_finished(sid, result: RunResult, report: DesignReport | None) -> None: ...
+# "design <sid>: finished approved | with <n> decision(s) for the owner | rejected | with no report
+# | killed | exit <n> <spend>"
+
+
+def test_design_finished_approved(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: an approved design change is misworded, or its spend is missing or not to 2 places.
+    progress.design_finished("s4", _result(tokens=3456, dollars=0.7), _report(approved=True))
+    assert _line(capsys) == "design s4: finished approved (3456 tokens, $0.70)"
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_design_finished_with_decisions_counts_them(
+    count: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a report with decisions is not worded "with <n> decision(s) for the owner", or
+    # the count is fixed rather than read from the report.
+    decisions = tuple(
+        f"{n} | which name? | recommend: relay | alternative: baton" for n in range(1, count + 1)
+    )
+    progress.design_finished("s4", _result(tokens=12, dollars=1.0), _report(decisions=decisions))
+    noun = "decision" if count == 1 else "decisions"
+    assert _line(capsys) in (
+        f"design s4: finished with {count} decision(s) for the owner (12 tokens, $1.00)",
+        f"design s4: finished with {count} {noun} for the owner (12 tokens, $1.00)",
+    )
+
+
+def test_design_finished_rejected(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a rejected brief is reported as approved, as decisions, or with no report.
+    progress.design_finished("s4", _result(tokens=8, dollars=0.25), _report(rejected=True))
+    assert _line(capsys) == "design s4: finished rejected (8 tokens, $0.25)"
+
+
+def test_design_finished_with_no_report(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a clean exit with no report is not worded "with no report".
+    progress.design_finished("s4", _result(exit_code=0, tokens=5, dollars=0.0), None)
+    assert _line(capsys) == "design s4: finished with no report (5 tokens, $0.00)"
+
+
+def test_design_finished_killed(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: a killed architect run reads "exit None" or "with no report" instead of "killed".
+    result = _result(exit_code=None, killed=True, tokens=210000, dollars=4.5)
+    progress.design_finished("s4", result, None)
+    assert _line(capsys) == "design s4: finished killed (210000 tokens, $4.50)"
+
+
+def test_design_finished_non_zero_exit(capsys: pytest.CaptureFixture[str]) -> None:
+    # Breaks when: an architect run that exited non-zero is reported "with no report" instead of
+    # "exit <code>".
+    progress.design_finished("s4", _result(exit_code=2, tokens=8, dollars=1.0), None)
+    assert _line(capsys) == "design s4: finished exit 2 (8 tokens, $1.00)"
+
+
+# Behavior 5: def section_waiting(sid: str, blocker: str) -> None: ...
+# "section <sid>: waiting on <blocker>"
+
+
+def test_section_waiting_names_the_section_and_its_blocker(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the section id or the blocker is missing, swapped or misworded.
+    progress.section_waiting("s5.2", "s3.1")
+    assert _line(capsys) == "section s5.2: waiting on s3.1"
+
+
+# Behavior 6: def woken(sid: str, blocker: str) -> None: ...
+# "section <sid>: woken, <blocker> landed"
+
+
+def test_woken_names_the_section_and_the_blocker_that_landed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the section id or the blocker is missing, swapped or misworded.
+    progress.woken("s5.2", "s3.1")
+    assert _line(capsys) == "section s5.2: woken, s3.1 landed"

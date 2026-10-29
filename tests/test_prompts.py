@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from pathlib import Path
 
-from relay.prompts import lead_prompt, recut_brief
+from relay.check import CheckResult
+from relay.config import Config
+from relay.prompts import (
+    ask_brief,
+    check_feedback,
+    design_answer_brief,
+    design_brief,
+    lead_prompt,
+    recut_brief,
+    research_brief,
+)
 from relay.queue import Section
+from tests.conftest import FIXTURES
 
 QUEUE = Path("/work/repo/docs/queue.md")
 RETIRE_FLAG = Path("/state/relay/work-repo-docs-queue-md/runs/3.retire")
@@ -125,6 +137,527 @@ def test_recut_brief_carries_the_lead_run_log_path() -> None:
     assert str(LEAD_LOG) in brief
 
 
+# Check design (docs/superpowers/specs/relay-check-design.md, Modules `relay/prompts.py`;
+# Order 5). Behavior 7: As now, plus, when check_feedback is set:
+
+CHECK_SENTENCE = (
+    "Relay ran this section's check after your DONE and it failed. "
+    "Fix the section and end with DONE again:"
+)
+FEEDBACK = (
+    "make check\nexit 2\n/state/relay/work-repo-docs-queue-md/runs/3.check\n"
+    "FAILED tests/test_x.py::test_y - AssertionError\n  indented {braces} 100%\n"
+)
+CHECK_LOG = Path("/state/relay/work-repo-docs-queue-md/runs/3.check")
+CHECK_TAIL = "FAILED tests/test_x.py::test_y - AssertionError\n== 1 failed ==\n"
+
+
+def _with_feedback(feedback: str | None = FEEDBACK) -> str:
+    return lead_prompt(
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        check_feedback=feedback,
+    )
+
+
+def test_lead_prompt_with_check_feedback_says_the_check_failed() -> None:
+    # Breaks when: the check-failed instruction is left out or worded otherwise.
+    assert CHECK_SENTENCE in _with_feedback()
+
+
+def test_lead_prompt_without_check_feedback_leaves_the_check_sentence_out() -> None:
+    # Breaks when: the check-failed instruction is written though check_feedback is None,
+    # passed or left at its default.
+    assert CHECK_SENTENCE not in _with_feedback(None)
+    assert "check after your DONE" not in _with_feedback(None)
+    assert CHECK_SENTENCE not in _lead()
+    assert "check after your DONE" not in _lead()
+
+
+def test_lead_prompt_carries_the_check_feedback_verbatim() -> None:
+    # Breaks when: the feedback is dropped, stripped, re-indented or escaped.
+    assert FEEDBACK in _with_feedback()
+
+
+def test_lead_prompt_puts_the_feedback_after_the_instruction() -> None:
+    # Breaks when: the feedback comes before the sentence that introduces it.
+    prompt = _with_feedback()
+    start = prompt.find(CHECK_SENTENCE)
+    assert start != -1
+    assert prompt.find(FEEDBACK, start + len(CHECK_SENTENCE)) != -1
+
+
+def test_lead_prompt_with_check_feedback_keeps_everything_else() -> None:
+    # Breaks when: setting check_feedback replaces the prompt instead of adding to it.
+    prompt = _with_feedback()
+    assert FEEDBACK in prompt
+    assert prompt.startswith("You are a lead")
+    assert str(QUEUE) in prompt
+    assert BODY in prompt
+    assert "resume sess-lead-7" in prompt
+    assert str(RETIRE_FLAG) in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 8: the log path and the tail, for the lead.
+
+
+def _check_result(**changes: object) -> CheckResult:
+    if changes.get("timed_out") and "timeout" not in changes:
+        changes["timeout"] = 1800.0
+    result = CheckResult(
+        command="uv run pytest tests/test_x.py",
+        exit_code=1,
+        timed_out=False,
+        tail=CHECK_TAIL,
+        log=CHECK_LOG,
+        verdict="fail",
+    )
+    return dataclasses.replace(result, **changes)
+
+
+def test_check_feedback_holds_the_command() -> None:
+    # Breaks when: the failing command is left out of the lead's feedback.
+    assert "uv run pytest tests/test_x.py" in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_exit_code() -> None:
+    # Breaks when: the exit is left out or not worded "exit <n>".
+    assert "exit 1" in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_log_path() -> None:
+    # Breaks when: the check log's path is left out.
+    assert str(CHECK_LOG) in check_feedback(_check_result())
+
+
+def test_check_feedback_holds_the_tail() -> None:
+    # Breaks when: the end of the failing command's output is left out or altered.
+    assert CHECK_TAIL.rstrip("\n") in check_feedback(_check_result())
+
+
+def test_check_feedback_for_a_timeout_says_timed_out() -> None:
+    # Breaks when: a timed-out check is worded "exit None" instead of "timed out", or
+    # not as outcome_text's "timed out after <s>s" with the result's timeout written %g.
+    text = check_feedback(_check_result(exit_code=None, timed_out=True))
+    assert "timed out" in text
+    assert "exit None" not in text
+    assert "timed out after 1800s" in text
+    short = check_feedback(_check_result(exit_code=None, timed_out=True, timeout=0.5))
+    assert "timed out after 0.5s" in short
+
+
+# Research design (docs/superpowers/specs/relay-research-design.md, Modules `relay/prompts.py`
+# and Homes; Order 5).
+
+RESEARCH_FLAG = Path("/state/relay/work-repo-docs-queue-md/runs/research-s4")
+QUESTION = 'Where does `_research` read HEAD, and what "stale" means?\n  {braces} 100%'
+
+# The researcher's map from `tests/fixtures/research-map.txt`, as the block a lead carries.
+_MAP_TEXT = (FIXTURES / "research-map.txt").read_text()
+MAP_BLOCK = (
+    "map s4 at 0123456789abcdef0123456789abcdef01234567\n"
+    + _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
+)
+MAP_SENTENCE = (
+    "Relay's researcher mapped this section's code. "
+    "Put the block below verbatim in every brief you send for this section, the architect's included."
+)
+MAP_ROUTE = (
+    f'When an agent reports it needs more, run `relay ask {QUEUE} s4 "<question>"` '
+    "with a 600000 ms timeout or in the background, and pass on its answer; "
+    "on a non-zero exit the agent reads for itself."
+)
+
+
+def _capped(cfg: Config) -> Config:
+    return dataclasses.replace(cfg, map_max_lines=137, map_max_chars=9876)
+
+
+# Behavior 1: Lead-facing map wording, research and ask briefs
+
+
+def test_research_brief_is_a_text(fake_cfg: Config) -> None:
+    # Breaks when: research_brief builds no brief text for the researcher.
+    brief = research_brief(QUEUE, _section(), RESEARCH_FLAG, fake_cfg)
+    assert isinstance(brief, str)
+    assert brief.strip() != ""
+
+
+def test_ask_brief_is_a_text(fake_cfg: Config) -> None:
+    # Breaks when: ask_brief builds no brief text for the follow-up.
+    brief = ask_brief(QUESTION, RESEARCH_FLAG, fake_cfg)
+    assert isinstance(brief, str)
+    assert brief.strip() != ""
+
+
+# Behavior 2: As now, plus, when map_block is set
+
+
+def _with_map(map_block: str | None = MAP_BLOCK) -> str:
+    return lead_prompt(
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        map_block=map_block,
+    )
+
+
+def test_lead_prompt_with_a_map_says_put_it_in_every_brief() -> None:
+    # Breaks when: the map's usage rule for the lead is left out or worded otherwise.
+    assert MAP_SENTENCE in _with_map()
+
+
+def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_with_timeout_and_fallback() -> None:
+    # Breaks when: the lead is not told to run `relay ask` with a 600000 ms timeout or in the
+    # background, or the non-zero-exit fallback (the agent reads for itself) is left out, or
+    # the command names another queue or section, or keeps the `<queue> <sid>` placeholders,
+    # or the routing sentence leaves its place between the map sentence and the block.
+    assert MAP_ROUTE in _with_map()
+    prompt = _with_map()
+    sentence = prompt.find(MAP_SENTENCE)
+    route = prompt.find(MAP_ROUTE)
+    assert sentence != -1
+    assert sentence + len(MAP_SENTENCE) <= route
+    assert prompt.find(MAP_BLOCK, route + len(MAP_ROUTE)) != -1
+
+
+def test_lead_prompt_carries_the_map_block_verbatim() -> None:
+    # Breaks when: the map block is dropped, stripped, re-indented or escaped.
+    assert MAP_BLOCK in _with_map()
+
+
+def test_lead_prompt_puts_the_map_block_after_its_wording() -> None:
+    # Breaks when: the block comes before the sentence that introduces it.
+    prompt = _with_map()
+    start = prompt.find(MAP_SENTENCE)
+    assert start != -1
+    assert prompt.find(MAP_BLOCK, start + len(MAP_SENTENCE)) != -1
+
+
+def test_lead_prompt_without_a_map_leaves_the_map_wording_out() -> None:
+    # Breaks when: the map wording is written though map_block is None or left at its
+    # default, or is never written at all.
+    assert MAP_SENTENCE in _with_map()
+    assert MAP_SENTENCE not in _with_map(None)
+    assert "relay ask" not in _with_map(None)
+    assert MAP_SENTENCE not in _lead()
+    assert "relay ask" not in _lead()
+
+
+def test_lead_prompt_with_a_map_keeps_everything_else() -> None:
+    # Breaks when: setting map_block replaces the prompt instead of adding to it.
+    prompt = _with_map()
+    assert MAP_BLOCK in prompt
+    assert prompt.startswith("You are a lead")
+    assert str(QUEUE) in prompt
+    assert BODY in prompt
+    assert "resume sess-lead-7" in prompt
+    assert str(RETIRE_FLAG) in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 3: The queue path, the section id and body, the caps cfg.map_max_lines and
+# cfg.map_max_chars, the MAP / LINKS / END MAP form, and the flag sentence.
+
+
+def _research(cfg: Config, section: Section | None = None) -> str:
+    return research_brief(QUEUE, section or _section(), RESEARCH_FLAG, _capped(cfg))
+
+
+def test_research_brief_holds_the_queue_path(fake_cfg: Config) -> None:
+    # Breaks when: the research brief leaves out the queue's path.
+    assert str(QUEUE) in _research(fake_cfg)
+
+
+def test_research_brief_holds_the_section_id_and_body_verbatim(fake_cfg: Config) -> None:
+    # Breaks when: the section id is left out, or the body is reflowed, stripped or escaped.
+    # The flag path here holds no section id, so the id can only come from the section.
+    flag = Path("/state/relay/work-repo-docs-queue-md/runs/research-flag")
+    assert "s4" not in str(flag)
+    brief = research_brief(QUEUE, _section(), flag, _capped(fake_cfg))
+    assert "s4" in brief
+    assert BODY in brief
+
+
+def test_research_brief_holds_the_given_section_not_another(fake_cfg: Config) -> None:
+    # Breaks when: the brief is built from a fixed or cached section rather than the one passed.
+    other_body = "## Ping\n\nWire `relay/ping.py` to claude-ping.\n"
+    brief = _research(fake_cfg, _section(sid="s9", body=other_body))
+    assert "s9" in brief
+    assert other_body in brief
+    assert BODY not in brief
+
+
+def test_research_brief_holds_the_line_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the line cap is left out or fixed rather than read from cfg.map_max_lines.
+    assert "137" in _research(fake_cfg)
+
+
+def test_research_brief_holds_the_char_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the character cap is left out or fixed rather than read from cfg.map_max_chars.
+    assert "9876" in _research(fake_cfg)
+
+
+def test_research_brief_states_the_map_form(fake_cfg: Config) -> None:
+    # Breaks when: the MAP, LINKS or END MAP line of the map's form is left out.
+    lines = _research(fake_cfg).splitlines()
+    assert "MAP" in lines
+    assert "LINKS" in lines
+    assert "END MAP" in lines
+
+
+def test_research_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
+    # Breaks when: the flag sentence is left out, worded otherwise or names another path.
+    sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    assert sentence in _research(fake_cfg)
+
+
+# Behavior 4: The question, the ANSWER / END ANSWER form, the cap cfg.map_max_chars, the flag rule.
+
+
+def _ask(cfg: Config, question: str = QUESTION) -> str:
+    return ask_brief(question, RESEARCH_FLAG, _capped(cfg))
+
+
+def test_ask_brief_holds_the_question_verbatim(fake_cfg: Config) -> None:
+    # Breaks when: the question is dropped, stripped, re-indented or escaped.
+    assert QUESTION in _ask(fake_cfg)
+
+
+def test_ask_brief_holds_the_given_question_not_another(fake_cfg: Config) -> None:
+    # Breaks when: the brief is built from a fixed or cached question rather than the one passed.
+    brief = _ask(fake_cfg, "Which test covers `relay ask`?")
+    assert "Which test covers `relay ask`?" in brief
+    assert QUESTION not in brief
+
+
+def test_ask_brief_states_the_answer_form(fake_cfg: Config) -> None:
+    # Breaks when: the ANSWER or END ANSWER line of the answer's form is left out.
+    lines = _ask(fake_cfg).splitlines()
+    assert "ANSWER" in lines
+    assert "END ANSWER" in lines
+
+
+def test_ask_brief_holds_the_char_cap_from_config(fake_cfg: Config) -> None:
+    # Breaks when: the character cap is left out or fixed rather than read from cfg.map_max_chars.
+    assert "9876" in _ask(fake_cfg)
+
+
+def test_ask_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
+    # Breaks when: the flag rule is left out or names another path than the research flag.
+    brief = _ask(fake_cfg)
+    assert f"When the file {RESEARCH_FLAG} exists" in brief
+    assert "send no more readers" in brief
+
+
+# Ladder design (docs/superpowers/specs/relay-ladder-design.md, Modules `relay/prompts.py`,
+# "The architect's brief" and Homes; Order 6).
+
+DESIGN = Path("/work/repo/docs/superpowers/specs/relay-check-design.md")
+APPROVAL = "I am sick of this paperwork bullshit. Make it stop."
+EVIDENCE = [
+    Path("/state/relay/work-repo-docs-queue-md/runs/3.jsonl"),
+    Path("/work/repo/tests/test_loop.py"),
+]
+PROBLEM = "`_verify` parks after one failed check, not three; tests/test_loop.py fails on it"
+GUESS_FIX = "move CHECK_LIMIT into relay/config.py"
+
+
+def _stepped(steps: tuple[str, ...] = ("6", "7"), body: str = BODY, title: str = "Ledger recovery") -> Section:
+    return Section(
+        id="s4",
+        title=title,
+        body=body,
+        depends_on=("s3",),
+        open=True,
+        steps=steps,
+    )
+
+
+# Behavior 2 to 5: As now, plus a status rule: the problem after RECUT: or DESIGN:, the guess
+# after ` | guess: `, DESIGN and WAITING: <id>.
+
+
+def test_lead_prompt_states_the_guess_separator() -> None:
+    # Breaks when: the lead is not told that a fix it has in mind follows only after " | guess: ".
+    assert " | guess: " in _lead()
+
+
+def test_lead_prompt_says_when_design_and_waiting_apply() -> None:
+    # Breaks when: the lead is not told DESIGN is for a lack no recut can supply, or that
+    # WAITING: <id> is for a section that cannot go on until queue section <id> lands.
+    prompt = _lead()
+    assert "DESIGN: " in prompt
+    assert "no recut can supply" in prompt
+    assert "WAITING: <id>" in prompt
+    assert "until queue section <id> lands" in prompt
+
+
+def test_lead_prompt_says_the_problem_names_its_evidence_and_design_step() -> None:
+    # Breaks when: the rule that the problem names what fails, its evidence and its design step
+    # is left out.
+    prompt = _lead().lower()
+    assert "what fails" in prompt
+    assert "evidence" in prompt
+    assert "design step" in prompt
+
+
+def test_lead_prompt_with_the_status_rule_keeps_everything_else() -> None:
+    # Breaks when: the status rule replaces the old forms instead of adding to them.
+    prompt = _lead()
+    assert " | guess: " in prompt
+    assert prompt.startswith("You are a lead")
+    assert BODY in prompt
+    for form in ("DONE", "RECUT: ", "NEEDS-OWNER: ", "RETIRED"):
+        assert form in prompt
+
+
+# Behavior 1 and 6: design_brief is three lines and nothing else; it carries the problem, the
+# steps and the evidence paths, and the guess appears nowhere in it.
+
+
+def test_design_brief_is_the_three_lines_and_nothing_else() -> None:
+    # Breaks when: a line is added, dropped or worded otherwise, the steps or evidence are joined
+    # other than with ", ", or the section body is copied in.
+    brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order 6, 7, cannot go on: "
+        f"{PROBLEM} Evidence: {EVIDENCE[0]}, {EVIDENCE[1]}.",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_brief_with_no_steps_says_steps_unnamed() -> None:
+    # Breaks when: an empty `steps:` gives an empty Order or is worded other than "steps unnamed".
+    brief = design_brief(DESIGN, QUEUE, _stepped(steps=()), PROBLEM, EVIDENCE[:1], APPROVAL)
+    assert brief.splitlines()[1] == (
+        f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order steps unnamed, "
+        f"cannot go on: {PROBLEM} Evidence: {EVIDENCE[0]}."
+    )
+
+
+def test_design_brief_carries_the_given_design_queue_and_approval() -> None:
+    # Breaks when: the design, queue or approval words are fixed rather than taken from the call.
+    design = Path("/other/docs/superpowers/specs/relay-ping-design.md")
+    queue = Path("/other/docs/baley-queue.md")
+    brief = design_brief(design, queue, _stepped(steps=("2",)), PROBLEM, EVIDENCE[:1], "approved by the owner")
+    lines = brief.splitlines()
+    assert lines[0] == f"rulings {design}"
+    assert f"at {queue}, under this design's Order 2, " in lines[1]
+    assert lines[2] == "approve: approved by the owner"
+
+
+def test_design_brief_holds_no_guess_from_the_section() -> None:
+    # Breaks when: the section's title or body, which may carry a lead's guess, reaches the
+    # architect's brief, or the problem, steps or evidence paths are dropped.
+    body = f"## Check limit\n\nRECUT: {PROBLEM}{' | guess: '}{GUESS_FIX}\n"
+    section = _stepped(body=body, title=f"Check limit, guess: {GUESS_FIX}")
+    brief = design_brief(DESIGN, QUEUE, section, PROBLEM, EVIDENCE, APPROVAL)
+    assert PROBLEM in brief
+    assert "Order 6, 7," in brief
+    assert str(EVIDENCE[0]) in brief
+    assert str(EVIDENCE[1]) in brief
+    assert GUESS_FIX not in brief
+    assert "guess" not in brief
+
+
+# Behavior 7 and 8: design_answer_brief: `rulings <design>`, the answer lines for the numbers as
+# written, or `<n>: <answer>` / `new: <answer>` when there is none, then `approve: <approval>`.
+
+
+def test_design_answer_brief_keeps_the_answer_lines_for_the_numbers_as_written() -> None:
+    # Breaks when: a numbered line is reworded, a line for another number or an unnumbered line is
+    # kept, "10:" is taken as "1:", or the rulings or approve line is left out.
+    answer = "Thanks.\n1: take the recommendation, {braces} 100%\n10: not asked\n2: the alternative\n3: unasked"
+    brief = design_answer_brief(DESIGN, (1, 2), answer, APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "1: take the recommendation, {braces} 100%",
+        "2: the alternative",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_one_number_and_no_numbered_line_numbers_the_answer() -> None:
+    # Breaks when: an unnumbered answer to a single decision is not given that decision's number.
+    brief = design_answer_brief(DESIGN, (3,), "go with the recommendation", APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "3: go with the recommendation",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_several_numbers_and_no_numbered_line_says_new() -> None:
+    # Breaks when: an unnumbered answer to several decisions is not passed as `new: <answer>`.
+    brief = design_answer_brief(DESIGN, (1, 2), "do both the cheap way", APPROVAL)
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "new: do both the cheap way",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_with_no_numbers_says_new() -> None:
+    # Breaks when: an answer with no decisions to number is not passed as `new: <answer>`.
+    brief = design_answer_brief(DESIGN, (), "add a cap line", "approved by the owner")
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "new: add a cap line",
+        "approve: approved by the owner",
+    ]
+
+
+# Behavior 9: recut_brief: as now, plus when design is set, the amended-design sentence.
+
+AMENDED = (
+    f"The design {DESIGN} was amended for this problem. "
+    "Cut this section's work again from it, its new Order steps included."
+)
+
+
+def test_recut_brief_with_a_design_says_it_was_amended() -> None:
+    # Breaks when: the design is ignored, worded otherwise, or names another path.
+    brief = recut_brief(QUEUE, _section(), "three modules, not one step", LEAD_LOG, design=DESIGN)
+    assert AMENDED in brief
+
+
+def test_recut_brief_without_a_design_leaves_the_sentence_out() -> None:
+    # Breaks when: the amended sentence is written though design is None or left at its default,
+    # or is never written at all.
+    assert AMENDED in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG, design=DESIGN)
+    assert "was amended for this problem" not in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG)
+    assert "was amended for this problem" not in recut_brief(
+        QUEUE, _section(), "three modules", LEAD_LOG, design=None
+    )
+
+
+def test_recut_brief_with_a_design_keeps_everything_else() -> None:
+    # Breaks when: setting design replaces the recut brief instead of adding to it, or drops or
+    # rewords any of the brief as it is without a design (the queue path, the section, the reason,
+    # the log path): with design set the brief is the no-design brief plus the amended sentence.
+    reason = "three modules, not one step: split stream from runner"
+    brief = recut_brief(QUEUE, _section(sid="s7"), reason, LEAD_LOG, design=DESIGN)
+    plain = recut_brief(QUEUE, _section(sid="s7"), reason, LEAD_LOG)
+    assert AMENDED in brief
+    assert "recut" in brief
+    assert "s7" in brief
+    assert reason in brief
+    assert str(LEAD_LOG) in brief
+    assert str(QUEUE) in brief
+    assert brief.count(AMENDED) == 1
+    assert brief.replace(AMENDED, " ").split() == plain.split()
 # Order 17, behavior 4: "resume <session id>" when resume is set; when report is set, next to
 # that line, the report verbatim under a heading naming it the previous lead's final report,
 # saying it is that session's last reply so the new lead need not recall it;

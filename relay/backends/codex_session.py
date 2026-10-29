@@ -10,9 +10,47 @@ from relay.ledger import Spend
 from relay.stream import StreamState
 
 
+def _matching_rollouts(home: Path, session_id: str):
+    try:
+        if str(UUID(session_id)) != session_id:
+            return
+    except (ValueError, AttributeError):
+        return
+    for path in (home / "sessions").glob(f"**/*{session_id}*.jsonl"):
+        try:
+            with path.open("rb") as handle:
+                line = handle.readline(1024 * 1024)
+            if not line.endswith(b"\n"):
+                continue
+            meta = json.loads(line)
+            if not isinstance(meta, dict):
+                continue
+            payload = meta.get("payload")
+            if (meta.get("type") == "session_meta" and isinstance(payload, dict)
+                    and payload.get("id") == session_id):
+                yield path
+        except OSError as exc:
+            raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
+        except (ValueError, RecursionError):
+            continue
+
+
+def rollout_boundary(home: Path, session_id: str) -> dict[Path, int]:
+    """Record matching rollout sizes before a resumed child can write to them."""
+    sizes = {}
+    for path in _matching_rollouts(home, session_id):
+        try:
+            sizes[path] = path.stat().st_size
+        except OSError as exc:
+            raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
+    return sizes
+
+
 class SessionReader:
-    def __init__(self, home: Path, session_id: str):
+    def __init__(self, home: Path, session_id: str, *, boundary: dict[Path, int] | None = None):
         self.home, self.session_id = home, session_id
+        self.boundary = boundary
+        self._readers: dict[Path, SessionReader] = {}
         self.path: Path | None = None
         self.offset = 0
         self.pending = b""
@@ -28,26 +66,24 @@ class SessionReader:
         if not self._valid_id or time.monotonic() < self._next_scan:
             return
         self._next_scan = time.monotonic() + 1.0
-        for path in (self.home / "sessions").glob(f"**/*{self.session_id}*.jsonl"):
-            try:
-                with path.open("rb") as handle:
-                    line = handle.readline(1024 * 1024)
-                if not line.endswith(b"\n"):
-                    continue
-                meta = json.loads(line)
-                if not isinstance(meta, dict):
-                    continue
-                payload = meta.get("payload")
-                if (meta.get("type") == "session_meta" and isinstance(payload, dict)
-                        and payload.get("id") == self.session_id):
-                    self.path = path
-                    return
-            except OSError as exc:
-                raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
-            except (ValueError, RecursionError):
-                continue
+        self.path = next(_matching_rollouts(self.home, self.session_id), None)
 
-    def poll(self, state: StreamState) -> StreamState:
+    def poll(self, state: StreamState, *, force_scan: bool = False) -> StreamState:
+        if self.boundary is not None:
+            if force_scan or time.monotonic() >= self._next_scan:
+                self._next_scan = time.monotonic() + 1.0
+                for path in _matching_rollouts(self.home, self.session_id):
+                    if path not in self._readers:
+                        reader = SessionReader(self.home, self.session_id)
+                        reader.path = path
+                        reader.offset = self.boundary.get(path, 0)
+                        self._readers[path] = reader
+            for reader in self._readers.values():
+                state = reader.poll(state)
+                self.observed = self.observed or reader.observed
+            return state
+        if force_scan:
+            self._next_scan = 0.0
         if self.path is None:
             self._locate()
         if self.path is None:

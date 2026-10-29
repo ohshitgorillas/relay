@@ -1,15 +1,23 @@
 """One home for `relay go` progress lines."""
 
+from __future__ import annotations
+
 import sys
 import time
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from relay.agents import Event, duration
+from relay.check import CheckResult, outcome_text
 from relay.config import Config
+from relay.ledger import Kind
+from relay.research import Map
 from relay.runner import RunResult
-from relay.state import FAILURE_LIMIT
-from relay.status import LeadStatus
+from relay.state import CHECK_LIMIT, FAILURE_LIMIT
+from relay.status import TEXT_NAMES, LeadStatus
+
+if TYPE_CHECKING:
+    from relay.ladder import DesignReport
 
 
 def _write(text: str) -> None:
@@ -18,6 +26,12 @@ def _write(text: str) -> None:
         sys.stdout.flush()
     except OSError:
         pass
+
+
+def _write_for(who: Kind, text: str) -> None:
+    """Write a line labelled with a run's kind; an ask prints no progress."""
+    if who != "ask":
+        _write(text)
 
 
 def _cut(text: str) -> str:
@@ -54,22 +68,26 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
         outcome = f"exit {result.exit_code}"
     elif status is None:
         outcome = "with no status line"
-    elif status.kind == "RECUT":
+    elif status.kind in TEXT_NAMES and status.kind != "NEEDS-OWNER":
         outcome = f"{status.kind}: {_cut(status.text)}"
     else:
         outcome = status.kind
     _write(f"lead {sid}: finished {outcome} {_spend(result)}")
 
 
-def retiring(sid: str, why: Literal["context", "budget"], tokens: int) -> None:
+def retiring(
+    sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead"
+) -> None:
     if why == "context":
-        _write(f"lead {sid}: asked to retire at {tokens} context tokens")
+        _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
+    elif why == "cap":
+        _write_for(who, f"{who} {sid}: asked to retire, section cap spent")
     else:
-        _write(f"lead {sid}: asked to retire, budget spent")
+        _write_for(who, f"{who} {sid}: asked to retire, budget spent")
 
 
-def killing(sid: str, tokens: int) -> None:
-    _write(f"lead {sid}: killed at {tokens} context tokens, past the hard ceiling")
+def killing(sid: str, tokens: int, who: Kind = "lead") -> None:
+    _write_for(who, f"{who} {sid}: killed at {tokens} context tokens, past the hard ceiling")
 
 
 def recut_started(sid: str, reason: str) -> None:
@@ -88,7 +106,7 @@ def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
     _write(f"recut {sid}: finished {outcome} {_spend(result)}")
 
 
-def agent_event(who: Literal["lead", "recut"], sid: str, event: Event) -> None:
+def agent_event(who: Kind, sid: str, event: Event) -> None:
     agent = event.agent
     if event.kind == "started":
         what = f"agent {agent.name} started"
@@ -96,7 +114,9 @@ def agent_event(who: Literal["lead", "recut"], sid: str, event: Event) -> None:
         took = "time unknown" if agent.duration_ms is None else f"in {duration(agent.duration_ms)}"
         what = f"agent {agent.name} {agent.status or 'finished'} {took}, context {agent.context}"
     plural = "" if event.live == 1 else "s"
-    _write(f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})")
+    _write_for(
+        who, f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})"
+    )
 
 
 def needs_answer(sid: str, question: str) -> None:
@@ -113,3 +133,82 @@ def waiting(parked: list[str]) -> None:
 
 def ended(queue: Path, code: int, reason: str, detail: str) -> None:
     _write(f"relay go {queue.name}: ended {reason}: {_cut(detail)} (exit {code})")
+
+
+def check_started(sid: str, command_count: int, cwd: Path) -> None:
+    noun = "check" if command_count == 1 else "checks"
+    _write(f"check {sid}: running {command_count} {noun} in {cwd}")
+
+
+def check_finished(sid: str, result: CheckResult) -> None:
+    if result.verdict == "pass":
+        what = "passed"
+    elif result.verdict == "none":
+        what = "none to run"
+    elif result.verdict == "outside":
+        what = f"outside the code: {outcome_text(result)}"
+    elif result.timed_out:
+        what = outcome_text(result)
+    else:
+        what = f"failed: {outcome_text(result)}"
+    _write(f"check {sid}: {what}")
+
+
+def check_failed(sid: str, failures: int) -> None:
+    _write(f"section {sid}: check failed ({failures} of {CHECK_LIMIT})")
+
+
+def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None:
+    _write_for(
+        who, f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag"
+    )
+
+
+def research_started(sid: str, cwd: Path) -> None:
+    _write(f"research {sid}: mapping in {cwd}")
+
+
+def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
+    if m is None:
+        _write(f"research {sid}: no usable map {_spend(result)}; the lead starts without one")
+        return
+    lines = len(m.body.splitlines())
+    _write(
+        f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}"
+    )
+
+
+def map_reused(sid: str, m: Map) -> None:
+    _write(f"research {sid}: map at {m.commit} still current, reused")
+
+
+def design_started(sid: str, design: Path, steps: tuple[str, ...], problem: str) -> None:
+    named = f"Order {', '.join(steps)}" if steps else "steps unnamed"
+    _write(f"design {sid}: amending {design} {named}: {_cut(problem)}")
+
+
+def design_finished(sid: str, result: RunResult, report: DesignReport | None) -> None:
+    if result.killed:
+        outcome = "killed"
+    elif result.exit_code != 0:
+        outcome = f"exit {result.exit_code}"
+    elif report is None:
+        outcome = "with no report"
+    elif report.rejected:
+        outcome = "rejected"
+    elif report.decisions:
+        n = len(report.decisions)
+        outcome = f"with {n} {'decision' if n == 1 else 'decisions'} for the owner"
+    elif report.approved:
+        outcome = "approved"
+    else:
+        outcome = "with no report"
+    _write(f"design {sid}: finished {outcome} {_spend(result)}")
+
+
+def section_waiting(sid: str, blocker: str) -> None:
+    _write(f"section {sid}: waiting on {blocker}")
+
+
+def woken(sid: str, blocker: str) -> None:
+    _write(f"section {sid}: woken, {blocker} landed")

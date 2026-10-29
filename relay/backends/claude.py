@@ -14,13 +14,17 @@ if TYPE_CHECKING:
 
 
 class ClaudeBackend:
-    capabilities = Capabilities(context=True, tokens=True, dollars=True, subagents=True)
+    capabilities = Capabilities(context=True, tokens=True, dollars=True, subagents=True, resume=True)
 
     def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
         if role == "lead":
             return list(cfg.lead_command)
         if role == "recut":
             return list(cfg.recut_command)
+        if role in ("research", "ask"):
+            return list(cfg.research_command)
+        if role == "design":
+            return list(cfg.design_command)
         raise ConfigError(f"unknown backend role {role!r}")
 
     def parse(self, state: StreamState, line: str) -> StreamState:

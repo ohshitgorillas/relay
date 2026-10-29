@@ -22,6 +22,10 @@ class GenericBackend:
             return list(cfg.lead_command)
         if role == "recut":
             return list(cfg.recut_command)
+        if role in ("research", "ask"):
+            return list(cfg.research_command)
+        if role == "design":
+            return list(cfg.design_command)
         raise ConfigError(f"unknown backend role {role!r}")
 
     def parse(self, state: StreamState, line: str) -> StreamState:

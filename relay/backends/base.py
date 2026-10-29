@@ -18,6 +18,7 @@ class Capabilities:
     tokens: bool
     dollars: bool
     subagents: bool
+    resume: bool = False
 
 
 class Backend(Protocol):
