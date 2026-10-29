@@ -685,6 +685,74 @@ def test_ask_whose_run_exits_non_zero_exits_1_and_prints_no_answer(
     assert capsys.readouterr().out == ""
 
 
+# `relay ask` whose researcher run fails (relay-research design, `relay/loop.py` `ask`; Order 13):
+# exit 1 and "the researcher for section <sid> failed: <runner.error_line(result)>", the error line
+# the last non-empty line of the run's stderr, else the error result's text, else "used no tokens",
+# else "exit N" (`relay/runner.py` `error_line`). The shim records its run as `_ASK_SHIM` does
+# (argv after its own four arguments), runs the fake `claude`, writes its fourth argument to
+# stderr and exits with its third.
+_ASK_STDERR_SHIM = """\
+import json, subprocess, sys
+record, fake, code, err = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+prompt = sys.stdin.read()
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[5:], "prompt": prompt}) + chr(10))
+subprocess.run([fake], input=prompt, text=True, check=True)
+sys.stderr.write(err)
+sys.exit(code)
+"""
+
+ERROR_STREAM = "stream-error.jsonl"  # a result with is_error set and the text "Prompt is too long"
+
+# (exit code, stderr, scenario lines or None for the ask stream, error line)
+_FAILED_ASKS: dict[str, tuple[int, str, list[str] | None, str]] = {
+    "exit-nonzero-with-stderr": (
+        1,
+        "warming up\nresearcher crashed: reader died\n\n",
+        None,
+        "researcher crashed: reader died",
+    ),
+    "exit-nonzero-bare": (3, "", None, "exit 3"),
+    "error-result": (0, "", (FIXTURES_DIR / ERROR_STREAM).read_text().splitlines(), "Prompt is too long"),
+    "error-result-with-stderr": (
+        0,
+        "api overloaded, retry later\n",
+        (FIXTURES_DIR / ERROR_STREAM).read_text().splitlines(),
+        "api overloaded, retry later",
+    ),
+    "no-tokens": (0, "", [], "used no tokens"),
+}
+
+
+@pytest.mark.parametrize("how", list(_FAILED_ASKS))
+def test_ask_whose_researcher_run_fails_exits_1_and_names_its_error_line(
+    how: str,
+    asked: Path,
+    queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed ask run exits 0, prints an answer, is reported as "no answer" or
+    # without its error line, or its error line comes from the wrong source or in the wrong order
+    # (all of stderr rather than its last non-empty line, the error result's text ahead of
+    # stderr, "exit N" for an error result or a run that used no tokens).
+    code, err, lines, error = _FAILED_ASKS[how]
+    research = [sys.executable, "-c", _ASK_STDERR_SHIM, str(asked), fake_cfg.lead_command[0], str(code), err]
+    _ask_config(home, fake_cfg, asked, research=research)
+    if lines is not None:
+        scenario(lines)
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    message = f"the researcher for section {ASK_SID} failed: {error}"
+    named = [line for line in captured.err.splitlines() if "researcher" in line or "fail" in line]
+    assert len(named) == 1, captured.err
+    assert named[0].endswith(message), captured.err
+
+
 @pytest.fixture
 def repo_queue(
     asked: Path, queue: Path, fake_cfg: Config, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch

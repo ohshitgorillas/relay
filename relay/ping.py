@@ -26,3 +26,7 @@ def needs_owner(cfg: Config, queue: Path, sid: str, question: str) -> None:
 
 def stopped(cfg: Config, queue: Path, reason: str, detail: str) -> None:
     ping(cfg, f"relay {queue.name}: stopped {reason}: {detail}")
+
+
+def research_failed(cfg: Config, queue: Path, sid: str, error: str) -> None:
+    ping(cfg, f"relay {queue.name}: research {sid} failed: {error}; the lead starts without a map")

@@ -4,19 +4,21 @@ Status: approved.
 
 ## Why
 
-A lead without a map starts with nothing but the queue section (`relay/prompts.py:16-60`), so it and every agent it dispatches read the code from scratch. The researcher maps the section's code once, before the lead starts, and every brief in the section carries the map.
+A lead without a map starts with nothing but the queue section (`relay/prompts.py:18-73`), so it and every agent it dispatches read the code from scratch. The researcher maps the section's code once, before the lead starts, and every brief in the section carries the map.
 
 Shared concerns and their one copy:
 
-- **Starting an agent run**: one sequence, `_watcher`, `run_agent`, `ledger.append`, in `_run` (`relay/loop.py:172-196`), called by the lead (`relay/loop.py:121`), research (`relay/loop.py:226`), ask (`relay/loop.py:258`) and recut (`relay/loop.py:391`).
-- **The retire flag**: the lead's and recut's file (`relay/state.py:257`), unlinked before each lead (`relay/loop.py:119`) and touched by `relay/runner.py:230`. A follow-up asked while the lead runs must not retire the lead, so research and ask runs share their own flag, `research_flag` (`relay/state.py:234`).
-- **Atomic writes**: one `write_atomic` (`relay/state.py:43-54`), serving `State._save` (`relay/state.py:95`) and `research.save` (`relay/research.py:89`).
-- **Agent commands**: built only in `relay/config.py`; `recut_command` and `research_command` derive from `lead_command` at `relay/config.py:52-59`.
-- **Run kinds**: one `Kind` (`relay/ledger.py:20`), imported by `relay/progress.py:11` and `relay/loop.py:14`.
-- **Subagent tokens**: the stream carries each subagent's `total_tokens` (`tests/fixtures/stream-agents.jsonl:5`), folded by `relay/agents.py:60-96`; every run line keeps them with the map commit (`relay/ledger.py:47-69`). `relay status` rebuilds agents from run logs (`relay/cli.py:89-116`).
-- **Git queries**: `relay/git.py:12-55` asks for worktrees, branch heads, HEAD and a diff against a commit.
-- **A section's working directory**: `_section_cwd` (`relay/loop.py:167-169`), where the check and the researcher both run.
-- **Section state**: `relay/state.py:28-40` keeps the lead's and the researcher's sessions; `mark_done` (`relay/state.py:119-127`) also drops the map.
+- **Starting an agent run**: one sequence, `_watcher`, `run_agent`, `ledger.append`, in `_run` (`relay/loop.py:255-283`), called by the lead (`relay/loop.py:141`), research (`relay/loop.py:312`), ask (`relay/loop.py:344`) and recut (`relay/loop.py:664`).
+- **The retire flag**: the lead's and recut's file (`relay/state.py:325-326`), unlinked before each lead (`relay/loop.py:139`) and touched by `relay/runner.py:230`. A follow-up asked while the lead runs must not retire the lead, so research and ask runs share their own flag, `research_flag` (`relay/state.py:302`).
+- **Atomic writes**: one `write_atomic` (`relay/state.py:50-61`), serving `State._save` (`relay/state.py:101-102`) and `research.save` (`relay/research.py:89`).
+- **Agent commands**: built only in `relay/config.py`; `recut_command` and `research_command` derive from `lead_command` at `relay/config.py:62-69`.
+- **Run kinds**: one `Kind` (`relay/ledger.py:21`), imported by `relay/progress.py:13` and `relay/loop.py:14`.
+- **Subagent tokens**: the stream carries each subagent's `total_tokens` (`tests/fixtures/stream-agents.jsonl:5`), folded by `relay/agents.py:60-97`; every run line keeps them with the map commit (`relay/ledger.py:49-74`). `relay status` rebuilds agents from run logs (`relay/cli.py:91-117`).
+- **Git queries**: `relay/git.py:12-63` asks for worktrees, branch heads, HEAD and a diff against a commit.
+- **A section's working directory**: `_section_cwd` (`relay/loop.py:250-252`), where the check and the researcher both run.
+- **Section state**: `relay/state.py:29-47` keeps the lead's and the researcher's sessions; `mark_done` (`relay/state.py:126-137`) also drops the map.
+- **A failed researcher run**: two copies of the test `result.killed or result.exit_code != 0`, in `_research` (`relay/loop.py:325`) and `ask` (`relay/loop.py:356`); neither counts an error result (`relay/stream.py:18`) or a run that used no tokens as failed, and neither names the run's stderr (`relay/runner.py:187`). Both move to one test and one error line in `relay/runner.py`.
+- **Owner pings**: worded and sent only in `relay/ping.py:12-28`.
 
 This design builds on the approved check design (`docs/superpowers/specs/relay-check-design.md`): its `_verify`, `_park` and idle `_watcher` in `relay/loop.py` land before this design's loop step.
 
@@ -96,6 +98,30 @@ def changed(cwd: Path, commit: str, paths: tuple[str, ...]) -> bool | None:
 ```
 
 Both run git through `runner.capture`. Neither raises.
+
+### `relay/runner.py` (extended): whether a run failed, and its error line
+
+```python
+def run_failed(result: RunResult) -> bool:
+    """True when the run was killed, exited nonzero, its result has is_error set, or its
+    spend used 0 tokens."""
+
+
+def error_line(result: RunResult) -> str:
+    """The first that applies: the last non-empty line, stripped, of the run's stderr
+    (result.log with suffix ".stderr"; an unreadable file has none); the error result's text
+    when is_error is set and the text is not blank; "killed" for a killed run; "used no tokens"
+    for a run that exited 0 with 0 tokens; else "exit <exit_code>". Never raises."""
+```
+
+It replaces the test at `relay/loop.py:325` and `relay/loop.py:356`.
+
+### `relay/ping.py` (extended): the failed-research ping
+
+```python
+def research_failed(cfg: Config, queue: Path, sid: str, error: str) -> None:
+    """ping(cfg, f"relay {queue.name}: research {sid} failed: {error}; the lead starts without a map")."""
+```
 
 ### `relay/config.py` (extended): three keys
 
@@ -184,7 +210,10 @@ def ask_brief(question: str, flag: Path, cfg: Config) -> str:
 
 ```python
 def research_started(sid: str, cwd: Path) -> None: ...                    # "research <sid>: mapping in <cwd>"
-def research_finished(sid: str, result: RunResult, m: Map | None) -> None: ...  # "research <sid>: map of <n> lines, <f> files at <commit> <spend>" | "no usable map <spend>; the lead starts without one"
+def research_finished(sid: str, result: RunResult, m: Map | None) -> None: ...
+    # runner.run_failed(result): "research <sid>: failed: <runner.error_line(result)> <spend>; the lead starts without a map"
+    # else m set: "research <sid>: map of <n> lines, <f> files at <commit> <spend>"
+    # else: "research <sid>: no usable map <spend>; the lead starts without one"
 def map_reused(sid: str, m: Map) -> None: ...                             # "research <sid>: map at <commit> still current, reused"
 def agent_event(who: Kind, sid: str, event: Event) -> None: ...
 def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None: ...  # "<who> <sid>: retired at <tokens> context tokens, no commit since the retire flag"
@@ -215,16 +244,19 @@ def _research(cfg, state, ledger, since, cwd, queue, section) -> tuple[Map | Non
     map that is not stale gets map_reused and is returned, the researcher kept. Otherwise
     drop_map, read git.head (None: no map, no run), unlink research_flag(sid), run
     research_command with research_brief through _run (kind "research"),
-    set_research_session, parse_map, save it, progress.research_finished. A run that fails,
-    is killed or returns no usable map records no failure and gives no map. The bool is the
+    set_research_session; when runner.run_failed, no parse_map, else parse_map and save it;
+    progress.research_finished; on a failed run, ping.research_failed with runner.error_line.
+    A failed run or one with no usable map (no MAP block, over a cap) records no failure and
+    gives no map, and the lead starts without one; only a failed run pings. The bool is the
     research run's budget_hit; false on reuse or no run."""
 
 def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
     """Under state.research_lock(sid), without the `relay go` lock: resume the section's
     research_session with [*research_command, "--resume", session] and ask_brief, through
     _run (kind "ask", since None) in _section_cwd, its flag research_flag(sid). Returns
-    parse_answer's text. ResearchError when the section has no research_session, the run
-    fails or is killed, or there is no answer."""
+    parse_answer's text. ResearchError when the section has no research_session; when
+    runner.run_failed, ResearchError("the researcher for section <sid> failed:
+    <runner.error_line(result)>"); ResearchError when there is no answer."""
 ```
 
 `_run_section` changes in two places:
@@ -247,7 +279,9 @@ _COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "as
 | Concern | Home | Forbidden elsewhere |
 |---|---|---|
 | The map's form, caps check, file, staleness, the answer's form, the block every brief carries | `relay/research.py` | parsing or writing a map or an answer, or wording the map's usage rule, anywhere else |
-| Starting an agent run, ledgering it | `relay/loop.py` `_run` | `run_agent` or `ledger.append` called anywhere else; serves `relay/loop.py:121`, `relay/loop.py:226`, `relay/loop.py:258`, `relay/loop.py:391` |
+| Starting an agent run, ledgering it | `relay/loop.py` `_run` | `run_agent` or `ledger.append` called anywhere else; serves `relay/loop.py:141`, `relay/loop.py:312`, `relay/loop.py:344`, `relay/loop.py:664` |
+| Whether a research or ask run failed, and its error line | `relay/runner.py` `run_failed`, `error_line` | testing `killed`, `exit_code`, `is_error` or tokens to call a research or ask run failed, or reading a run's `.stderr`, anywhere else; replaces `relay/loop.py:325`, `relay/loop.py:356` |
+| The failed-research ping | `relay/ping.py` `research_failed` | a ping message worded in `loop.py` |
 | Where a section's check and research run | `relay/loop.py` `_section_cwd` | `git.section_worktree` called anywhere else in `loop.py` |
 | When research runs, is reused or refreshed | `relay/loop.py` `_research` | a research run started anywhere else |
 | Follow-up questions | `relay/loop.py` `ask`, reached by `relay ask` | resuming a researcher anywhere else |
@@ -275,7 +309,7 @@ _COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "as
    - research before a lead, its map in the lead prompt, the lead's ledger line carrying the map commit and agents;
    - no research on a `check_pending` pass;
    - reuse after a retire with the mapped files unchanged, refresh after one changed, both in the section worktree;
-   - a failed, killed or over-cap research: the lead starts without a map, no failure counted;
+   - a failed or over-cap research: the lead starts without a map, no failure counted;
    - a research run that hits the budget: the section stops with BUDGET and no lead starts;
    - a `relay ask` waits while `_research` holds the section's research lock;
    - the research run's own flag, the lead's flag untouched;
@@ -293,3 +327,11 @@ _COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "as
     - `lead.md`: a lead prompt carrying a map block puts it verbatim in every brief for the section, the architect's included. When an agent reports it needs more, the lead runs `relay ask <queue> <sid> "<question>"` with a 600000 ms timeout or in the background, and passes the answer on; on a non-zero exit the agent reads for itself.
     - `architect.md` and the others: Relay's map block in a brief is legal and never steering; the agent starts from it and, needing more, says so in its report.
 11. Opal copy list. `general-purpose` adds `researcher.md` and `reader.md` to the list of agent files copied to Opal. Nothing is copied to Opal.
+12. Failed research: stubs. `builder` (`stub` piece) adds `run_failed` and `error_line` to `relay/runner.py` and `research_failed` to `relay/ping.py`, raise-only.
+13. Failed research: red tests. `test-writer` writes `tests/test_runner.py`, `tests/test_ping.py`, `tests/test_progress.py`, `tests/test_loop.py` and `tests/test_cli.py`. The tests cover:
+    - `run_failed` for a killed run, a nonzero exit, an error result and a run that used 0 tokens, and false for a clean run;
+    - `error_line`'s fallbacks in order: stderr's last non-empty line, the error result's text, "killed", "used no tokens", "exit N";
+    - a failed research run: its `failed: <error line>` progress line and one ping carrying the error line, the lead started without a map, no failure counted;
+    - a research run with no MAP block or over a cap: "no usable map", no ping;
+    - `relay ask` whose researcher run fails: exit 1 and "the researcher for section <sid> failed: <error line>".
+14. Failed research: build. `builder` writes `relay/runner.py`, `relay/ping.py`, `relay/progress.py` and `relay/loop.py`.

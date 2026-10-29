@@ -36,6 +36,35 @@ class RunResult:
     log: Path
 
 
+def run_failed(result: RunResult) -> bool:
+    """Killed, exited nonzero, its result marked an error, or no tokens used."""
+    return (
+        result.killed
+        or result.exit_code != 0
+        or result.stream.is_error
+        or result.stream.spend.tokens == 0
+    )
+
+
+def error_line(result: RunResult) -> str:
+    """The last non-empty line of the run's stderr, else the error result's text, else the cause: killed, no tokens, "exit N"."""
+    try:
+        lines = result.log.with_suffix(".stderr").read_text(errors="replace").splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        if line.strip():
+            return line.strip()
+    text = (result.stream.result_text or "").strip()
+    if result.stream.is_error and text:
+        return text
+    if result.killed:
+        return "killed"
+    if result.stream.spend.tokens == 0 and result.exit_code == 0:
+        return "used no tokens"
+    return f"exit {result.exit_code}"
+
+
 @dataclass(frozen=True)
 class CommandResult:
     exit_code: int | None

@@ -24,7 +24,7 @@ from relay.prompts import (
     research_brief,
 )
 from relay.queue import Section, blocked_by, parse_queue, queue_design
-from relay.runner import RunResult, run_agent
+from relay.runner import RunResult, error_line, run_agent, run_failed
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
@@ -333,11 +333,13 @@ def _research(
             flag,
         )
         state.set_research_session(sid, result.stream.session_id, cfg.backend)
-        failed = result.killed or result.exit_code != 0 or result.stream.is_error
+        failed = run_failed(result)
         m = None if failed else research.parse_map(sid, commit, result.stream.result_text, cfg)
         if m is not None:
             research.save(m, state.map_path(sid))
         progress.research_finished(sid, result, m)
+        if failed:
+            ping.research_failed(cfg, queue, sid, error_line(result))
         return m, watch.budget_hit
 
 
@@ -371,8 +373,8 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
             _section_cwd(cwd, sid),
             flag,
         )
-        if result.killed or result.exit_code != 0 or result.stream.is_error:
-            raise ResearchError(f"the researcher for section {sid} failed")
+        if run_failed(result):
+            raise ResearchError(f"the researcher for section {sid} failed: {error_line(result)}")
         answer = research.parse_answer(result.stream.result_text, cfg)
         if answer is None:
             raise ResearchError(f"the researcher for section {sid} gave no answer")

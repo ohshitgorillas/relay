@@ -963,16 +963,36 @@ def test_research_finished_without_a_map_says_the_lead_starts_without_one(
 
 
 @pytest.mark.parametrize(
-    ("exit_code", "killed"), [(None, True), (2, False)], ids=["killed", "exit-2"]
+    ("exit_code", "killed", "tokens", "error_text", "error"),
+    [
+        (None, True, 9, None, "killed"),
+        (2, False, 9, None, "exit 2"),
+        (0, False, 9, "Prompt is too long", "Prompt is too long"),
+        (0, False, 0, None, "used no tokens"),
+    ],
+    ids=["killed", "exit-2", "error-result", "no-tokens"],
 )
-def test_research_finished_without_a_map_after_a_failed_run(
-    exit_code: int | None, killed: bool, capsys: pytest.CaptureFixture[str]
+def test_research_finished_after_a_failed_run_names_its_error_line(
+    exit_code: int | None,
+    killed: bool,
+    tokens: int,
+    error_text: str | None,
+    error: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: a killed or failed research run is reported other than "no usable map".
-    result = _result(exit_code=exit_code, killed=killed, tokens=9, dollars=0.25)
+    # A failed run (killed, exit nonzero, is_error set, or 0 tokens) is reported as failed with
+    # runner.error_line; this run's log has no readable stderr (relay-research-design.md:105,
+    # 110, 213).
+    # Breaks when: a failed research run is reported as "no usable map", its error line is
+    # missing or taken in the wrong order, or the line drops its spend or "; the lead starts
+    # without a map".
+    result = _result(exit_code=exit_code, killed=killed, tokens=tokens, dollars=0.25)
+    if error_text is not None:
+        stream = dataclasses.replace(result.stream, result_text=error_text, is_error=True)
+        result = dataclasses.replace(result, stream=stream)
     progress.research_finished("s4", result, None)
     assert _line(capsys) == (
-        "research s4: no usable map (9 tokens, $0.25); the lead starts without one"
+        f"research s4: failed: {error} ({tokens} tokens, $0.25); the lead starts without a map"
     )
 
 

@@ -4,18 +4,18 @@ Status: approved.
 
 ## Why
 
-Relay takes a lead's `DONE` on its word: `relay/loop.py:119-120` marks the section done with nothing run. Every section's `check:` lines sit unread in the queue body (`docs/queue.md:14`, `docs/queue.md:51`; the Workboard queue spells it `done-check:`, `tests/fixtures/workboard-queue.md:19`), and no module in `relay/` parses them. A section's body holds one check line per dispatch, or none: `s1.2.1`, `s3.1.1` and `s7` have none (`docs/queue.md:29`, `docs/queue.md:52`, `docs/queue.md:158`), and Relay marks such a section done on the lead's `DONE`.
+A lead's `DONE` runs the section's checks: `relay/loop.py:171-172` calls `_verify` (`relay/loop.py:433-459`). Check lines sit in the queue body (`docs/queue.md:14`, `docs/queue.md:51`; the Workboard queue spells it `done-check:`, `tests/fixtures/workboard-queue.md:19`) and `relay/queue.py:26` is the one pattern that reads them. A section's body holds one check line per dispatch, or none: `s1.2.1`, `s3.1.1` and `s7` have none (`docs/queue.md:29`, `docs/queue.md:52`, `docs/queue.md:158`), and such a section is done on the lead's `DONE`.
 
-Copies and gaps this design closes:
+Each shared concern and its anchor:
 
-- **Parking a section with a ping**: two copies of the same three calls, `state.park`, `ping.needs_owner`, `progress.needs_answer`, at `relay/loop.py:124-126` and `relay/loop.py:131-133`. This design adds three more parks (a check failing outside the code, a third failed check, a nested recut id), so the copy moves to one helper first.
-- **Failure limits**: one limit, `FAILURE_LIMIT = 2` at `relay/state.py:19`, read at `relay/loop.py:176` and `relay/progress.py:110`. A second failure of any kind stops the whole run (`relay/loop.py:117-118`, `relay/loop.py:179-180`), so a three-failed-checks rule needs its own count beside it.
-- **Retire and kill**: one decision point, the watcher at `relay/loop.py:153-168`, which sets the retire flag at `context_limit` and kills at `hard_ceiling`. The defaults are 100k and 2 × 100k (`relay/config.py:128-130`). The lead is told to look for the flag only "after a step's commit" (`relay/prompts.py:40`). A kill counts as a failure (`relay/loop.py:113`).
-- **Process running**: `relay/runner.py:85-152` is the one place a child starts, and it has no timeout and no captured-output mode. `relay/ping.py:15` is the one allowed exception. Relay runs no `git` command today: it finds the repository by walking up for `.git` (`relay/loop.py:23-29`) and runs every lead and recut there (`relay/loop.py:50`).
-- **Section worktrees**: the queue carries no worktree field (`relay/queue.py:63-74` reads only `depends:`, `from:` and `done` from a header). Leads put each section on its own worktree, branch `lead/<id>`: `git worktree list` shows `/Users/atom/dev/relay-wt/s1` on `lead/s1` through `relay-wt/s8` on `lead/s8`.
-- **Recut ids**: `relay/loop.py:208-212` marks a kept id and each new id `from_recut`. Nothing checks how new ids are named, and the queue already carries nested ids from earlier recuts (`docs/queue.md:29` `s1.2.1`, `docs/queue.md:217` `s8.1.1`).
-- **Effort**: Relay sets no effort. `relay/config.py:10-13` launches leads with no effort or model flag, so the effort rule lives in `lead.md` alone.
-- **Ledger kinds**: `relay/ledger.py:45` takes only `"lead"` and `"recut"`. `_parse` at `relay/ledger.py:25-36` needs `time`, `tokens` and `dollars` on every line.
+- **Parking a section with a ping**: one helper, `_park` at `relay/loop.py:418-430`, makes the three calls `state.park`, `ping.needs_owner`, `progress.needs_answer`. Every park goes through it: a check failing outside the code, a third failed check, a recut rejected for nested ids after a design change.
+- **Failure limits**: `FAILURE_LIMIT = 2` at `relay/state.py:19`, read at `relay/loop.py:465` and `relay/progress.py:131`. A second failure of any kind stops the whole run (`relay/loop.py:166-170`, `relay/loop.py:492-495`). `CHECK_LIMIT = 3` sits beside it at `relay/state.py:20` and counts failed checks alone.
+- **Retire and kill**: one decision point, the watcher at `relay/loop.py:371-415`, which sets the retire flag at `context_limit`, kills an idle lead at `idle_ceiling`, and kills at `hard_ceiling`. The defaults are 100k and 2 × 100k (`relay/config.py:166-168`). The lead is told to look for the flag only "after a step's commit" (`relay/prompts.py:56-57`). A kill counts as a failure (`relay/loop.py:163-170`); an idle retire does not (`relay/loop.py:164-165`).
+- **Process running**: `relay/runner.py` is the one place a child starts: `run_agent` (`relay/runner.py:176`), `run_command` (`relay/runner.py:273`) and `capture` (`relay/runner.py:295`). `relay/ping.py:15` is the one allowed exception. Relay finds the repository by walking up for `.git` (`relay/loop.py:33-39`).
+- **Section worktrees**: the queue carries no worktree field. Leads put each section on its own worktree, branch `lead/<id>`; `git.section_worktree` (`relay/git.py:12`) finds it and `_section_cwd` (`relay/loop.py:250-252`) falls back to the repository.
+- **Recut ids and the queue**: `_recut` (`relay/loop.py:645-692`) rejects a recut that adds nested ids (`relay/loop.py:669-677`). Writing the pre-recut text back there (`relay/loop.py:674`) is the one place Relay writes the queue file, and the one exception to `docs/superpowers/specs/relay-loop-design.md:53` and `docs/superpowers/specs/relay-loop-design.md:246`, which say Relay never writes or edits the queue: Relay writes only the text the queue held before that recut, and only on a rejected cut. The queue carries nested ids from recuts before the rule (`docs/queue.md:29` `s1.2.1`, `docs/queue.md:217` `s8.1.1`).
+- **Effort**: Relay sets no effort. `relay/config.py:10-13` launches leads with no effort flag, so the effort rule lives in `lead.md` alone.
+- **Ledger kinds**: `Kind` at `relay/ledger.py:21`; `_parse` at `relay/ledger.py:30-42` needs `time`, `tokens` and `dollars` on every line; `append_check` at `relay/ledger.py:86`.
 
 Nothing from Baley is installed or copied.
 
@@ -158,6 +158,7 @@ class State:
     def take_check_feedback(self, sid: str) -> str | None: ...
     def set_check_pending(self, sid: str, pending: bool) -> None: ...
     def check_log(self, run_log: Path) -> Path: ...                       # run_log.with_suffix(".check"): runs/<n>.check
+    def rejected_cut(self, run_log: Path) -> Path: ...                    # run_log.with_suffix(".rejected"): runs/<n>.rejected
 ```
 
 `mark_done` also clears `check_feedback` and `check_pending`. `set_answer` leaves `check_pending` as it is.
@@ -220,6 +221,9 @@ def check_started(sid: str, command_count: int, cwd: Path) -> None: ...   # "che
 def check_finished(sid: str, result: CheckResult) -> None: ...            # "check <sid>: passed" | "failed: <outcome_text>" | "<outcome_text>" on a timeout | "outside the code: <outcome_text>" | "none to run"
 def check_failed(sid: str, failures: int) -> None: ...                    # "section <sid>: check failed (<n> of 3)"
 def retired_idle(sid: str, tokens: int) -> None: ...                      # "lead <sid>: retired at <tokens> context tokens, no commit since the retire flag"
+def recut_finished(sid: str, result: RunResult, changed: bool, rejected: str | None = None) -> None: ...
+    # "recut <sid>: finished <outcome>"; with `rejected` set and the recut exiting 0 unkilled,
+    # the outcome is "with the cut rejected: <rejected>"
 ```
 
 ### `relay/loop.py` (changed)
@@ -248,6 +252,14 @@ def _verify(cfg, queue, state, ledger, cwd, section, run_log: Path) -> None:
     record_check_failure(prompts.check_feedback(result)), progress.check_failed, and at
     CHECK_LIMIT or more _park(owner_text). outside: set_check_pending(True) and _park(owner_text).
     The section stays open on a fail below the limit, so the next pass resumes its lead."""
+
+def _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, reason, lead_log,
+           design: Path | None = None, rung: Literal[1, 2] = 1) -> str | None:
+    """Run the divvyer's recut; why it failed, else None. Read the queue's text before the run.
+    When any id the recut adds starts with `<section.id>.`: write the queue as the recut left it to
+    state.rejected_cut(result.log), write the pre-recut text back to the queue, call
+    progress.recut_finished with the reason, and return the reason, which names the nested ids,
+    says Relay rejects nested ids, and gives the kept cut's path. Nothing is marked from_recut."""
 ```
 
 `_run_section` changes in four places:
@@ -257,7 +269,12 @@ def _verify(cfg, queue, state, ledger, cwd, section, run_log: Path) -> None:
 - A run with `idle_retired` set is handled as `RETIRED`. It records no failure.
 - `take_check_feedback` feeds `lead_prompt`.
 
-`_recut` treats a recut as failed, through `_fail` as an unchanged queue is now, when any id it adds starts with `<section.id>.`. The rest of `_recut` is unchanged: `relay/loop.py:208-212` keeps a non-split recut's id and marks it `from_recut`.
+A recut rejected for nested ids leaves the queue as it was before the recut; its sections never run. The caller acts on the returned reason:
+
+- A ladder recut (rung 1, `_climb`) counts it as a failure of the section through `_fail`, as any failed recut.
+- A recut after an approved design change (rung 2, `_design_outcome`) parks the parent with `_park(ladder.failed_text(sid, design, <reason>))` (`relay/ladder.py:126-128`) and counts no failure.
+
+The rest of `_recut` is unchanged: a recut that is not rejected marks its kept id and each new id `from_recut` (`relay/loop.py:684-689`).
 
 ## Homes
 
@@ -267,13 +284,14 @@ def _verify(cfg, queue, state, ledger, cwd, section, run_log: Path) -> None:
 | Git queries: section worktree, branch heads | `relay/git.py` | a `git` argv anywhere else; finding a worktree by path convention |
 | Child processes, timeouts, output capture | `relay/runner.py` | `subprocess`, `os.kill`, `signal` elsewhere (`ping.py:15` keeps its one call) |
 | `check:` / `done-check:` lines and the `from:` note | `relay/queue.py` | regex-matching a section body for check lines anywhere else |
-| Check count, feedback, pending flag, check log path | `relay/state.py` | `CHECK_LIMIT` written elsewhere; a path joined onto `run_dir` elsewhere |
+| Check count, feedback, pending flag, check log path, rejected cut path | `relay/state.py` | `CHECK_LIMIT` written elsewhere; a path joined onto `run_dir` or a suffix put on a run log elsewhere |
+| Rejecting a nested recut and putting the queue back | `relay/loop.py` `_recut` | writing the queue file anywhere else in `relay/`; a second nested-id test |
 | Check lines in the ledger | `relay/ledger.py` (`append_check`) | writing a check result to `ledger.jsonl` anywhere else |
 | Idle ceiling, check timeout, outside patterns, and their defaults; the idle-ceiling default (`_default_idle_ceiling`) and its range check (`load_config`) | `relay/config.py` | a 130k, a 13/10, a timeout or a pattern literal anywhere else; a second idle-ceiling default; a range check in `Config.__post_init__` or outside `load_config` |
-| Parking with a ping | `relay/loop.py` `_park` | `state.park` called anywhere but `_park`; replaces `relay/loop.py:124-126` and `relay/loop.py:131-133` |
+| Parking with a ping | `relay/loop.py` `_park` (`relay/loop.py:418-430`) | `state.park` called anywhere but `_park` |
 | Retire, idle retire and kill | `relay/loop.py` `_watcher` | a retire or kill verdict decided anywhere else |
 | Check text for the lead | `relay/prompts.py` | lead-facing check wording in `loop.py` or `check.py` |
-| Progress lines for checks and idle retire | `relay/progress.py` | printing them anywhere else |
+| Progress lines for checks, idle retire and a rejected recut | `relay/progress.py` | printing them anywhere else |
 | Recut naming and the `from:` note's format | `/Users/atom/.claude/agents/divvyer.md` (written), `relay/queue.py` (read) | a second statement of the naming rule |
 | Retry effort and the test-writer floor | `/Users/atom/.claude/agents/lead.md` | an effort flag in `relay/config.py`, which sets none |
 | Test fakes and fixtures | `tests/conftest.py`, `tests/fakes/fake_claude.py`, `tests/fixtures/` | an ad hoc git repo or check queue built inside a test file |
@@ -291,12 +309,13 @@ def _verify(cfg, queue, state, ledger, cwd, section, run_log: Path) -> None:
    - the check inheriting `relay go`'s environment;
    - the ledger line and the check log;
    - idle retire with and without a commit, and the 200k kill unchanged;
-   - a nested recut id failing the recut.
-8. Loop: build. `builder` writes `relay/loop.py`, with `_park` replacing `relay/loop.py:124-126` and `relay/loop.py:131-133`. The step ends with the full suite green.
+   - a recut adding a nested id: the queue put back as it was before the recut, the cut kept at `runs/<n>.rejected`, the progress line `finished with the cut rejected: <reason>`, a ladder recut counting a failure, and a recut after a design change parking the parent with the reason and the kept cut's path and counting no failure.
+8. Loop: build. `builder` writes `relay/loop.py`, with `_park` the one park and `_recut` rejecting nested ids. The step ends with the full suite green.
 9. Recut naming rule. `general-purpose` writes `/Users/atom/.claude/agents/divvyer.md`:
    - A recut that splits a section makes flat siblings: the parent's id with the next free letter (`s4` gives `s4a`, `s4b`; `s4a` gives the next free letters) or the next free section number. Never `<id>.<n>`.
    - Each sibling's header carries the field `from: <parent id>`.
    - A recut that does not split keeps the id.
+   - Relay rejects a recut that adds an `<id>.<n>` id and puts the queue back as it was.
    - Relay parks a section after 3 failed checks and does not send it to a recut.
 10. Retry effort rule. `general-purpose` writes `/Users/atom/.claude/agents/lead.md`:
     - Every agent keeps its file's `effort: medium`.

@@ -12,7 +12,7 @@ from relay.check import CheckResult, outcome_text
 from relay.config import Config
 from relay.ledger import Kind
 from relay.research import Map
-from relay.runner import RunResult
+from relay.runner import RunResult, error_line, run_failed
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
 from relay.status import TEXT_NAMES, LeadStatus
 
@@ -173,6 +173,12 @@ def research_started(sid: str, cwd: Path) -> None:
 
 
 def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
+    if run_failed(result):
+        _write(
+            f"research {sid}: failed: {error_line(result)} {_spend(result)}; "
+            "the lead starts without a map"
+        )
+        return
     if m is None:
         _write(f"research {sid}: no usable map {_spend(result)}; the lead starts without one")
         return

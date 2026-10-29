@@ -3857,8 +3857,9 @@ def test_a_fresh_lead_after_a_retire_that_changed_a_mapped_file_gets_a_fresh_map
     assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "research", "lead"]
 
 
-# Research behavior 4: a failed, killed or over-cap research: the lead starts without a map, no
-# failure counted (relay-research-design.md:205-206). The research stream's one assistant
+# Research behavior 4: a failed or over-cap research: the lead starts without a map, no failure
+# counted; a failed run is reported as failed and pings, an over-cap map is reported as no usable
+# map and pings nothing (relay-research-design.md:213, 247, 312). The research stream's one assistant
 # message leaves context_tokens at 2 + 150 + 800; DONE_SMALL_LEAD's stays at 1 + 50 + 400. The
 # map body runs 7 lines from `MAP` to `END MAP`, 5 between them.
 RESEARCH_CONTEXT = 2 + 150 + 800
@@ -3886,7 +3887,8 @@ def test_a_research_that_fails_is_killed_or_is_over_a_cap_leaves_the_lead_to_sta
 ) -> None:
     # Breaks when: a research run that exits non-zero, is killed at hard_ceiling, or returns a map
     # over map_max_lines or map_max_chars hands its map to the lead, records a failure on the
-    # section, or stops the lead from starting.
+    # section, or stops the lead from starting; a failed run is reported as "no usable map" or
+    # sends no ping; an over-cap map is reported as failed or pings the owner.
     _mapped_worktree(git_repo)
     queue = _research_queue(git_repo)
     _done_in_state(queue, cfg, "s2")
@@ -3910,10 +3912,22 @@ def test_a_research_that_fails_is_killed_or_is_over_a_cap_leaves_the_lead_to_sta
     assert [(e["kind"], e["section"]) for e in entries] == [("research", "s1"), ("lead", "s1")]
     assert "map" in entries[1] and entries[1]["map"] is None
     texts = _texts(capsys.readouterr().out)
-    finished = [t for t in texts if t.startswith("research s1: no usable map ")]
-    assert len(finished) == 1, texts
-    assert finished[0].endswith("; the lead starts without one"), texts
+    failed_run = how in ("failed", "killed")
+    if failed_run:
+        finished = [t for t in texts if t.startswith("research s1: failed: ")]
+        assert len(finished) == 1, texts
+        assert finished[0].endswith("; the lead starts without a map"), texts
+        assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
+    else:
+        finished = [t for t in texts if t.startswith("research s1: no usable map ")]
+        assert len(finished) == 1, texts
+        assert finished[0].endswith("; the lead starts without one"), texts
+        assert not any(t.startswith("research s1: failed: ") for t in texts), texts
     assert not any(t.startswith("research s1: map of ") for t in texts), texts
+    research_pings = [p[0] for p in _pings(tmp_path) if "research s1 failed: " in p[0]]
+    assert len(research_pings) == (1 if failed_run else 0), _pings(tmp_path)
+    if not failed_run:
+        assert not any("research s1" in p[0] for p in _pings(tmp_path)), _pings(tmp_path)
 
 
 # Research behavior 5: the research run's own flag, the lead's flag untouched
@@ -4994,3 +5008,82 @@ def test_a_run_with_no_result_text_clears_the_sections_last_report(
     assert RETIRED_LEAD_REPORT in str(runs[1]["prompt"]), "report passed after the retire"
     assert RETIRED_LEAD_REPORT not in str(runs[2]["prompt"]), "report passed after the kill"
     assert _last_report(queue, cfg, first) is None, "report left after the kill"
+
+
+# A research run that fails (killed, exited nonzero, its result marked as an error, or used no
+# tokens) is reported as failed with its error line, the last non-empty line of the run's stderr,
+# else the error result's text, else "killed", else "used no tokens", else "exit N", in both the
+# progress output and a ping; the lead then starts without a map (owner's behavior;
+# relay-research-design.md:105, 110, 213, 247). The plan
+# step's `then` command writes the run's stderr before the fake streams. NO_STATUS_LEAD's result
+# is marked as an error with the text "Prompt is too long"; an empty scenario uses no tokens.
+_STDERR = "import sys; sys.stderr.write(sys.argv[1])"
+ERROR_RESULT_TEXT = "Prompt is too long"
+
+
+def _stderr(text: str) -> list[str]:
+    return [sys.executable, "-c", _STDERR, text]
+
+
+_FAILED_RESEARCH = {
+    "exit-nonzero-with-stderr": (
+        _step(RESEARCH_RUN, exit=1, then=_stderr("warming up\nresearch crashed: reader died\n\n")),
+        False,
+        "research crashed: reader died",
+    ),
+    "error-result": (_step(NO_STATUS_LEAD), False, ERROR_RESULT_TEXT),
+    "error-result-with-stderr": (
+        _step(NO_STATUS_LEAD, then=_stderr("api overloaded, retry later\n")),
+        False,
+        "api overloaded, retry later",
+    ),
+    "exit-nonzero-bare": (_step(RESEARCH_RUN, exit=9), False, "exit 9"),
+    "killed-with-stderr": (_step(RESEARCH_RUN, then=_stderr("reader pool exhausted\n")), True, "reader pool exhausted"),
+    "no-tokens": (dict(_step(RESEARCH_RUN), scenario=os.devnull), False, "used no tokens"),
+}
+
+
+@pytest.mark.parametrize("how", list(_FAILED_RESEARCH))
+def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping_and_the_lead_starts_without_a_map(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed research run is reported only as "no usable map", its progress line or
+    # ping lacks the error line, the error line is taken from the wrong source (not stderr's last
+    # non-empty line first, then the error result's text, then "exit N"), a run that used no
+    # tokens or whose result is an error counts as a success, or the lead does not start.
+    step, killed, error = _FAILED_RESEARCH[how]
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    if killed:
+        cfg = dataclasses.replace(cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT)
+    fake = cfg.lead_command[0]
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
+    research = _plan(tmp_path, fake, "research", [step], False)
+    cfg = dataclasses.replace(cfg, research_command=research)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_research_runs(tmp_path)) == 1
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 1
+    prompt = str(leads[0]["prompt"])
+    assert "map s1 at" not in prompt
+    assert "END MAP" not in prompt
+    section = State.open(queue, cfg).section("s1")
+    assert section.failures == 0
+    assert section.status == "done"
+    texts = _texts(capsys.readouterr().out)
+    # The section's "mapping in <cwd>" line is set aside: pytest's tmp_path carries this test's name.
+    finished = [t for t in texts if t.startswith("research s1: ") and not t.startswith("research s1: mapping in ")]
+    reported = [t for t in finished if "fail" in t]
+    assert len(reported) == 1, texts
+    form = rf"research s1: failed: {re.escape(error)} \(\d+ tokens, \$\d+\.\d\d\); the lead starts without a map"
+    assert re.fullmatch(form, reported[0]), texts
+    assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
+    pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
+    assert pings == [f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"], _pings(tmp_path)
