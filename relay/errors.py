@@ -17,6 +17,10 @@ class LockedError(RelayError):
     exit_code = 2
 
 
+class ResearchError(RelayError):
+    exit_code = 1
+
+
 class ExitCode:
     QUEUE_EMPTY = 0
     ERROR = 1

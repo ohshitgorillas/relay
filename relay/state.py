@@ -17,8 +17,9 @@ from relay.config import Config
 from relay.errors import LockedError
 
 FAILURE_LIMIT = 2
+CHECK_LIMIT = 3
 
-SectionStatus = Literal["open", "done", "parked"]
+SectionStatus = Literal["open", "done", "parked", "waiting"]
 
 _RECORD = "state.json"
 _T = TypeVar("_T")
@@ -32,7 +33,32 @@ class SectionState:
     answer: str | None
     last_session: str | None
     from_recut: bool = False
+    check_failures: int = 0
+    check_feedback: str | None = None
+    check_pending: bool = False
+    research_session: str | None = None  # the researcher a follow-up resumes
+    last_log: str | None = None  # the run log of the section's last lead run
+    design_changed: bool = False  # this section had a design change, or a design-change recut made it
+    design_open: str | None = None  # the design path whose product decision awaits the owner's answer
+    # The open decision numbers of the park now awaiting that answer; None when the section's
+    # current park (or run) is for another reason, so an answer to it is not a design answer.
+    design_numbers: list[int] | None = None
+    waits_on: str | None = None  # the section id a waiting section waits for
     last_report: str | None = None
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` by fsynced temp file in its directory and os.replace."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _fresh() -> SectionState:
@@ -73,16 +99,7 @@ class State:
             return {"sections": {}, "last_any": None}
 
     def _save(self, record: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self._dir, prefix=_RECORD + ".")
-        try:
-            with os.fdopen(fd, "w") as handle:
-                json.dump(record, handle)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._dir / _RECORD)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        write_atomic(self._dir / _RECORD, json.dumps(record))
 
     @contextlib.contextmanager
     def _write_guard(self) -> Iterator[None]:
@@ -110,13 +127,104 @@ class State:
         def change(s: SectionState, _r: dict) -> None:
             s.status = "done"
             s.question = None
+            s.check_feedback = None
+            s.check_pending = False
+            s.design_open = None
+            s.design_numbers = None
+            s.waits_on = None
+
+        self._update(sid, change)
+        self.drop_map(sid)
+
+    def record_check_failure(self, sid: str, feedback: str) -> int:
+        def change(s: SectionState, _r: dict) -> int:
+            s.check_failures += 1
+            s.check_feedback = feedback
+            return s.check_failures
+
+        return self._update(sid, change)
+
+    def take_check_feedback(self, sid: str) -> str | None:
+        def change(s: SectionState, _r: dict) -> str | None:
+            taken, s.check_feedback = s.check_feedback, None
+            return taken
+
+        return self._update(sid, change)
+
+    def set_check_pending(self, sid: str, pending: bool) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.check_pending = pending
 
         self._update(sid, change)
 
-    def park(self, sid: str, question: str) -> None:
+    def check_log(self, run_log: Path) -> Path:
+        return run_log.with_suffix(".check")
+
+    def set_last_log(self, sid: str, log: Path) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.last_log = str(log)
+
+        self._update(sid, change)
+
+    def pending_check_log(self, sid: str) -> Path:
+        """The check log of a pending check on `sid`: beside its last lead run's log, or with no
+        lead run recorded, the section's own runs/check-<sid>.check."""
+        recorded = self.section(sid).last_log
+        if recorded:
+            return self.check_log(Path(recorded))
+        return self.run_dir / f"check-{sid}.check"
+
+    def park(
+        self, sid: str, question: str, design: tuple[str, tuple[int, ...]] | None = None
+    ) -> None:
+        """Park `sid` on `question`. `design` is the design path and the open decision numbers when
+        the question is the open design decisions': both are written with the park, one record. Any
+        other park clears both, so no design decision is recorded as waiting and its answer is no
+        design answer."""
+
         def change(s: SectionState, _r: dict) -> None:
             s.status = "parked"
             s.question = question
+            if design is None:
+                s.design_open = None
+                s.design_numbers = None
+            else:
+                s.design_open = design[0]
+                s.design_numbers = list(design[1])
+
+        self._update(sid, change)
+
+    def mark_design_changed(self, sid: str) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_changed = True
+
+        self._update(sid, change)
+
+    def set_design_open(self, sid: str, design: str | None) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_open = design
+            if design is None:
+                s.question = None
+                s.design_numbers = None
+
+        self._update(sid, change)
+
+    def wait(self, sid: str, blocker: str) -> None:
+        """Status "waiting", waits_on blocker; no question."""
+
+        def change(s: SectionState, _r: dict) -> None:
+            s.status = "waiting"
+            s.waits_on = blocker
+            s.question = None
+
+        self._update(sid, change)
+
+    def wake(self, sid: str) -> None:
+        """Status "open", waits_on None."""
+
+        def change(s: SectionState, _r: dict) -> None:
+            s.status = "open"
+            s.waits_on = None
 
         self._update(sid, change)
 
@@ -135,6 +243,7 @@ class State:
             s.answer = answer
             s.status = "open"
             s.question = None
+            s.waits_on = None
             return True
 
         return self._update(sid, change)
@@ -181,6 +290,32 @@ class State:
     @property
     def ledger_path(self) -> Path:
         return self._dir / "ledger.jsonl"
+
+    def map_path(self, sid: str) -> Path:
+        """<dir>/maps/<sid>.map"""
+        return self._dir / "maps" / f"{sid}.map"
+
+    def research_flag(self, sid: str) -> Path:
+        """run_dir / "research-<sid>": the research runs' retire flag."""
+        return self.run_dir / f"research-{sid}"
+
+    def set_research_session(self, sid: str, session: str | None) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.research_session = session
+
+        self._update(sid, change)
+
+    def drop_map(self, sid: str) -> None:
+        """Clear research_session and delete map_path(sid)."""
+        self.set_research_session(sid, None)
+        self.map_path(sid).unlink(missing_ok=True)
+
+    @contextlib.contextmanager
+    def research_lock(self, sid: str) -> Iterator[None]:
+        """Blocking flock on <dir>/research-<sid>.lock."""
+        with open(self._dir / f"research-{sid}.lock", "a") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
 
     @property
     def retire_flag(self) -> Path:

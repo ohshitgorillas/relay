@@ -3,11 +3,16 @@
 from dataclasses import dataclass
 from typing import Literal, get_args
 
-Kind = Literal["DONE", "RECUT", "NEEDS-OWNER", "RETIRED"]
+Kind = Literal["DONE", "RECUT", "DESIGN", "WAITING", "NEEDS-OWNER", "RETIRED"]
 
 # The one list of status words, and the name of the text each text-bearing word requires.
 KINDS: tuple[Kind, ...] = get_args(Kind)
-TEXT_NAMES: dict[Kind, str] = {"RECUT": "reason", "NEEDS-OWNER": "question"}
+TEXT_NAMES: dict[Kind, str] = {
+    "RECUT": "reason",
+    "DESIGN": "problem",
+    "WAITING": "section id",
+    "NEEDS-OWNER": "question",
+}
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,9 @@
+Mapped section s1 for its lead.
+
+MAP
+relay/research.py:30-41 | parse_map reads the last MAP block of a result
+relay/git.py:12 | head runs git rev-parse HEAD
+relay/research.py:50 | save writes the map by temp file and os.replace
+LINKS
+relay/loop.py:101 -> relay/git.py:12 | _research reads HEAD before the researcher runs
+END MAP

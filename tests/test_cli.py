@@ -18,6 +18,7 @@ from relay.config import Config
 from relay.errors import ExitCode, LockedError, QueueFormatError, RelayError
 from relay.ledger import Ledger, Spend
 from relay.state import State
+from tests.conftest import _GIT, GitRepo
 
 QUEUE = "workboard-queue.md"
 DAY = 24 * 60 * 60
@@ -427,3 +428,446 @@ def test_status_files_a_resumed_sessions_runs_under_each_section_in_turn(
     out = capsys.readouterr().out
     assert "2 agents" in _section_line(out, "s2")
     assert "1 agent," in _section_line(out, "s3")
+
+
+# `relay go` gains `--idle-ceiling` (relay-check design, Modules, `relay/config.py`).
+
+
+def test_go_passes_the_idle_ceiling_option_as_an_override(
+    queue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `relay go` has no `--idle-ceiling`, or drops it so the default 130000 holds.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--idle-ceiling", "150000"]) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    cfg = calls[0][1]
+    assert cfg.idle_ceiling == 150_000
+    assert cfg.context_limit == 100_000
+    assert cfg.hard_ceiling == 200_000
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["100000", "200000", "lots"],
+    ids=["at-context-limit", "at-hard-ceiling", "non-number"],
+)
+def test_go_with_an_idle_ceiling_out_of_range_exits_with_usage_and_never_runs_the_loop(
+    value: str, queue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: the `--idle-ceiling` override skips `load_config`'s range check
+    # (context_limit < idle_ceiling < hard_ceiling), or a non-number reaches the loop.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--idle-ceiling", value]) == ExitCode.USAGE
+    assert calls == []
+
+
+# `relay ask <queue> <section> <question>` (relay-research design, Modules, `relay/cli.py` and
+# `relay/loop.py` `ask`; Order 7): the answer printed, the session resumed, an `ask` ledger line;
+# only the answer on stdout, its progress nowhere; ResearchError (exit 1) when the section has
+# no research_session, the run fails or is killed, or there is no answer.
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+ASK_STREAM = "stream-ask.jsonl"  # session "sess-research-1", one assistant message, an ANSWER block
+ASK_SESSION = "sess-research-1"
+ASK_ANSWER = (
+    "ANSWER\n"
+    "relay/loop.py:208-213 | ask resumes the researcher under the research lock\n"
+    "relay/cli.py:228 | _COMMANDS routes ask to _ask\n"
+    "END ANSWER"
+)
+ASK_CONTEXT = 3 + 1200 + 5000  # the ask stream's one assistant message's context
+ASK_SPEND = Spend(tokens=3 + 1200 + 5000 + 40, dollars=0.125)
+# Session "sess-research-1", a successful result (is_error false) whose text holds no ANSWER block.
+NO_ANSWER_STREAM = "stream-ask-no-answer.jsonl"
+ASK_SID = "s2"
+QUESTION = "Where does the ask command resume the researcher?"
+
+# A research command that reads its prompt on stdin, appends `{"argv", "prompt"}` (argv after
+# its own three arguments) as one JSON line to the record path, runs the fake `claude` on the
+# same prompt with its stdout passed through, then exits with the given status.
+_ASK_SHIM = """\
+import json, subprocess, sys
+record, fake, code = sys.argv[1], sys.argv[2], int(sys.argv[3])
+prompt = sys.stdin.read()
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[4:], "prompt": prompt}) + chr(10))
+subprocess.run([fake], input=prompt, text=True, check=True)
+sys.exit(code)
+"""
+
+
+# Two phases of one ask run whose context climbs, both in session "sess-research-1": the first an
+# init and one message at CLIMB_FLAG_CONTEXT, the second one message at CLIMB_PAST_CONTEXT and a
+# successful result holding ASK_ANSWER's block.
+CLIMB_FLAG_STREAM = "stream-ask-climb-flag.jsonl"
+CLIMB_PAST_STREAM = "stream-ask-climb-past.jsonl"
+CLIMB_FLAG_CONTEXT = 3 + 1200 + 5000
+CLIMB_PAST_CONTEXT = 3 + 1200 + 8000
+
+# A research command that records its run as `_ASK_SHIM` does (argv after its own six arguments),
+# runs the fake `claude` on the first stream, waits for the flag file, makes an empty commit with
+# the given git argv, then runs the fake on the second stream.
+_ASK_CLIMB_SHIM = """\
+import json, os, subprocess, sys, time
+record, fake, flag, first, second = sys.argv[1:6]
+git = json.loads(sys.argv[6])
+prompt = sys.stdin.read()
+with open(record, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[7:], "prompt": prompt}) + chr(10))
+def emit(stream):
+    sys.stdout.flush()
+    env = dict(os.environ, RELAY_FAKE_SCENARIO=stream)
+    subprocess.run([fake], input="", text=True, env=env, check=True)
+emit(first)
+end = time.time() + 10
+while time.time() < end and not os.path.exists(flag):
+    time.sleep(0.02)
+time.sleep(0.2)
+subprocess.run([*git, "commit", "--allow-empty", "-q", "-m", "ask step"], stdin=subprocess.DEVNULL, check=True)
+emit(second)
+"""
+
+
+def _ask_config(
+    home: Path,
+    cfg: Config,
+    record: Path,
+    exit_code: int = 0,
+    research: list[str] | None = None,
+    **overrides: int,
+) -> None:
+    """Rewrite the fake home's config file with `cfg`'s values, `overrides` on top, and a
+    research command that records each run to `record` and exits `exit_code` (or `research`)."""
+    if research is None:
+        research = [sys.executable, "-c", _ASK_SHIM, str(record), cfg.lead_command[0], str(exit_code)]
+    values: dict[str, object] = {
+        "context_limit": cfg.context_limit,
+        "hard_ceiling": cfg.hard_ceiling,
+        "poll_seconds": cfg.poll_seconds,
+        "map_max_chars": cfg.map_max_chars,
+    }
+    values.update(overrides)
+    text = "".join(f"{key} = {value}\n" for key, value in values.items())
+    (home / ".config" / "relay" / "config.toml").write_text(
+        text
+        + f"lead_command = {_toml_list(cfg.lead_command)}\n"
+        + f"recut_command = {_toml_list(cfg.recut_command)}\n"
+        + f"ping_command = {_toml_list(cfg.ping_command)}\n"
+        + f"research_command = {_toml_list(research)}\n"
+        + f"state_root = {json.dumps(str(cfg.state_root))}\n"
+    )
+
+
+def _asks(record: Path) -> list[dict[str, object]]:
+    if not record.exists():
+        return []
+    return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def _ledger_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
+    path = State.open(queue, cfg).ledger_path
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.fixture
+def asked(
+    queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
+    """Section s2 with a researcher session, the ask stream scripted, the shim research command
+    configured; returns the shim's record path."""
+    monkeypatch.chdir(tmp_path)
+    record = tmp_path / "ask-record.jsonl"
+    _ask_config(home, fake_cfg, record)
+    State.open(queue, fake_cfg).set_research_session(ASK_SID, ASK_SESSION)
+    scenario((FIXTURES_DIR / ASK_STREAM).read_text().splitlines())
+    return record
+
+
+
+def test_ask_prints_the_answer_and_exits_0(
+    asked: Path, queue: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: `relay ask` is not a command, prints nothing, or prints the result's prose
+    # around the ANSWER block, or the block without its ANSWER / END ANSWER lines.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert capsys.readouterr().out.rstrip("\n") == ASK_ANSWER
+
+
+def test_ask_resumes_the_sections_research_session_with_the_question(
+    asked: Path, queue: Path
+) -> None:
+    # Breaks when: ask starts a fresh researcher, resumes another section's or the lead's
+    # session, or leaves the question out of the brief.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    runs = _asks(asked)
+    assert len(runs) == 1
+    assert runs[0]["argv"][-2:] == ["--resume", ASK_SESSION]
+    assert QUESTION in str(runs[0]["prompt"])
+
+
+def test_ask_appends_one_ask_ledger_line_for_the_section_and_its_spend(
+    asked: Path, queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: the ask run is not ledgered, is ledgered under another kind or section, or
+    # its spend, session, map or agents are dropped.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    entries = _ledger_entries(queue, fake_cfg)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["kind"] == "ask"
+    assert entry["section"] == ASK_SID
+    assert entry["session"] == ASK_SESSION
+    assert entry["tokens"] == ASK_SPEND.tokens
+    assert entry["dollars"] == ASK_SPEND.dollars
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == []
+
+
+def test_ask_works_while_a_relay_go_holds_the_lock(
+    asked: Path, queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: ask takes the `relay go` lock, so it fails while the lead that asks runs.
+    holder = State.open(queue, fake_cfg)
+    holder.lock()
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert capsys.readouterr().out.rstrip("\n") == ASK_ANSWER
+
+
+def test_ask_prints_only_the_answer_and_no_progress(
+    asked: Path, queue: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: ask's run writes progress lines (agent events, started or finished lines)
+    # to stdout or stderr.
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ASK_ANSWER + "\n"
+    assert captured.err == ""
+
+
+def test_ask_with_no_research_session_exits_1_and_runs_nothing(
+    queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: ask with no researcher to resume starts one anyway, exits 0 or another code,
+    # or prints an answer.
+    monkeypatch.chdir(tmp_path)
+    record = tmp_path / "ask-record.jsonl"
+    _ask_config(home, fake_cfg, record)
+    State.open(queue, fake_cfg).set_research_session("s3", ASK_SESSION)
+    scenario((FIXTURES_DIR / ASK_STREAM).read_text().splitlines())
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert capsys.readouterr().out == ""
+    assert _asks(record) == []
+    assert [e for e in _ledger_entries(queue, fake_cfg) if e.get("kind") == "ask"] == []
+
+
+def test_ask_whose_run_exits_non_zero_exits_1_and_prints_no_answer(
+    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a failed ask run's ANSWER block is still printed, or ask exits 0.
+    _ask_config(home, fake_cfg, asked, exit_code=1)
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.fixture
+def repo_queue(
+    asked: Path, queue: Path, fake_cfg: Config, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """The queue copied into `git_repo`'s main checkout, the git top level its runs take as cwd,
+    with s2's researcher session set as `asked` sets it; the test's cwd is that checkout."""
+    path = git_repo.root / queue.name
+    path.write_bytes(queue.read_bytes())
+    State.open(path, fake_cfg).set_research_session(ASK_SID, ASK_SESSION)
+    monkeypatch.chdir(git_repo.root)
+    return path
+
+
+def _climbing_ask(queue: Path, cfg: Config, record: Path, git: list[str]) -> list[str]:
+    """A research command running `_ASK_CLIMB_SHIM` on the two climbing streams, waiting for the
+    queue's research flag for s2, then committing with `git`."""
+    return [
+        sys.executable,
+        "-c",
+        _ASK_CLIMB_SHIM,
+        str(record),
+        cfg.lead_command[0],
+        str(State.open(queue, cfg).research_flag(ASK_SID)),
+        str(FIXTURES_DIR / CLIMB_FLAG_STREAM),
+        str(FIXTURES_DIR / CLIMB_PAST_STREAM),
+        json.dumps(git),
+    ]
+
+
+def test_ask_whose_run_is_killed_at_the_hard_ceiling_exits_1_and_prints_no_answer(
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the hard ceiling does not watch an ask run, or a killed run's answer is used.
+    # The run commits after the retire flag goes up, so the idle ceiling cannot kill it; without
+    # the hard-ceiling kill it runs on to its answer and exits 0.
+    queue = repo_queue
+    research = _climbing_ask(queue, fake_cfg, asked, [*_GIT, "-C", str(git_repo.root)])
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT,
+    )
+    first = git_repo.rev("main")
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+    assert git_repo.rev("main") != first
+
+
+def test_ask_whose_run_idles_past_the_idle_ceiling_exits_1_and_prints_no_answer(
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the idle ceiling does not watch an ask run (relay-research design, Modules,
+    # `relay/config.py`: context_limit, idle_ceiling and hard_ceiling watch a research run
+    # unchanged), or a killed run's answer is used. The run makes no commit after the retire
+    # flag goes up and its context stays below the hard ceiling; without the idle kill it runs
+    # on to its answer and exits 0. Breaks too when the idle kill's retire line (relay-check
+    # design, `_watcher` calls `progress.retired_idle`) reaches stdout or stderr: an ask's
+    # progress goes nowhere (relay-research design, `relay/progress.py`).
+    queue = repo_queue
+    no_commit = [sys.executable, "-c", "pass"]
+    research = _climbing_ask(queue, fake_cfg, asked, no_commit)
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT + 1000,
+    )
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    progress = tuple(f"{who} {ASK_SID}:" for who in ("lead", "recut", "research", "ask"))
+    assert [line for line in captured.err.splitlines() if line.startswith(progress)] == []
+
+
+def test_ask_whose_run_commits_after_the_flag_runs_past_the_idle_ceiling_to_its_answer(
+    asked: Path,
+    repo_queue: Path,
+    home: Path,
+    fake_cfg: Config,
+    git_repo: GitRepo,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher kills an ask run as soon as its retire flag goes up, or at the
+    # idle ceiling although the run committed after the flag (relay-check design, `_watcher`:
+    # the idle kill needs the heads unchanged since the flag; relay-research design,
+    # `relay/config.py`: the ceilings watch a research run unchanged). The run's context passes
+    # idle_ceiling and stays below hard_ceiling, so it runs on to its answer and exits 0, and
+    # its progress goes nowhere (relay-research design, `relay/progress.py`).
+    queue = repo_queue
+    research = _climbing_ask(queue, fake_cfg, asked, [*_GIT, "-C", str(git_repo.root)])
+    _ask_config(
+        home,
+        fake_cfg,
+        asked,
+        research=research,
+        context_limit=CLIMB_FLAG_CONTEXT - 200,
+        idle_ceiling=CLIMB_PAST_CONTEXT - 100,
+        hard_ceiling=CLIMB_PAST_CONTEXT + 1000,
+    )
+    first = git_repo.rev("main")
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 0
+    assert len(_asks(asked)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ASK_ANSWER + "\n"
+    assert captured.err == ""
+    assert git_repo.rev("main") != first
+
+
+def test_ask_whose_result_holds_no_answer_exits_1(
+    asked: Path,
+    queue: Path,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a result with no ANSWER block exits 0, or prints its prose as the answer.
+    # The result is a success (is_error false), so the run itself does not fail.
+    scenario((FIXTURES_DIR / NO_ANSWER_STREAM).read_text().splitlines())
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert len(_asks(asked)) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_ask_whose_answer_is_over_map_max_chars_exits_1(
+    asked: Path, queue: Path, home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the answer's cap is not cfg.map_max_chars, so an over-cap answer is printed.
+    _ask_config(home, fake_cfg, asked, map_max_chars=len(ASK_ANSWER) - 1)
+    assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
+    assert capsys.readouterr().out == ""
+
+
+# `relay go` gains `--section-dollar-cap` (float), which becomes the `section_dollar_cap`
+# override; `relay status` prints a waiting section as `<id>  waiting on <blocker>`
+# (relay-ladder design, Modules, `relay/cli.py` (extended); Order 8).
+
+
+@pytest.mark.parametrize(
+    ("value", "cap"),
+    [("2.5", 2.5), ("5", 5.0)],
+    ids=["decimal", "whole"],
+)
+def test_go_passes_the_section_dollar_cap_option_as_an_override(
+    value: str, cap: float, queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `relay go` has no `--section-dollar-cap`, drops it so the default None holds,
+    # or passes it as a string rather than a float.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--section-dollar-cap", value]) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    cfg = calls[0][1]
+    assert cfg.section_dollar_cap == cap
+    assert isinstance(cfg.section_dollar_cap, float)
+    assert cfg.dollar_budget is None
+    assert cfg.state_root == fake_cfg.state_root
+
+
+def test_status_prints_a_waiting_section_with_its_blocker(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: status prints a waiting section as open or parked, or leaves out the
+    # section it waits on.
+    State.open(queue, fake_cfg).wait("s3", "s2")
+    assert _exit(["status", str(queue)]) == 0
+    out = capsys.readouterr().out
+    assert "s3  waiting on s2" in _section_line(out, "s3")
+    assert "open" in _section_line(out, "s4")

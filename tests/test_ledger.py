@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from relay import agents
+from relay.check import CheckResult
 from relay.config import Config
 from relay.ledger import Ledger, Spend
 
@@ -479,3 +481,486 @@ def test_sessions_skips_unreadable_lines_and_lines_without_a_session(tmp_path: P
 
 def test_sessions_of_a_missing_ledger_is_empty(tmp_path: Path) -> None:
     assert Ledger(tmp_path / "ledger.jsonl").sessions() == []
+
+
+# Relay's check (design: docs/superpowers/specs/relay-check-design.md, Modules `relay/ledger.py`
+# `append_check`; Order 3).
+
+
+def _check(verdict: str = "fail", exit_code: int | None = 1) -> CheckResult:
+    """A check result of the given verdict, shaped as the design's `CheckResult` fields say."""
+    if verdict == "none":
+        return CheckResult(command=None, exit_code=None, timed_out=False, tail="", log=None, verdict="none")
+    return CheckResult(
+        command="make test",
+        exit_code=exit_code,
+        timed_out=exit_code is None,
+        tail="FAILED tests/test_a.py::test_a\n",
+        log=Path("/state/runs/3.check"),
+        verdict=verdict,
+        timeout=1800.0 if exit_code is None else None,
+    )
+
+
+# Behavior 4: Written as append writes.
+
+
+def test_append_check_adds_one_json_line_after_the_existing_ones(tmp_path: Path) -> None:
+    # Breaks when: `append_check` rewrites the file, or writes other than one stamped JSON line.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    first = path.read_bytes()
+    before = time.time()
+    ledger.append_check("s1", _check())
+    after = time.time()
+    text = path.read_bytes()
+    assert text.startswith(first)
+    assert text.endswith(b"\n")
+    lines = text.decode().splitlines()
+    assert len(lines) == 2
+    entry = json.loads(lines[1])
+    assert isinstance(entry, dict)
+    assert len(_stamps(entry, before, after)) >= 1
+
+
+# The `append_check` docstring: "One line: time, kind "check", section, session null, tokens 0,
+# dollars 0.0, command, exit (int or null), timed_out, verdict, tail, log (str or null)."
+CHECK_LINE_CASES = {
+    "fail": ("s1", "fail", 1),
+    "pass": ("s2", "pass", 0),
+    "outside": ("s3a", "outside", 127),
+    "timed-out": ("s1", "fail", None),
+    "none": ("s4", "none", None),
+}
+
+
+@pytest.mark.parametrize("case", list(CHECK_LINE_CASES))
+def test_append_check_line_holds_each_field_of_the_result_and_section(tmp_path: Path, case: str) -> None:
+    # Breaks when: a check line drops or misnames a field, writes the wrong section, kind or
+    # session, stringifies `exit` or `log`, or holds spend other than 0 tokens and $0.
+    section, verdict, exit_code = CHECK_LINE_CASES[case]
+    result = _check(verdict, exit_code)
+    path = tmp_path / "ledger.jsonl"
+    before = time.time()
+    Ledger(path).append_check(section, result)
+    after = time.time()
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert isinstance(entry, dict)
+    assert isinstance(entry["time"], (int, float)) and not isinstance(entry["time"], bool)
+    assert before <= entry["time"] <= after
+    assert entry["kind"] == "check"
+    assert entry["section"] == section
+    assert "session" in entry and entry["session"] is None
+    assert entry["tokens"] == 0 and not isinstance(entry["tokens"], bool)
+    assert entry["dollars"] == 0.0 and not isinstance(entry["dollars"], bool)
+    assert entry["verdict"] == verdict
+    assert entry["tail"] == result.tail
+    assert entry["timed_out"] is result.timed_out
+    if verdict == "none":
+        assert "command" in entry and entry["command"] is None
+        assert "exit" in entry and entry["exit"] is None
+        assert "log" in entry and entry["log"] is None
+        assert entry["timed_out"] is False
+        assert entry["tail"] == ""
+        return
+    assert entry["command"] == "make test"
+    if exit_code is None:
+        assert "exit" in entry and entry["exit"] is None
+        assert entry["timed_out"] is True
+    else:
+        assert type(entry["exit"]) is int and entry["exit"] == exit_code
+        assert entry["timed_out"] is False
+    assert entry["log"] == "/state/runs/3.check"
+
+
+def test_append_check_creates_a_missing_ledger(tmp_path: Path) -> None:
+    # Breaks when: `append_check` needs the file to exist first.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append_check("s1", _check("pass", 0))
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    assert isinstance(json.loads(lines[0]), dict)
+
+
+def test_append_check_closes_off_a_torn_last_line(tmp_path: Path) -> None:
+    # Breaks when: `append_check` skips the `\n` that `append` writes after a torn line.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    torn = '{"time": 1, "tokens": 9'
+    _raw(path, torn)
+    before = path.read_text()
+    ledger.append_check("s1", _check())
+    text = path.read_text()
+    assert text.startswith(before + "\n")
+    lines = text.splitlines()
+    assert len(lines) == 3
+    assert lines[1] == torn
+    assert isinstance(json.loads(lines[2]), dict)
+
+
+def test_append_check_keeps_every_existing_byte_of_a_corrupt_ledger(tmp_path: Path) -> None:
+    # Breaks when: `append_check` truncates or rewrites a corrupt ledger.
+    path = tmp_path / "ledger.jsonl"
+    ledger = _corrupt_ledger(path)
+    original = path.read_bytes()
+    ledger.append_check("s2", _check("outside", 127))
+    ledger.append_check("s2", _check("none"))
+    after = path.read_bytes()
+    assert after.startswith(original + b"\n")
+    assert len(after.splitlines()) == len(original.splitlines()) + 2
+
+
+# Behavior 5: so `total`, `over` and `unreadable` read check lines unchanged.
+
+
+def _ledger_with_checks(path: Path) -> Ledger:
+    """Seven lines: two runs summing to 42 tokens, $0.75, and a check line of each verdict."""
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    ledger.append_check("s1", _check("fail", 1))
+    ledger.append_check("s1", _check("outside", 127))
+    ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.25))
+    ledger.append_check("s1", _check("fail", None))
+    ledger.append_check("s2", _check("none"))
+    ledger.append_check("s1", _check("pass", 0))
+    return ledger
+
+
+def test_total_counts_check_lines_as_no_spend(tmp_path: Path) -> None:
+    # Breaks when: a check line adds tokens or dollars to the total.
+    ledger = _ledger_with_checks(tmp_path / "ledger.jsonl")
+    assert _call(ledger.total, None) == Spend(tokens=42, dollars=0.75)
+
+
+def test_total_since_counts_check_lines_after_it_as_no_spend(tmp_path: Path) -> None:
+    # Breaks when: a check line stamped after `since` adds spend to the total.
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append("lead", "s1", "sess-old", Spend(tokens=1_000, dollars=4.0))
+    start = _tick()
+    ledger.append_check("s1", _check())
+    ledger.append("lead", "s2", "sess-new", Spend(tokens=30, dollars=0.5))
+    ledger.append_check("s2", _check("pass", 0))
+    assert _call(ledger.total, start) == Spend(tokens=30, dollars=0.5)
+
+
+def test_over_counts_check_lines_as_no_spend(tmp_path: Path, fake_cfg: Config) -> None:
+    # Breaks when: check lines push `over` past a budget the runs stay under, or hide one they pass.
+    cfg = dataclasses.replace(fake_cfg, token_budget=43, dollar_budget=0.76)
+    ledger = _ledger_with_checks(tmp_path / "ledger.jsonl")
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.0), None) is None
+    assert _call(ledger.over, cfg, Spend(tokens=2, dollars=0.0), None) == "tokens"
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.25), None) == "dollars"
+
+
+def test_unreadable_reads_check_lines_as_readable(tmp_path: Path) -> None:
+    # Breaks when: a check line lacks `time`, `tokens` or `dollars`, or holds a non-number in one.
+    path = tmp_path / "ledger.jsonl"
+    ledger = _ledger_with_checks(path)
+    assert _call(ledger.unreadable) == []
+    _raw(path, "not json\n")
+    ledger.append_check("s1", _check())
+    assert _call(ledger.unreadable) == [8]
+
+
+# Behavior 6: `sessions()` skips them because their session is null.
+
+
+def test_sessions_skips_check_lines(tmp_path: Path) -> None:
+    # Breaks when: a check line is listed as a (section, session) pair.
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append_check("s1", _check())
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=1, dollars=0.0))
+    ledger.append_check("s1", _check("pass", 0))
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=1, dollars=0.0))
+    ledger.append_check("s2", _check("none"))
+    assert _call(ledger.sessions) == [("s1", "sess-a"), ("s2", "sess-b")]
+
+
+def test_sessions_of_a_ledger_of_only_check_lines_is_empty(tmp_path: Path) -> None:
+    # Breaks when: `sessions()` lists a check line with a null session.
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append_check("s1", _check())
+    ledger.append_check("s1", _check("outside", 127))
+    assert _call(ledger.sessions) == []
+
+
+# Relay's research (design: docs/superpowers/specs/relay-research-design.md, Modules
+# `relay/ledger.py`; Order 3).
+# Behavior 3: Run lines with map commit and agents' tokens.
+
+RUN_KINDS = ["lead", "recut", "research", "ask"]
+
+
+def _subagents() -> tuple:
+    """The two subagents of the agents fixture stream: builder a1 at 21844 tokens, test-writer
+    a2 at 41000, folded as `relay/agents.py` folds a run's stream."""
+    activity = agents.Activity()
+    for line in (Path(__file__).parent / "fixtures" / "stream-agents.jsonl").read_text().splitlines():
+        event = json.loads(line)
+        if event.get("type") == "system":
+            activity = agents.feed(activity, event)
+    return tuple(activity.agents)
+
+
+SUBAGENT_RECORDS = [
+    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
+    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+]
+
+
+@pytest.mark.parametrize("kind", RUN_KINDS)
+def test_a_run_line_carries_its_kind_map_commit_and_each_subagents_tokens(tmp_path: Path, kind: str) -> None:
+    # Breaks when: a run line drops the map commit or the agents, names their fields otherwise,
+    # or a research or ask run is refused or written under another kind.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["kind"] == kind
+    assert entry.get("map") == "4f2a9c1"
+    assert entry.get("agents") == SUBAGENT_RECORDS
+
+
+@pytest.mark.parametrize("kind", RUN_KINDS)
+def test_a_run_line_with_no_map_and_no_agents_holds_null_and_an_empty_list(tmp_path: Path, kind: str) -> None:
+    # Breaks when: a run without a map omits `map` or writes other than null, or omits `agents`.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert entry["kind"] == kind
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == []
+
+
+def test_a_run_line_by_keyword_keeps_the_map_and_agents_given(tmp_path: Path) -> None:
+    # Breaks when: `map_commit` and `agents` are not the keyword names, or are swapped.
+    path = tmp_path / "ledger.jsonl"
+    Ledger(path).append(
+        "research", "s2", "sess-r", Spend(tokens=9, dollars=0.125), agents=_subagents()[:1], map_commit=None
+    )
+    entry = json.loads(path.read_text().splitlines()[0])
+    assert "map" in entry and entry["map"] is None
+    assert entry.get("agents") == SUBAGENT_RECORDS[:1]
+
+
+# Behavior 4: `_parse` is unchanged, so `total`, `over`, `unreadable` and `sessions` read the
+# new lines as they read lead lines.
+
+
+def _new_shape(path: Path) -> None:
+    """Every line in the file is a run line of the new form, holding `map` and `agents`, so the
+    reads below are of the new lines and not of lead lines without them."""
+    for line in path.read_text().splitlines():
+        entry = json.loads(line)
+        assert "map" in entry and isinstance(entry.get("agents"), list)
+
+
+def _ledger_with_research(path: Path) -> Ledger:
+    """Four run lines, one of each kind, with maps and agents: 52 tokens, $1.875."""
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-lead", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
+    ledger.append("research", "s1", "sess-research", Spend(tokens=7, dollars=1.0), "4f2a9c1", _subagents())
+    ledger.append("ask", "s1", "sess-research", Spend(tokens=3, dollars=0.25), None, _subagents()[1:])
+    ledger.append("recut", "s1", "sess-recut", Spend(tokens=2, dollars=0.125), "4f2a9c1", ())
+    _new_shape(path)
+    return ledger
+
+
+def test_total_sums_research_and_ask_lines_as_it_sums_lead_lines(tmp_path: Path) -> None:
+    # Breaks when: a research or ask line, or one carrying a map or agents, is skipped or its
+    # subagents' tokens are added to the run's own.
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.total, None) == Spend(tokens=52, dollars=1.875)
+
+
+def test_total_since_counts_only_research_and_ask_lines_after_it(tmp_path: Path) -> None:
+    # Breaks when: a research or ask line's time is not read as a lead line's is.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("research", "s1", "sess-old", Spend(tokens=1_000, dollars=4.0), "4f2a9c1", _subagents())
+    start = _tick()
+    ledger.append("research", "s2", "sess-new", Spend(tokens=30, dollars=0.5), "9b0d3e7", _subagents())
+    ledger.append("ask", "s2", "sess-new", Spend(tokens=5, dollars=0.25), None, ())
+    _new_shape(path)
+    assert _call(ledger.total, start) == Spend(tokens=35, dollars=0.75)
+
+
+def test_over_counts_research_and_ask_lines(tmp_path: Path, fake_cfg: Config) -> None:
+    # Breaks when: research or ask spend escapes the budgets.
+    cfg = dataclasses.replace(fake_cfg, token_budget=53, dollar_budget=1.9)
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.0), None) is None
+    assert _call(ledger.over, cfg, Spend(tokens=2, dollars=0.0), None) == "tokens"
+    assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.125), None) == "dollars"
+
+
+def test_unreadable_reads_lines_with_a_map_and_agents_as_readable(tmp_path: Path) -> None:
+    # Breaks when: a line with `map` or `agents` is counted unreadable.
+    path = tmp_path / "ledger.jsonl"
+    ledger = _ledger_with_research(path)
+    assert _call(ledger.unreadable) == []
+    _raw(path, "not json\n")
+    ledger.append("ask", "s1", "sess-research", Spend(tokens=1, dollars=0.0), None, _subagents())
+    assert _call(ledger.unreadable) == [5]
+
+
+def test_sessions_lists_research_and_ask_lines_in_the_order_written(tmp_path: Path) -> None:
+    # Breaks when: `sessions()` skips research or ask lines, or lines carrying a map or agents.
+    ledger = _ledger_with_research(tmp_path / "ledger.jsonl")
+    assert _call(ledger.sessions) == [
+        ("s1", "sess-lead"),
+        ("s1", "sess-research"),
+        ("s1", "sess-research"),
+        ("s1", "sess-recut"),
+    ]
+
+
+# The ladder (design: docs/superpowers/specs/relay-ladder-design.md, Modules `relay/ledger.py`;
+# Order 4).
+# Behavior 1: As now; a line gains "rung" only when rung is not None.
+
+
+def test_a_line_carries_the_rung_it_is_given(tmp_path: Path) -> None:
+    # Breaks when: `append` drops `rung`, writes it under another key, or writes it as other than
+    # the int given.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("recut", "s1", "sess-r1", Spend(tokens=3, dollars=0.125), rung=1)
+    ledger.append("design", "s1", "sess-arch", Spend(tokens=9, dollars=0.5), "4f2a9c1", (), 2)
+    ledger.append("recut", "s1", "sess-r2", Spend(tokens=4, dollars=0.25), None, (), rung=2)
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == 3
+    assert type(entries[0].get("rung")) is int and entries[0].get("rung") == 1
+    assert entries[1].get("kind") == "design"
+    assert type(entries[1].get("rung")) is int and entries[1].get("rung") == 2
+    assert type(entries[2].get("rung")) is int and entries[2].get("rung") == 2
+
+
+def test_a_line_without_a_rung_holds_no_rung_key_beside_one_that_has_it(tmp_path: Path) -> None:
+    # Breaks when: a line given no rung gains a "rung" key (null or otherwise), or the rung of one
+    # line leaks into the next.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    ledger.append("recut", "s1", "sess-r1", Spend(tokens=3, dollars=0.125), rung=1)
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=7, dollars=0.25), rung=None)
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == 3
+    assert "rung" not in entries[0]
+    assert entries[1].get("rung") == 1
+    assert "rung" not in entries[2]
+
+
+def test_a_line_with_a_rung_is_otherwise_the_line_written_without_one(tmp_path: Path) -> None:
+    # Breaks when: giving a rung changes or drops any other field of the line.
+    plain = tmp_path / "plain.jsonl"
+    ranked = tmp_path / "ranked.jsonl"
+    Ledger(plain).append("recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents())
+    Ledger(ranked).append("recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents(), rung=2)
+    without = json.loads(plain.read_text())
+    with_rung = json.loads(ranked.read_text())
+    assert with_rung.get("rung") == 2
+    del with_rung["rung"]
+    del without["time"]
+    del with_rung["time"]
+    assert with_rung == without
+
+
+def test_lines_with_a_rung_are_read_as_lines_without_one(tmp_path: Path) -> None:
+    # Breaks when: a line carrying "rung", or a design line, is skipped, counted unreadable or
+    # left out of `sessions()`.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    ledger.append("recut", "s1", "sess-r1", Spend(tokens=3, dollars=0.125), rung=1)
+    ledger.append("design", "s1", "sess-arch", Spend(tokens=9, dollars=1.0), rung=2)
+    assert json.loads(path.read_text().splitlines()[2]).get("rung") == 2
+    assert _call(ledger.total, None) == Spend(tokens=52, dollars=1.625)
+    assert _call(ledger.unreadable) == []
+    assert _call(ledger.sessions) == [("s1", "sess-a"), ("s1", "sess-r1"), ("s1", "sess-arch")]
+
+
+# Behavior 2: Every readable line whose "section" is `section`, summed, across all time.
+
+
+def test_section_spend_sums_only_that_sections_lines(tmp_path: Path) -> None:
+    # Breaks when: `section_spend` sums every line as `total` does, matches a section by prefix,
+    # or skips a run kind.
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=1_000, dollars=9.0))
+    ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.125), rung=1)
+    ledger.append("lead", "s10", "sess-c", Spend(tokens=500, dollars=7.0))
+    ledger.append("research", "s1", "sess-d", Spend(tokens=7, dollars=1.0), "4f2a9c1", _subagents())
+    ledger.append("ask", "s1", "sess-d", Spend(tokens=3, dollars=0.25))
+    ledger.append("design", "s1", "sess-arch", Spend(tokens=9, dollars=2.0), rung=2)
+    ledger.append("recut", "s1a", None, Spend(tokens=300, dollars=5.0), rung=2)
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=61, dollars=3.875)
+    assert _call(ledger.section_spend, "s2") == Spend(tokens=1_000, dollars=9.0)
+    assert _call(ledger.section_spend, "s1a") == Spend(tokens=300, dollars=5.0)
+
+
+def test_section_spend_counts_lines_from_every_earlier_run(tmp_path: Path) -> None:
+    # Breaks when: `section_spend` counts only lines after some start time, as `total(since)` does.
+    path = tmp_path / "ledger.jsonl"
+    old = {"time": 1, "kind": "lead", "section": "s1", "session": "sess-old", "tokens": 100, "dollars": 3.0}
+    _raw(path, json.dumps(old) + "\n")
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-mid", Spend(tokens=20, dollars=1.0))
+    _tick()
+    ledger.append("recut", "s1", None, Spend(tokens=5, dollars=0.5), rung=1)
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=125, dollars=4.5)
+
+
+def test_section_spend_of_an_unknown_section_or_a_missing_ledger_is_zero(tmp_path: Path) -> None:
+    # Breaks when: `section_spend` raises on a missing file or a section with no lines.
+    assert _call(Ledger(tmp_path / "absent.jsonl").section_spend, "s1") == Spend(tokens=0, dollars=0.0)
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    assert _call(ledger.section_spend, "s9") == Spend(tokens=0, dollars=0.0)
+
+
+@pytest.mark.parametrize("kind", list(UNREADABLE))
+def test_section_spend_skips_each_unreadable_line_kind(tmp_path: Path, kind: str) -> None:
+    # Breaks when: `section_spend` counts, or raises on, a line the recovery list calls unreadable.
+    # Each line that is a JSON object names the section, so only its unreadability can exclude it.
+    bad = _unreadable_line(kind)
+    if bad.startswith("{"):
+        bad = '{"section": "s1", ' + bad[1:]
+    ledger = _ledger_around(tmp_path / "ledger.jsonl", bad)
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=42, dollars=0.75)
+
+
+def test_section_spend_skips_unreadable_lines_that_name_the_section(tmp_path: Path) -> None:
+    # Breaks when: a line naming the section is counted though it lacks or garbles its spend.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
+    _raw(path, json.dumps({"time": time.time(), "section": "s1", "tokens": 1_000_000}) + "\n")
+    _raw(path, json.dumps({"time": time.time(), "section": "s1", "tokens": True, "dollars": 900.0}) + "\n")
+    _raw(path, json.dumps({"section": "s1", "tokens": 1_000_000, "dollars": 900.0}) + "\n")
+    _raw(path, "\n")
+    ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.25))
+    _raw(path, '{"time": 1, "section": "s1", "tokens": 1000000, "doll')
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=42, dollars=0.75)
+
+
+def test_section_spend_counts_check_lines_as_no_spend(tmp_path: Path) -> None:
+    # Breaks when: a check line adds spend to its section.
+    ledger = _ledger_with_checks(tmp_path / "ledger.jsonl")
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=42, dollars=0.75)
+    assert _call(ledger.section_spend, "s2") == Spend(tokens=0, dollars=0.0)
+
+
+def test_section_spend_leaves_every_ledger_byte_in_place(tmp_path: Path) -> None:
+    # Breaks when: `section_spend` rewrites, truncates or closes off the ledger as it reads.
+    path = tmp_path / "ledger.jsonl"
+    ledger = _corrupt_ledger(path)
+    original = path.read_bytes()
+    assert _call(ledger.section_spend, "s1") == Spend(tokens=8, dollars=0.75)
+    assert path.read_bytes() == original

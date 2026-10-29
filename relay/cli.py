@@ -35,11 +35,17 @@ def _parser() -> argparse.ArgumentParser:
     go.add_argument("--token-budget", type=int)
     go.add_argument("--dollar-budget", type=float)
     go.add_argument("--context-limit", type=int)
+    go.add_argument("--idle-ceiling", type=int)
+    go.add_argument("--section-dollar-cap", type=float)
     commands.add_parser("stop").add_argument("queue", type=Path)
     answer = commands.add_parser("answer")
     answer.add_argument("queue", type=Path)
     answer.add_argument("section")
     answer.add_argument("text")
+    ask = commands.add_parser("ask")
+    ask.add_argument("queue", type=Path)
+    ask.add_argument("section")
+    ask.add_argument("question")
     commands.add_parser("status").add_argument("queue", type=Path)
     return parser
 
@@ -54,6 +60,8 @@ def _go(args: argparse.Namespace) -> int:
             "token_budget": args.token_budget,
             "dollar_budget": args.dollar_budget,
             "context_limit": args.context_limit,
+            "idle_ceiling": args.idle_ceiling,
+            "section_dollar_cap": args.section_dollar_cap,
         }
     )
     return loop.run(args.queue.resolve(), cfg)
@@ -72,6 +80,11 @@ def _answer(args: argparse.Namespace) -> int:
         raise QueueFormatError(f"{queue}: no section {args.section!r}")
     if not section.open or not State.open(queue, _config({})).set_answer(args.section, args.text):
         print(f"relay: section {args.section} is done; answer dropped", file=sys.stderr)
+    return ExitCode.QUEUE_EMPTY
+
+
+def _ask(args: argparse.Namespace) -> int:
+    print(loop.ask(args.queue.resolve(), _config({}), args.section, args.question))
     return ExitCode.QUEUE_EMPTY
 
 
@@ -124,7 +137,10 @@ def _status(args: argparse.Namespace) -> int:
     ledger = Ledger(path)
     activity = _section_activity(state, ledger)
     for section in parse_queue(queue):
-        line = f"{section.id}  {state.section(section.id).status}"
+        record = state.section(section.id)
+        line = f"{section.id}  {record.status}"
+        if record.status == "waiting":
+            line += f" on {record.waits_on}"
         print(line + _agent_summary(activity.get(section.id)))
     week = ledger.total(time.time() - _WEEK)
     total = ledger.total(None)
@@ -137,7 +153,7 @@ def _status(args: argparse.Namespace) -> int:
     return ExitCode.QUEUE_EMPTY
 
 
-_COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status}
+_COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "ask": _ask}
 
 
 def main(argv: list[str] | None = None) -> int:
