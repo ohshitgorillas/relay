@@ -106,7 +106,7 @@ Use the researcher's backend when running `relay ask`; a backend mismatch is an 
 
 Codex context comes from the matching rollout's latest `last_token_usage.total_tokens`; cumulative `total_token_usage.total_tokens` supplies spend. Cumulative tokens are never used as current context, which may fall after compaction. Relay polls the rollout even while stdout is quiet. Missing telemetry at finalization is an explicit error. Codex supplies no dollar costs or per-agent context and duration telemetry here; collaboration activity does not imply those measurements are available. A completed collaboration tool call alone does not mean its receiver agents have finished.
 
-Codex rotation starts a fresh thread with the previous report as its handoff. The history hint identifies the old thread and the native continuation command, `codex exec resume <id>`, for accessing its history. Relay does not use that command to rotate into the full context it just retired, and it does not send Codex thread IDs to Terminus.
+Codex rotation starts a fresh thread with the previous report as its handoff. The history hint identifies the old thread and the native continuation command, `codex exec resume <id>`, for accessing its history. Relay does not use that command to rotate into the full context it just retired, and it does not send Codex thread IDs to Terminus. For further recall the hint points the Codex lead at deja (`~/.codex/skills/deja/scripts/recall-session <id>`).
 
 The following trial command targets the Gauntlet queue using this Relay worktree. It is documented only and has **not been executed** as part of validation:
 

@@ -148,4 +148,6 @@ class CodexBackend:
     def resume_hint(self, session_id: str) -> str:
         return (f"Prior Codex thread: {session_id}. Native history continuation uses "
                 f"`codex exec resume {session_id}`. This fresh thread uses the supplied "
-                "report as its handoff.")
+                "report as its handoff. To recall more of that thread or a worker's session, "
+                f"use deja: `~/.codex/skills/deja/scripts/recall-session {session_id}` "
+                "(the `deja` skill).")
