@@ -1455,6 +1455,33 @@ def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_it
     assert not state.section("s2").from_recut
 
 
+def test_a_recut_that_leaves_the_section_entry_unchanged_does_not_mark_it_and_recuts_it_again(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a recut that keeps the section's id but not its entry changed (only the blank
+    # lines trailing it differ) marks it as the recut's, so its next RECUT parks as "no design to
+    # amend" instead of running the divvyer again at rung 1.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    added = tmp_path / "added.md"
+    added.write_text(
+        "section s1 | lead | steps: 1\n  s1 work\n\n\n"
+        "section s1a | lead | steps: 1\n  s1a work\n"
+        "section s2 | lead | steps: 1\n  s2 work\n"
+    )
+    split = _queue_of(tmp_path / "split.md", "s1b", "s1a", "s2")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD), _step(NO_STATUS_LEAD)]
+    recuts = [_step(DIVVYER_RUN, write=(added, queue)), _step(DIVVYER_RUN, write=(split, queue))]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
+    run(queue, cfg)
+    assert len(_runs(tmp_path, "recut")) == 2
+    state = State.open(queue, cfg)
+    assert not state.section("s1").from_recut
+    assert state.section("s1a").from_recut
+    assert state.section("s1b").from_recut
+    assert not state.section("s2").from_recut
+
+
 def test_a_recut_that_splits_the_section_runs_the_child_ids_and_leaves_the_old_id_behind(
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:

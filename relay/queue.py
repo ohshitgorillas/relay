@@ -6,7 +6,7 @@ permissions after a failed recut, through the transaction in relay.loop.
 
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from relay.errors import QueueFormatError
@@ -126,6 +126,11 @@ def parse_queue(path: Path) -> list[Section]:
     if not sections:
         raise QueueFormatError(f"no sections in {path}")
     return sections
+
+
+def same_entry(a: Section, b: Section) -> bool:
+    """True when two parses of a section differ at most in the blank lines that trail its body."""
+    return replace(a, body=a.body.rstrip()) == replace(b, body=b.body.rstrip())
 
 
 def blocked_by(sections: list[Section], parked: set[str]) -> set[str]:

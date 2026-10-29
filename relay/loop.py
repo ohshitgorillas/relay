@@ -24,7 +24,7 @@ from relay.prompts import (
     recut_brief,
     research_brief,
 )
-from relay.queue import Section, blocked_by, parse_queue, queue_design
+from relay.queue import Section, blocked_by, parse_queue, queue_design, same_entry
 from relay.runner import RunResult, error_line, run_agent, run_failed
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
@@ -745,7 +745,7 @@ def _recut(
     progress.recut_started(section.id, reason)
     changed = False
     after = before
-    known = {s.id for s in before}
+    known = {s.id: s for s in before}
     nested: list[str] = []
     kept: Path | None = None
     try:
@@ -783,8 +783,10 @@ def _recut(
         return "the recut made no usable change"
     if section.id not in {s.id for s in after}:
         state.drop_map(section.id)
+    # A recut that keeps the section's id rewrote it in place only when its own entry changed
+    # (the blank lines trailing it are not part of it): mark each new id, and the section then.
     for made in after:
-        if made.id not in known or made.id == section.id:
+        if made.id not in known or (made.id == section.id and not same_entry(made, known[made.id])):
             state.mark_from_recut(made.id)
             if design is not None:
                 state.mark_design_changed(made.id)
