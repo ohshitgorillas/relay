@@ -57,3 +57,31 @@ def test_discovered_rollout_io_failure_raises_chained_relay_error(tmp_path: Path
         reader.poll(state)
 
     assert isinstance(failure.value.__cause__, FileNotFoundError)
+
+
+@pytest.mark.parametrize("io_error", [PermissionError("denied"), OSError("device failure")])
+def test_discovery_open_failure_raises_chained_relay_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, io_error: OSError
+) -> None:
+    # Breaks when opening a discovery candidate silently swallows an I/O failure.
+    sid = "01a1855b-7ba6-79d3-bf98-98c251634b5a"
+    folder = tmp_path / "sessions" / "2026" / "10" / "29"
+    folder.mkdir(parents=True)
+    path = folder / f"rollout-2026-10-29T01-52-00-{sid}.jsonl"
+    identity = {"type": "session_meta", "payload": {"id": sid}}
+    path.write_text(json.dumps(identity) + "\n")
+    original_open = Path.open
+
+    def fail_candidate_open(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            raise io_error
+        return original_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_candidate_open)
+    reader = SessionReader(tmp_path, sid)
+    state = StreamState(sid, 0, Spend(0, 0.0), None, False)
+
+    with pytest.raises(RelayError) as failure:
+        reader.poll(state)
+
+    assert failure.value.__cause__ is io_error

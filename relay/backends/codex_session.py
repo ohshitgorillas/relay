@@ -42,7 +42,9 @@ class SessionReader:
                         and payload.get("id") == self.session_id):
                     self.path = path
                     return
-            except (OSError, ValueError, RecursionError):
+            except OSError as exc:
+                raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
+            except (ValueError, RecursionError):
                 continue
 
     def poll(self, state: StreamState) -> StreamState:
