@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from relay.queue import Section
-from relay.status import KINDS, Kind, TEXT_NAMES
+from relay.status import Kind, TEXT_NAMES
 
 
 def _status_form(kind: Kind) -> str:
@@ -17,34 +17,10 @@ def lead_prompt(
     report: str | None,
     answer: str | None,
     retire_flag: Path,
+    *,
+    handoff_hint: str | None = None,
 ) -> str:
-    parts = [
-        "You are a lead. Carry the queue section below through development until it is done.",
-        f"Queue: {queue}\nSection: {section.id}",
-        f"Section body:\n{section.body}",
-    ]
-    if resume is not None:
-        parts.append(f"resume {resume}")
-    if report is not None:
-        parts.append(
-            "The previous lead's final report (that session's last reply, so you need "
-            f"not recall it):\n{report}"
-        )
-    if answer is not None:
-        parts.append(f"The owner's answer to your earlier question:\n{answer}")
-    parts.append(
-        "Retire contract: on reaching a safe point, after a step's commit, check whether "
-        f"the file {retire_flag} exists. If it exists, stop and end with RETIRED. "
-        "A session grown heavy, past about 100k tokens of context, also stops at its "
-        "next safe point and ends with RETIRED, never RECUT: Relay starts a fresh lead "
-        "on the same section, which resumes from this session. RECUT is only for a "
-        "section whose cut is wrong or too big."
-    )
-    parts.append(
-        "Status contract: the last line of your final message is exactly one of these, "
-        "and nothing follows it:\n" + "\n".join(_status_form(kind) for kind in KINDS)
-    )
-    return "\n\n".join(parts) + "\n"
+    raise NotImplementedError
 
 
 def recut_brief(queue: Path, section: Section, reason: str, lead_log: Path) -> str:

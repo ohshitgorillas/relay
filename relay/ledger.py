@@ -8,9 +8,12 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from relay.config import Config
+
+if TYPE_CHECKING:
+    from relay.backends.base import Capabilities
 
 
 @dataclass(frozen=True)
@@ -107,14 +110,14 @@ class Ledger:
         return Spend(tokens=tokens, dollars=dollars)
 
     def over(
-        self, cfg: Config, live: Spend, since: float | None
+        self,
+        cfg: Config,
+        live: Spend,
+        since: float | None,
+        *,
+        capabilities: Capabilities | None = None,
     ) -> Literal["tokens", "dollars"] | None:
-        past = self.total(since)
-        if cfg.token_budget is not None and past.tokens + live.tokens > cfg.token_budget:
-            return "tokens"
-        if cfg.dollar_budget is not None and past.dollars + live.dollars > cfg.dollar_budget:
-            return "dollars"
-        return None
+        raise NotImplementedError
 
     def unreadable(self) -> list[int]:
         return [number for number, fields in self._lines() if fields is None]
