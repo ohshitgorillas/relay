@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import re
 from pathlib import Path
 
 from relay.check import CheckResult
@@ -312,11 +313,6 @@ def _with_map(map_block: str | None = MAP_BLOCK) -> str:
     )
 
 
-def test_lead_prompt_with_a_map_says_put_it_in_every_brief() -> None:
-    # Breaks when: the map's usage rule for the lead is left out or worded otherwise.
-    assert MAP_SENTENCE in _with_map()
-
-
 def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_with_timeout_and_fallback() -> None:
     # Breaks when: the lead is not told to run `relay ask` with a 600000 ms timeout or in the
     # background, or the non-zero-exit fallback (the agent reads for itself) is left out, or
@@ -527,21 +523,6 @@ def test_lead_prompt_with_the_status_rule_keeps_everything_else() -> None:
 # text; it carries the problem, the steps and the evidence paths, and the lead's guess stays out.
 
 
-def test_design_brief_is_the_three_lines_then_the_section_text() -> None:
-    # Breaks when: a line is added, dropped or worded otherwise, the steps or evidence are joined
-    # other than with ", ", or the section's text from the queue is left out or reworded.
-    brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
-    assert brief.splitlines() == [
-        f"rulings {DESIGN}",
-        f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order 6, 7, cannot go on: "
-        f"{PROBLEM} Evidence: {EVIDENCE[0]}, {EVIDENCE[1]}.",
-        f"approve: {APPROVAL}",
-        "",
-        "Section s4 as the queue has it:",
-        *BODY.rstrip().splitlines(),
-    ]
-
-
 def test_design_brief_carries_every_owner_answer_verbatim_as_new_lines() -> None:
     # Breaks when: an owner answer recorded for the section never reaches the architect (Gauntlet
     # s2, runs 24-28: the answer went only to the lead), only the last is kept, one is reworded,
@@ -567,18 +548,6 @@ def test_design_brief_points_at_the_lead_code_by_branch_and_commit_not_by_worktr
     no_commit = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", None))
     assert "`git show lead/m2-images:<path>`" in no_commit
     assert "`git diff main...lead/m2-images`" in no_commit
-
-
-def test_design_retry_brief_keeps_the_brief_and_adds_the_last_message_and_why_it_was_no_report() -> None:
-    # Breaks when: the architect's rerun loses the original brief, is not shown its previous final
-    # message, or is not told the missing BRIEF … END DESIGN block was the reason and that it
-    # must either make the change or end with a BRIEF block saying why none is needed.
-    brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
-    retry = design_retry_brief(brief, "Blocked: the cited log is outside the repository.")
-    assert retry.startswith(brief.rstrip())
-    assert "Blocked: the cited log is outside the repository." in retry
-    assert "no `BRIEF …` … `END DESIGN` block" in retry
-    assert "Either make the design change, or end with a BRIEF … END DESIGN block" in retry
 
 
 def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
@@ -808,3 +777,128 @@ def test_prerendered_handoff_is_optional_and_does_not_replace_default_on_later_c
     assert "resume sess-lead-7" in default
     assert hint not in default
     assert explicit_default == default
+
+
+# Codex architect design (docs/superpowers/specs/relay-codex-architect-design.md, Modules
+# `relay/prompts.py` and Homes; Order 3): every architect brief line is in a legal form.
+
+LEGAL_LINE = re.compile(r"(rulings |\d+: |new: |lead new: |approve: )")
+PROBLEM_ML = "`_verify` parks after one failed check;\n  tests/test_loop.py fails on it\n\n\tsee the run log"
+ANSWERS_ML = ["Compress the spec.\n  Keep {braces} 100% of its contracts.", "Yes:\n\n\tthe cap stays."]
+SAID_ML = "Blocked: the cited log\n  is outside the repository.\n\nNothing filed."
+CODE = ("lead/m2-images", "54f611a5")
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _illegal(brief: str) -> list[str]:
+    return [line for line in brief.splitlines() if not LEGAL_LINE.match(line)]
+
+
+def _ml_design_brief() -> str:
+    return design_brief(DESIGN, QUEUE, _stepped(), PROBLEM_ML, EVIDENCE, APPROVAL, ANSWERS_ML, code=CODE)
+
+
+# Behavior 1: every line of each architect brief is `rulings `, `<n>: `, `new: `, `lead new: `
+# or `approve: `.
+
+
+def test_design_brief_with_multiline_problem_answers_and_section_is_only_ruling_lines() -> None:
+    # Breaks when: the section text is appended as free lines after approve:, a multi-line
+    # problem or owner answer spills into bare lines, or a blank or heading line is written.
+    brief = _ml_design_brief()
+    assert _illegal(brief) == []
+    lines = brief.splitlines()
+    assert lines[0] == f"rulings {DESIGN}"
+    assert lines[1].startswith("lead new: ")
+    assert lines[2:] == [f"new: {_flat(ANSWERS_ML[0])}", f"new: {_flat(ANSWERS_ML[1])}", f"approve: {APPROVAL}"]
+
+
+def test_design_brief_puts_the_section_text_and_problem_on_its_lead_new_line() -> None:
+    # Breaks when: the section's body is dropped or kept multi-line rather than written as
+    # `Section text: <body>` with each whitespace run made one space on the lead new line.
+    lead_new = _ml_design_brief().splitlines()[1]
+    assert f"Section text: {_flat(BODY)}" in lead_new
+    assert _flat(PROBLEM_ML) in lead_new
+
+
+def test_design_retry_brief_with_multiline_message_is_only_ruling_lines() -> None:
+    # Breaks when: the rerun's reason or the architect's multi-line final message is written as
+    # free prose or bare lines, with or without an error.
+    brief = _ml_design_brief()
+    assert _illegal(design_retry_brief(brief, SAID_ML, None)) == []
+    assert _illegal(design_retry_brief(brief, SAID_ML, "exit 1: codex crashed")) == []
+
+
+def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_numbered_line() -> None:
+    # Breaks when: an unnumbered multi-line answer to one decision becomes `<n>:` plus bare lines.
+    brief = design_answer_brief(DESIGN, (3,), "go with the\nrecommendation\n\n  but keep the cap", APPROVAL)
+    assert _illegal(brief) == []
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "3: go with the recommendation but keep the cap",
+        f"approve: {APPROVAL}",
+    ]
+
+
+def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_new_line() -> None:
+    # Breaks when: an unnumbered multi-line answer to several decisions becomes `new:` plus bare lines.
+    brief = design_answer_brief(DESIGN, (1, 2), "do both\n\tthe cheap way\n", APPROVAL)
+    assert _illegal(brief) == []
+    assert brief.splitlines() == [f"rulings {DESIGN}", "new: do both the cheap way", f"approve: {APPROVAL}"]
+
+
+# Behavior 2: the retry reason sits in a `lead new:` line before `approve:`.
+
+
+def _reason_line(brief: str, retry: str) -> str:
+    before, after = brief.splitlines(), retry.splitlines()
+    assert after[:-2] == before[:-1]
+    assert after[-1] == before[-1]
+    assert after[-1].startswith("approve: ")
+    return after[-2]
+
+
+def test_design_retry_brief_puts_the_no_report_reason_in_a_lead_new_line_before_approve() -> None:
+    # Breaks when: the reason follows approve:, replaces a line of the brief, or does not say the
+    # final message had no BRIEF … END DESIGN block and carry that message.
+    brief = _ml_design_brief()
+    line = _reason_line(brief, design_retry_brief(brief, SAID_ML, None))
+    assert line.startswith("lead new: ")
+    assert "its final message had no BRIEF … END DESIGN block" in line
+    assert _flat(SAID_ML) in line
+
+
+def test_design_retry_brief_puts_the_failure_reason_in_a_lead_new_line_before_approve() -> None:
+    # Breaks when: a failed run's error is left out of the reason line, worded other than
+    # "it failed: <error>", or the run is called reportless instead.
+    brief = _ml_design_brief()
+    line = _reason_line(brief, design_retry_brief(brief, SAID_ML, "exit 1: codex crashed"))
+    assert line.startswith("lead new: ")
+    assert "it failed: exit 1: codex crashed" in line
+    assert "had no BRIEF" not in line
+    assert _flat(SAID_ML) in line
+
+
+def test_design_retry_brief_on_an_answer_brief_puts_the_reason_before_approve() -> None:
+    # Breaks when: the reason line is placed by the design brief's layout rather than before the
+    # given brief's own approve: line.
+    brief = design_answer_brief(DESIGN, (1, 2), "1: take it\n2: leave it", APPROVAL)
+    line = _reason_line(brief, design_retry_brief(brief, "No change needed.", None))
+    assert line.startswith("lead new: ")
+    assert "No change needed." in line
+
+
+# Behavior 3: the lead prompt's map rule excludes architect briefs.
+
+
+def test_lead_prompt_map_rule_excludes_architect_briefs() -> None:
+    # Breaks when: the lead is still told to put the map block in the architect's brief too, or
+    # the exception for an architect's brief is left out.
+    prompt = _with_map()
+    assert MAP_BLOCK in prompt
+    assert "the architect's included" not in prompt
+    assert "except an architect's" in prompt
+    assert "except an architect's" not in _with_map(None)

@@ -392,16 +392,43 @@ def test_design_of_resolves_a_relative_design_against_top() -> None:
     )
 
 
-def test_design_of_keeps_an_absolute_design() -> None:
-    # breaks when: an absolute design path is joined under `top`.
-    assert design_of("/elsewhere/docs/thing-design.md", Path("/no-such-repo")) == Path(
-        "/elsewhere/docs/thing-design.md"
-    )
-
-
 def test_design_of_none_is_none() -> None:
     # breaks when: a queue with no design line yields a path, such as `top` itself.
     assert design_of(None, Path("/no-such-repo")) is None
+
+
+# Codex architect design (docs/superpowers/specs/relay-codex-architect-design.md, Modules
+# `relay/ladder.py`; Order 3): `design_of` is "As now, and None when the resolved path is not a
+# `.md` file directly under top/SPECS", SPECS being `docs/superpowers/specs`.
+
+
+@pytest.mark.parametrize(
+    "design_line",
+    [
+        "docs/thing-design.md",
+        "docs/superpowers/thing-design.md",
+        "docs/superpowers/specs/older/thing-design.md",
+        "docs/superpowers/specs/thing-design.txt",
+        "docs/superpowers/specs/../thing-design.md",
+        "/elsewhere/docs/superpowers/specs/thing-design.md",
+        "/no-such-repo/docs/thing-design.md",
+    ],
+    ids=[
+        "under-docs",
+        "under-superpowers",
+        "nested-under-specs",
+        "not-markdown",
+        "climbs-out-of-specs",
+        "absolute-in-another-repo",
+        "absolute-in-top-outside-specs",
+    ],
+)
+def test_design_of_a_path_not_directly_under_the_specs_directory_is_none(
+    design_line: str,
+) -> None:
+    # breaks when: design_of returns a path for a queue design line whose file is outside
+    # top/docs/superpowers/specs/, nested below it, or not a `.md` file.
+    assert design_of(design_line, Path("/no-such-repo")) is None
 
 
 # section_cap
