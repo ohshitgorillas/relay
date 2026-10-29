@@ -3974,3 +3974,319 @@ def test_rung_2_runs_the_architect_without_the_guess_then_the_divvyer_with_the_d
     recut_lines = _entries(queue, cfg, "recut")
     assert [e.get("rung") for e in recut_lines] == rungs
     assert recut_lines[-1]["section"] == asker
+
+
+# Rung 3: a second design change in the lineage, no design line, a rejected or unapproved
+# report, a decision parked with its recommendation and then resumed by `relay answer`, a
+# section over its queue cap or `--section-dollar-cap`, and a mid-run retire at the cap.
+
+ARCHITECT_DECISION = "stream-architect-decision.jsonl"
+ARCHITECT_REJECTED = "stream-architect-rejected.jsonl"
+ARCHITECT_UNAPPROVED = "stream-architect-unapproved.jsonl"
+DESIGN_PATH = f"docs/superpowers/specs/{LADDER_DESIGN}"
+# The decision lines of ARCHITECT_DECISION's report, as written under DECISIONS.
+DECISION_1 = "1 | Should two() return 2 when one.py is absent? | recommend: no, fail loudly | alternative: return 2"
+DECISION_2 = "2 | Should three() ship in this release? | recommend: yes | alternative: hold it for the next"
+
+
+def _failed_design(sid: str) -> str:
+    """`ladder.failed_text`'s form for the ladder design, with any `what`
+    (relay-ladder-design.md, `relay/ladder.py`)."""
+    return re.escape(f"the design change for {sid} in ") + r"\S*" + re.escape(f"{DESIGN_PATH} did not land: ") + r".+"
+
+
+def _section_spent(queue: Path, cfg: Config, sid: str, dollars: float) -> None:
+    """One ledger line of an earlier lead on `sid`, spending `dollars`."""
+    _ledger(queue, cfg).append("lead", sid, "sess-earlier", Spend(tokens=10, dollars=dollars))
+
+
+@pytest.mark.parametrize("again", ["RECUT", "DESIGN"])
+def test_rung_3_a_section_a_design_change_recut_made_that_asks_again_is_parked_as_the_ladder_ran_out(
+    again: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: a section made by a design-change recut is not marked design_changed, so its
+    # second ask runs the architect or the divvyer again instead of parking with "the ladder ran
+    # out: section <sid> already had its design change".
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
+    leads = [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(str(_status_lead(tmp_path, "sess-again", f"{again}: {PROBLEM}"))),
+    ]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert len(_runs(tmp_path, "lead")) == 2
+    state = State.open(queue, cfg)
+    parked = state.section("s1b")
+    assert parked.design_changed is True
+    assert parked.status == "parked"
+    assert parked.question == "the ladder ran out: section s1b already had its design change"
+    assert parked.failures == 0
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert len(_entries(queue, cfg, "recut")) == 1
+
+
+def test_rung_3_a_design_status_under_a_queue_naming_no_design_is_parked_as_no_design_to_amend(
+    cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: DESIGN under a queue with no head design line runs the architect or the
+    # divvyer, records a failure, or parks without "no design to amend: the queue names none".
+    queue = _queue_of(tmp_path / "queue.md", "s1")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert _runs(tmp_path, "design") == []
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question == NO_DESIGN
+    assert section.failures == 0
+    assert section.design_changed is False
+
+
+@pytest.mark.parametrize("report", [ARCHITECT_REJECTED, ARCHITECT_UNAPPROVED])
+def test_rung_3_a_rejected_or_unapproved_design_report_parks_the_section_as_a_design_change_that_did_not_land(
+    report: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: a rejected or unapproved report goes on to the divvyer, marks the section
+    # design_changed, records a failure, or parks without "the design change for <sid> in
+    # <design> did not land: <what>".
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    cfg = _with_architect(cfg, tmp_path, [_step(report)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert len(_runs(tmp_path, "lead")) == 1
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question is not None
+    assert re.fullmatch(_failed_design("s1"), section.question), section.question
+    assert section.failures == 0
+    assert section.design_changed is False
+    assert section.design_open is None
+    assert _entries(queue, cfg, "recut") == []
+
+
+def test_rung_3_a_design_decision_parks_with_its_recommendation_and_relay_answer_resumes_the_architect(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: a report with decisions parks without each decision line and its
+    # recommendation, or without design_open; or the answer runs a lead on the parked section
+    # instead of the architect with the answer brief, or does not go on to the rung-2 recut.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_DECISION), _step(ARCHITECT_APPROVED)])
+    state = State.open(queue, cfg)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: len(_pings(tmp_path)) == 1)
+        parked = State.open(queue, cfg).section("s1")
+        assert parked.status == "parked"
+        assert parked.design_open is not None
+        assert parked.design_open.endswith(DESIGN_PATH)
+        assert parked.question is not None
+        assert parked.question.startswith("the design change for s1 in ")
+        assert f"{DESIGN_PATH} needs a product choice:" in parked.question
+        message = _pings(tmp_path)[0][0]
+        for line in (DECISION_1, DECISION_2):
+            assert line in parked.question
+            assert line in message
+        assert len(_runs(tmp_path, "design")) == 1
+        assert _runs(tmp_path, "recut") == []
+        assert len(_runs(tmp_path, "lead")) == 1
+        State.open(queue, cfg).set_answer("s1", "1: no, fail loudly\n2: yes")
+        assert loop.finish() == ExitCode.FAILED_TWICE
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    designs = _runs(tmp_path, "design")
+    assert len(designs) == 2
+    answer = str(designs[1]["prompt"]).splitlines()
+    assert answer[0].startswith("rulings ")
+    assert answer[0].endswith(DESIGN_PATH)
+    assert "1: no, fail loudly" in answer
+    assert "2: yes" in answer
+    assert answer[-1] == f"approve: {cfg.design_approval}"
+    recuts = _runs(tmp_path, "recut")
+    assert len(recuts) == 1
+    assert "was amended for this problem" in str(recuts[0]["prompt"])
+    leads_run = _runs(tmp_path, "lead")
+    assert len(leads_run) == 3
+    assert all("Section: s1b" in str(r["prompt"]) for r in leads_run[1:])
+    state = State.open(queue, cfg)
+    assert state.section("s1").design_open is None
+    assert state.section("s1b").design_changed is True
+    assert len(_entries(queue, cfg, "design")) == 2
+
+
+def test_rung_3_a_section_over_its_queue_cap_is_parked_before_any_run_whatever_the_section_dollar_cap(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the loop runs a lead on a section whose ledger spend is over its queue `cap:`,
+    # lets `section_dollar_cap` override the queue's cap, or parks without the cap text.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    _section_spent(queue, cfg, "s1", 5.5)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = dataclasses.replace(cfg, section_dollar_cap=100.0)
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert _runs(tmp_path, "lead") == []
+    assert _runs(tmp_path, "design") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question == (
+        "section s1 spent $5.50 of its $5.00 cap; raise `cap:` in the queue or --section-dollar-cap to go on"
+    )
+    assert section.failures == 0
+
+
+def test_rung_3_a_section_under_its_queue_cap_runs_though_its_spend_is_over_a_lower_section_dollar_cap(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the loop takes the lower of the queue `cap:` and `section_dollar_cap`, or lets
+    # `section_dollar_cap` apply at all to a section whose header carries `cap:`, so s1 ($2.00
+    # spent, `cap: $5`) is parked on a $1.00 `--section-dollar-cap` (relay-ladder-design.md
+    # `section_cap`: "section.dollar_cap when set, else cfg.section_dollar_cap"; `relay/config.py`:
+    # "A section's `cap:` overrides `section_dollar_cap` for that section"). The lead parks s1 on
+    # its own NEEDS-OWNER question, so the park that ends the run is the lead's, not the cap's.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    _section_spent(queue, cfg, "s1", 2.0)
+    cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = dataclasses.replace(cfg, section_dollar_cap=1.0)
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "design") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question == QUESTION
+    assert section.failures == 0
+
+
+def test_rung_3_a_section_with_no_queue_cap_over_the_section_dollar_cap_is_parked_before_any_run(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: `section_dollar_cap` (`--section-dollar-cap`) is not applied to a section
+    # whose queue header carries no `cap:`, or the cap text names the wrong spend or cap.
+    queue = queue_file(LADDER)
+    state = State.open(queue, cfg)
+    for sid in ("s1", "s2"):
+        state.mark_done(sid)
+    scenario(_lines(DONE_LEAD))
+    _section_spent(queue, cfg, "s3", 1.5)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    cfg = dataclasses.replace(cfg, section_dollar_cap=1.0)
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert _runs(tmp_path, "lead") == []
+    section = State.open(queue, cfg).section("s3")
+    assert section.status == "parked"
+    assert section.question == (
+        "section s3 spent $1.50 of its $1.00 cap; raise `cap:` in the queue or --section-dollar-cap to go on"
+    )
+
+
+def test_rung_3_a_lead_whose_live_spend_passes_the_section_cap_is_retired_mid_run_and_the_next_pass_parks_it(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher weighs the run's own spend alone, or not at all, against the
+    # section cap, so it writes no "asked to retire, section cap spent" line; or the next pass
+    # runs a fresh lead instead of parking the section with the cap text.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    _section_spent(queue, cfg, "s1", 4.95)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    texts = _texts(capsys.readouterr().out)
+    assert "lead s1: asked to retire, section cap spent" in texts, texts
+    assert len(_runs(tmp_path, "lead")) == 1
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question == (
+        "section s1 spent $5.06 of its $5.00 cap; raise `cap:` in the queue or --section-dollar-cap to go on"
+    )
+    assert section.failures == 0
+
+
+# The third failed check still parks: under a queue that names a design, three failed checks
+# park the section for the owner, with no architect and no recut (relay-ladder-design.md, Why).
+
+
+def test_the_third_failed_check_under_a_queue_naming_a_design_still_parks_with_no_architect_run(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the third failed check climbs the ladder to the architect or the divvyer
+    # instead of parking, or parks without the failing check in its ping.
+    queue = queue_file(CHECK_QUEUE)
+    scenario(_lines(DONE_LEAD))
+    _done_in_state(queue, cfg, "s2")
+    _failing_check(tmp_path, monkeypatch)
+    cfg = _sequenced(cfg, tmp_path, [_step(DONE_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    state = State.open(queue, cfg)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: len(_pings(tmp_path)) == 1)
+        section = State.open(queue, cfg).section("s1")
+        assert section.status == "parked"
+        assert section.check_failures == 3
+        assert section.failures == 0
+        assert section.design_changed is False
+        assert section.design_open is None
+        assert FAIL_MARK in _pings(tmp_path)[0][0]
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    assert loop.finish() == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "lead")) == 3
+    assert _runs(tmp_path, "design") == []
+    assert _runs(tmp_path, "recut") == []

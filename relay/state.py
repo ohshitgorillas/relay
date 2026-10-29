@@ -185,6 +185,8 @@ class State:
     def set_design_open(self, sid: str, design: str | None) -> None:
         def change(s: SectionState, _r: dict) -> None:
             s.design_open = design
+            if design is None:
+                s.question = None
 
         self._update(sid, change)
 
@@ -221,7 +223,8 @@ class State:
                 return False
             s.answer = answer
             s.status = "open"
-            s.question = None
+            if s.design_open is None:
+                s.question = None  # an open design question keeps its decision numbers for the answer
             s.waits_on = None
             return True
 

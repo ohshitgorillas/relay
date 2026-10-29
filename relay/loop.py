@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from relay.ledger import Kind, Ledger, Spend
 from relay.prompts import (
     ask_brief,
     check_feedback,
+    design_answer_brief,
     design_brief,
     lead_prompt,
     recut_brief,
@@ -107,6 +109,13 @@ def _run_section(
     if current.check_pending:
         _verify(cfg, queue, state, ledger, cwd, section, state.pending_check_log(sid))
         return None
+    if _over_cap(cfg, queue, state, ledger, section):
+        return None
+    if current.design_open is not None:
+        answer = state.take_answer(sid)
+        if answer is not None:
+            _design_answer(queue, cfg, state, ledger, since, cwd, retire_flag, section, answer)
+            return None
     m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
     if spent:
         return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
@@ -137,6 +146,7 @@ def _run_section(
         cwd,
         retire_flag,
         m.commit if m is not None else None,
+        cap=ladder.section_cap(cfg, section),
     )
     session = result.stream.session_id
     state.set_last_log(sid, result.log)
@@ -188,9 +198,10 @@ def _run(
     flag: Path,
     map_commit: str | None = None,
     rung: int | None = None,
+    cap: float | None = None,
 ) -> tuple[RunResult, _Watch]:
     """The one agent run: watch it, run it, ledger it. Returns the result and its watch."""
-    watch = _watcher(cfg, ledger, since, kind, sid, cwd)
+    watch = _watcher(cfg, ledger, since, kind, sid, cwd, cap)
     result = run_agent(argv, text, cwd, state.run_dir, watch.on_event, flag)
     ledger.append(
         kind,
@@ -291,7 +302,8 @@ class _Watch:
 
 
 def _watcher(
-    cfg: Config, ledger: Ledger, since: float | None, who: Kind, sid: str, repo: Path
+    cfg: Config, ledger: Ledger, since: float | None, who: Kind, sid: str, repo: Path,
+    cap: float | None = None,
 ) -> _Watch:
     """The run_agent callback: `budget_hit` on a spent budget, `idle_retired` for an idle lead."""
     retiring = [False]
@@ -310,6 +322,8 @@ def _watcher(
         if since is not None and ledger.over(cfg, stream.spend, since) is not None:
             watch.budget_hit = True
             why = "budget"
+        elif cap is not None and ledger.section_spend(sid).dollars + stream.spend.dollars > cap:
+            why = "cap"
         elif stream.context_tokens >= cfg.context_limit:
             why = "context"
         if why is None:
@@ -317,7 +331,7 @@ def _watcher(
         if not retiring[0]:
             retiring[0] = True
             progress.retiring(sid, why, stream.context_tokens, who)
-        if who != "recut":
+        if who not in ("recut", "design"):  # these edit files and need not commit: no commit-based idle kill
             if not snapshot:
                 snapshot.append(git.heads(repo))
             elif stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
@@ -428,16 +442,79 @@ def _design_change(
     lead_log: Path,
 ) -> None:
     """Run the architect on `design` for `problem`, then act on its report."""
-    sid = section.id
-    cap = ladder.section_cap(cfg, section)
-    if cap is not None:
-        spent = ledger.section_spend(sid).dollars
-        if spent > cap:
-            _park(cfg, queue, state, sid, ladder.cap_text(sid, spent, cap))
-            return
+    if _over_cap(cfg, queue, state, ledger, section):
+        return
     check_log = state.check_log(lead_log)
     evidence = [lead_log, *([check_log] if check_log.exists() else [])]
     brief = design_brief(design, queue, section, problem, evidence, cfg.design_approval)
+    _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
+
+
+def _design_answer(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    answer: str,
+) -> None:
+    """Run the architect with the owner's `answer` to the open decisions, then act on its report."""
+    sid = section.id
+    current = state.section(sid)
+    design = Path(cast(str, current.design_open))
+    if not current.last_log:
+        # The recut needs the lead's log as evidence; none is recorded, so the design change cannot land.
+        state.set_design_open(sid, None)
+        what = "no lead log is recorded for the section"
+        _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
+        return
+    # The open decision numbers are those `decisions_text` wrote into the parked question.
+    numbers = _open_numbers(current.question)
+    brief = design_answer_brief(design, numbers, answer, cfg.design_approval)
+    problem = f"the owner ruled on the open design decisions: {answer}"
+    _architect(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
+        Path(current.last_log),
+    )
+
+
+def _open_numbers(question: str | None) -> tuple[int, ...]:
+    """The decision numbers in a parked design question: its `<n> | ...` lines."""
+    lines = tuple(line for line in (question or "").splitlines() if re.match(r"\s*\d+\s*\|", line))
+    return ladder.decision_numbers(ladder.DesignReport(False, False, lines, ()))
+
+
+def _over_cap(cfg: Config, queue: Path, state: State, ledger: Ledger, section: Section) -> bool:
+    """Park `section` and return True when its spend is over its dollar cap."""
+    cap = ladder.section_cap(cfg, section)
+    if cap is None:
+        return False
+    spent = ledger.section_spend(section.id).dollars
+    if spent <= cap:
+        return False
+    _park(cfg, queue, state, section.id, ladder.cap_text(section.id, spent, cap))
+    return True
+
+
+def _architect(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    brief: str,
+    problem: str,
+    lead_log: Path,
+) -> None:
+    """The one architect run on `design` with `brief`; then act on its report."""
+    sid = section.id
     progress.design_started(sid, design, section.steps, problem)
     result, _ = _run(
         cfg, state, ledger, since, "design", sid, cfg.design_command, brief,
