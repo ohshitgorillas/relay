@@ -83,3 +83,55 @@ section s3 | lead | steps: 5, 6, 7 | size: lead: tokens: 1378927.4 seconds: 742.
     step: 7
     7. Docs. `builder` writes `README.md`: the design change's hand-back on a failed, reportless, rejected or unapproved architect run, and the queue's `design` line naming a file under `docs/superpowers/specs/`.
     paths: README.md
+section s4 | lead | steps: 8, 9, 10 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+  s4.d1 | builder | steps: 8 | writes: relay/state.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s4.d1
+    stub
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 8
+    paths: relay/state.py
+    check: uv run pytest tests/test_state.py
+  s4.d2 | test-writer | steps: 9 | writes: tests/test_state.py, tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s4.d2
+    red
+    design: docs/superpowers/specs/relay-codex-architect-design.md step 9
+    behavior: The counter counts completed unusable architect cycles, not child invocations.
+    view: stubgen .pyi of relay/state.py
+    behavior: A successful run returning decisions, unfiled questions or approval is usable progress and clears it before the corresponding park or recut.
+    view: stubgen .pyi of relay/loop.py
+    behavior: Lead runs, lead retirement, guidance consumption, restarts and ordinary recuts do not clear it.
+    view: stubgen .pyi of relay/state.py
+    behavior: Before launching research, lead or architect work for a runnable section, `_run_section` checks its persisted count and returns the same stop at the limit.
+    view: stubgen .pyi of relay/loop.py
+    behavior: Exercise both design requests and answered-decision handling.
+    view: stubgen .pyi of relay/loop.py
+    behavior: Preserve budget and cap stops that occur before the failure bound
+    view: stubgen .pyi of relay/loop.py
+    check: uv run pytest tests/test_state.py tests/test_loop.py
+  s4.d3 | builder | steps: 10 | writes: relay/state.py, relay/loop.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s4.d3
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 10
+    paths: relay/state.py, relay/loop.py
+    check: uv run pytest tests/test_state.py tests/test_loop.py
+section s5 | lead | steps: 11 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+  s5.d1 | builder | steps: 11 | writes: README.md | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s5.d1
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 11
+    paths: README.md
+    check: git diff --check
+section s6 | lead | steps: 12, 13 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+  s6.d1 | test-writer | steps: 12 | writes: tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6.d1
+    red
+    design: docs/superpowers/specs/relay-codex-architect-design.md step 12
+    behavior: tighten the decisions-on-rerun test so it protects the exact recorded design destination and decision state, preserving the product-choice park after the retry and the absence of a false hand-back.
+    view: stubgen .pyi of relay/loop.py
+    check: uv run pytest tests/test_loop.py -k rerun_files_decisions
+  s6.d2 | builder | steps: 13 | writes: relay/loop.py, relay/prompts.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6.d2
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 13
+    paths: relay/loop.py, relay/prompts.py
+    check: uv run pytest tests/test_loop.py tests/test_prompts.py
