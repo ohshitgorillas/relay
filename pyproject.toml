@@ -8,7 +8,7 @@ dependencies = []
 relay = "relay.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "pytest-timeout", "pytest-xdist"]
+dev = ["pytest", "pytest-timeout", "pytest-xdist", "ruff", "mypy", "pytest-cov"]
 
 [build-system]
 requires = ["hatchling"]
@@ -21,3 +21,39 @@ packages = ["relay"]
 addopts = "-n 2 --dist=load"
 timeout = 30
 timeout_method = "signal"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["relay", "gates", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # counts: the owner's rule, no limit on how many of anything
+    "C90", "PLR0904", "PLR0911", "PLR0912", "PLR0913", "PLR0914",
+    "PLR0915", "PLR0916", "PLR0917", "PLR1702",
+    # the formatter owns these
+    "COM812", "ISC001",
+    # Relay is a CLI that prints its output and runs configured commands by design
+    "T20", "S603", "S607",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "D", "SLF001", "INP001", "ARG001", "FBT001"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["relay", "gates", "tests"]
+
+[tool.coverage.run]
+source = ["relay", "gates"]
+parallel = true
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true
