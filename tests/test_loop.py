@@ -4733,7 +4733,8 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
     assert section.design_open.endswith(DESIGN_PATH)
     assert section.question is not None
     assert f"{DESIGN_PATH} needs a product choice:" in section.question
-    pings = _pings(tmp_path)
+    # The last ping is the stop's own; the park's ping comes before it and carries the decisions.
+    pings = _pings(tmp_path)[:-1]
     assert len(pings) == 1, pings
     for line in (DECISION_1, DECISION_2):
         assert line in section.question

@@ -46,11 +46,7 @@ def lead_prompt(
     if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
     if guidance is not None:
-        parts.append(
-            "Relay ran the architect twice on this section's last DESIGN or RECUT and it filed no "
-            "design change. Its final message, as guidance: go on with the section, or end with "
-            f"RECUT: if its cut is wrong:\n{guidance}"
-        )
+        parts.append(guidance)
     if check_feedback is not None:
         parts.append(
             "Relay ran this section's check after your DONE and it failed. "

@@ -625,17 +625,19 @@ def _architect(
     problem: str,
     lead_log: Path,
 ) -> None:
-    """The architect run on `design` with `brief`, run once more when it files no report (its
-    final message and the reason added to the brief) unless the budget or the section's cap is
+    """The architect run on `design` with `brief`, run once more when it failed or filed no report
+    (the reason and its final message added to the brief) unless the budget or the section's cap is
     spent; then act on its report."""
     sid = section.id
     result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, brief, problem)
-    if _no_report(result, report):
+    if _retryable(result, report):
         if _over_cap(cfg, queue, state, ledger, section):
             return
         if ledger.over(cfg, Spend(0, 0.0), since) is None:
-            progress.design_no_report(sid, again=True)
-            retry = design_retry_brief(brief, ladder.said(result.stream.result_text), None)
+            failed = run_failed(result)
+            error = error_line(result) if failed else None
+            progress.design_retrying(sid, _went_wrong(result, report) or "it filed no report")
+            retry = design_retry_brief(brief, ladder.said(result.stream.result_text), error)
             result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
     _design_outcome(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
@@ -664,9 +666,25 @@ def _architect_run(
     return result, report
 
 
-def _no_report(result: RunResult, report: ladder.DesignReport | None) -> bool:
-    """The architect ran to a clean end and filed no parseable report."""
-    return report is None and not (result.killed or result.exit_code != 0 or result.stream.is_error)
+def _retryable(result: RunResult, report: ladder.DesignReport | None) -> bool:
+    """The architect run failed or filed no parseable report."""
+    return run_failed(result) or report is None
+
+
+def _went_wrong(result: RunResult, report: ladder.DesignReport | None) -> str | None:
+    """Why the architect's run filed no design change, None when its report decides something
+    (decisions, unfiled lines or an approval)."""
+    if run_failed(result):
+        return f"it failed: {error_line(result)}"
+    if report is None:
+        return "it filed no report"
+    if report.rejected:
+        return "it rejected the brief as steering"
+    if report.decisions or report.unfiled:
+        return None
+    if not report.approved:
+        return "it did not approve the design"
+    return None
 
 
 def _design_outcome(
@@ -684,43 +702,33 @@ def _design_outcome(
     result: RunResult,
     report: ladder.DesignReport | None,
 ) -> None:
-    """Park on a failed or undecided design change; on an approved one, recut from it at rung 2.
-    A clean run with no report (already rerun once) parks nothing: the section goes back to its
-    lead, no failure counted, with the architect's final message as guidance (owner's ruling,
-    29 Oct: never park over a technical gap). Each lead, architect and design pass then meets the
-    loop's budget check and the section's cap, the only bound on DESIGN after DESIGN."""
+    """Park on an undecided design change (decisions for the owner); on an approved one, recut from
+    it at rung 2. A run that failed, filed no report (both already rerun once), was rejected or did
+    not approve parks nothing: the section goes back to its lead, no failure counted, with the
+    architect's final message as guidance (owner's ruling, 29 Oct: never park over a technical gap).
+    Each lead, architect and design pass then meets the loop's budget check and the section's cap,
+    the only bound on DESIGN after DESIGN."""
     sid = section.id
-    if result.killed:
-        what = "the architect was killed"
-    elif result.exit_code != 0:
-        what = f"the architect exited {result.exit_code}"
-    elif result.stream.is_error:
-        what = "the architect backend reported an error"
-    elif report is None:
-        progress.design_no_report(sid, again=False)
+    what = _went_wrong(result, report)
+    if what is not None:
+        progress.design_handed_back(sid, what)
         state.set_design_open(sid, None)
-        state.set_guidance(sid, ladder.said(result.stream.result_text))
+        state.set_guidance(sid, ladder.handback_text(what, ladder.said(result.stream.result_text)))
         return
-    elif report.rejected:
-        what = "the architect rejected the brief as steering"
-    elif report.decisions or report.unfiled:
+    assert report is not None
+    if report.decisions or report.unfiled:
         _park(
             cfg, queue, state, sid, ladder.decisions_text(sid, design, report),
             (str(design), ladder.decision_numbers(report)),
         )
         return
-    elif not report.approved:
-        what = "the architect did not approve the design"
-    else:
-        state.set_design_open(sid, None)
-        state.mark_design_changed(sid)
-        failed = _recut(
-            queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
-        )
-        if failed:
-            _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
-        return
-    _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
+    state.set_design_open(sid, None)
+    state.mark_design_changed(sid)
+    failed = _recut(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
+    )
+    if failed:
+        _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
 
 
 def _recut(

@@ -190,13 +190,6 @@ def design_started(sid: str, design: Path, steps: tuple[str, ...], problem: str)
     _write(f"design {sid}: amending {design} {named}: {_cut(problem)}")
 
 
-def design_no_report(sid: str, again: bool) -> None:
-    if again:
-        _write(f"design {sid}: no report; running the architect again with its message")
-    else:
-        _write(f"design {sid}: no report again; back to the lead with the architect's message")
-
-
 def design_finished(sid: str, result: RunResult, report: DesignReport | None) -> None:
     if run_failed(result):
         outcome = f"failed: {error_line(result)}"

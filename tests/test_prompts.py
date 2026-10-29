@@ -9,6 +9,7 @@ from pathlib import Path
 
 from relay.check import CheckResult
 from relay.config import Config
+from relay.ladder import handback_text
 from relay.prompts import (
     ask_brief,
     check_feedback,
@@ -561,12 +562,18 @@ def test_design_brief_points_at_the_lead_code_by_branch_and_commit_not_by_worktr
 def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
     # Breaks when: a section handed back after two reportless architect runs reaches its lead
     # without the architect's final message, or a lead with no guidance is told of an architect.
+    # docs/superpowers/specs/relay-codex-architect-design.md:50-53: the guidance paragraph prints
+    # `guidance` as ladder.handback_text wrote it, so the wording is handback_text's, not
+    # lead_prompt's: breaks too when lead_prompt rewords it or adds a wrapper of its own.
     said = "The design already covers step 21; the lead misread Order 3."
+    guidance = handback_text("it filed no report", said)
     given = lead_prompt(
-        QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG, guidance=said
+        QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG, guidance=guidance
     )
     assert said in given
     assert "filed no design change" in given
+    assert guidance in given
+    assert given.count("filed no design change") == 1
     plain = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
     assert "filed no design change" not in plain
 
