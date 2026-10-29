@@ -45,8 +45,10 @@ A section's body can carry check lines, `check: <command>` (or `done-check: <com
 `RECUT` and `DESIGN` move a section up three rungs:
 
 1. **Recut.** The first `RECUT` runs the `divvyer`, which rewrites the section in place or splits it into new sections. A recut that changes nothing, or fails, counts as a failure.
-2. **Design change.** A second `RECUT` on a section that came out of a recut, or any `DESIGN`, runs the `architect` on the design named on the queue's `design` line, then has the divvyer re-cut the section from the amended design. If the architect needs a product choice, the section is parked with its decisions. The owner's `relay answer` goes back to the architect, and the climb carries on from there. An architect run that fails (killed, nonzero exit or backend error) or ends with no report is rerun once, with the error line in its brief; if it fails again, or its outcome is rejected or unapproved, the section goes back to its lead with guidance instead of parking, and nothing counts as a failure. No rerun happens when the cap or budget is spent.
+2. **Design change.** A second `RECUT` on a section that came out of a recut, or any `DESIGN`, runs the `architect` on the design named on the queue's `design` line, then has the divvyer re-cut the section from the amended design. If the architect needs a product choice, the section is parked with its decisions. The owner's `relay answer` goes back to the architect, and the climb carries on from there. An architect run that fails (killed, nonzero exit or backend error) or ends with no report is rerun once, with its failure or missing-report reason in the brief. No rerun happens when the cap or budget is spent. A cycle consists of the initial run and its permitted retry. A failed, reportless, rejected or unapproved outcome counts as one architect cycle failure, independently of lead failures. After the first failed cycle, the section goes back to its lead with guidance instead of parking; after the second, Relay stops with exit 5.
 3. **Owner.** A section that has already had its design change, or a queue with no `design` line, parks the section for the owner.
+
+The architect failure count persists across restarts. At two failed cycles, restarting `relay go` launches no research, lead or architect work for that section and stops with exit 5, even without a budget or section cap. Fix the cause, then use `relay answer <queue.md> <section-id> "<text>"` to clear the count and retry. Usable architect progress (decisions, unfiled questions or approval) and section completion also clear the count. Lead retirement and ordinary recuts do not.
 
 Relay never commits or cleans the work tree. Leads and the divvyer own queue authorship; Relay's sole queue-write exception is restoring the exact pre-invocation bytes and permission mode after a failed recut. Leads and the divvyer run from the git top level of the queue's directory and keep git and the queue as the record of what is finished.
 
@@ -84,9 +86,9 @@ relay ask [--backend claude|codex|generic] <queue.md> <section-id> "<question>"
 relay stop <queue.md>
 ```
 
-- **`go`** runs the loop until it stops. Progress lines go to stdout, one per event: research, leads and subagents starting and finishing, checks, retires, kills, recuts, design changes, waits and failures. Only one `relay go` can hold a queue at a time. Supported budgets count only the spend of this run; with no budget set, there is no limit.
+- **`go`** runs the loop until it stops. Progress lines go to stdout, one per event: research, leads and subagents starting and finishing, checks, retires, kills, recuts, design changes, waits and failures. Only one `relay go` can hold a queue at a time. Supported budgets count only the spend of this run; with no budget set, there is no spend limit. The architect cycle limit still applies.
 - **`status`** prints each section's state (`open`, `done`, `parked`, or `waiting on <id>`) with a summary of the subagents its leads spawned, then the spend over the last 7 days and in total.
-- **`answer`** gives a parked section the owner's answer and reopens it. The next lead on that section gets the answer in its prompt, or, if the section was parked on a design decision, the architect does. An answer to a section that is already done is dropped, with a note.
+- **`answer`** gives a section the owner's answer, reopens it and clears its architect failure count, including after an architect failure stop. The next lead on that section gets the answer in its prompt, or, if the section was parked on a design decision, the architect does. An answer to a section that is already done is dropped, with a note.
 - **`ask`** puts a question to the section's researcher by resuming its session, and prints only the answer. Leads run it when a worker reports that it needs more than the map gives. It fails if the section has no researcher yet.
 - **`stop`** creates the stop file. A running `relay go` stops at its next check, after the current lead finishes.
 
@@ -111,7 +113,7 @@ Codex rotation starts a fresh thread with the previous report as its handoff. Th
 The following trial command targets the Gauntlet queue using this Relay worktree. It is documented only and has **not been executed** as part of validation:
 
 ```sh
-uv run --project /Users/atom/dev/relay-wt/backends relay go ~/dev/gauntlet/docs/queue.md --backend codex
+uv run --project ~/dev/relay-wt/codex-fix relay go ~/dev/gauntlet/docs/queue.md --backend codex
 ```
 
 ### Exit codes
@@ -123,7 +125,7 @@ uv run --project /Users/atom/dev/relay-wt/backends relay go ~/dev/gauntlet/docs/
 | 2 | Bad arguments, bad config, a queue that doesn't parse, or the queue is locked by another `relay go`. |
 | 3 | A budget ran out. |
 | 4 | Stopped by the stop file. |
-| 5 | A section failed twice. |
+| 5 | A section failed twice, or reached two failed architect cycles. |
 | 130 | Interrupted by Ctrl-C or SIGTERM. |
 
 ## The queue
@@ -195,7 +197,7 @@ Relay keeps its own record of each queue under `state_root`, in a directory name
 
 | Path | What it holds |
 |---|---|
-| `state.json` | Each section's status, failure and check-failure counts, parked question, answer, last session and last report, what it waits on, its researcher session, and where it stands on the ladder. |
+| `state.json` | Each section's status, lead, architect-cycle and check-failure counts, last architect failure reason, parked question, answer, last session and last report, what it waits on, its researcher session, and where it stands on the ladder. |
 | `ledger.jsonl` | One line per finished run (lead, research, ask, recut or design) and per check: time, section, session, tokens and dollars. |
 | `maps/<id>.map` | Each section's research map. |
 | `runs/<n>.jsonl` | Each run's stdout, verbatim: Claude stream-json, Codex JSON events or generic plain text. |
