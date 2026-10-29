@@ -17,6 +17,7 @@ from relay.files import atomic_write
 
 FAILURE_LIMIT = 2
 CHECK_LIMIT = 3
+DESIGN_FAILURE_LIMIT = 2
 
 SectionStatus = Literal["open", "done", "parked", "waiting"]
 
@@ -48,6 +49,8 @@ class SectionState:
     research_backend: str = "claude"
     answers: list[str] = field(default_factory=list)  # every owner answer to this section, in order
     guidance: str | None = None  # a reportless architect's final message, for the next lead
+    design_failures: int = 0
+    design_failure: str | None = None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -126,6 +129,8 @@ class State:
             s.design_open = None
             s.design_numbers = None
             s.waits_on = None
+            s.design_failures = 0
+            s.design_failure = None
 
         self._update(sid, change)
         self.drop_map(sid)
@@ -243,6 +248,8 @@ class State:
             s.status = "open"
             s.question = None
             s.waits_on = None
+            s.design_failures = 0
+            s.design_failure = None
             return True
 
         return self._update(sid, change)
@@ -273,6 +280,23 @@ class State:
             return s.failures
 
         return self._update(sid, change)
+
+    def record_design_failure(self, sid: str, reason: str) -> int:
+        """Atomically increment design_failures and store reason; return the new count."""
+        def change(s: SectionState, _r: dict) -> int:
+            s.design_failures += 1
+            s.design_failure = reason
+            return s.design_failures
+
+        return self._update(sid, change)
+
+    def clear_design_failures(self, sid: str) -> None:
+        """Atomically clear the count and reason for this section."""
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_failures = 0
+            s.design_failure = None
+
+        self._update(sid, change)
 
     def set_last_session(self, sid: str, session: str, backend: str = "claude") -> None:
         def change(s: SectionState, r: dict) -> None:

@@ -32,6 +32,28 @@ import relay.runner as runner_module
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("policy", ["default", True, False], ids=["default", "required", "optional"])
+@pytest.mark.parametrize(
+    ("exit_code", "killed", "backend_error", "tokens"),
+    [(0, False, False, 0), (0, False, False, 17),
+     (0, True, False, 0), (0, True, False, 17),
+     (1, False, False, 0), (1, False, False, 17),
+     (None, False, False, 17), (-15, False, False, 17),
+     (0, False, True, 0), (0, False, True, 17)],
+)
+def test_shared_failure_predicate_preserves_explicit_token_policy(
+    policy: str | bool, exit_code: int | None, killed: bool,
+    backend_error: bool, tokens: int, tmp_path: Path,
+) -> None:
+    # Breaks when token policy changes other failures, or the default accepts zero tokens.
+    stream = StreamState(None, 0, Spend(tokens, 0.0), "DONE", backend_error)
+    result = RunResult(exit_code, killed, stream, tmp_path / "run.jsonl")
+    options = {} if policy == "default" else {"require_tokens": policy}
+    failed = runner_module.run_failed(result, **options)
+    expected = killed or exit_code != 0 or backend_error or (tokens == 0 and policy is not False)
+    assert failed is expected
+
+
 def test_runner_telemetry_uses_shared_publication_and_replays_final_snapshot(
     fake_cfg: Config, tmp_path: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

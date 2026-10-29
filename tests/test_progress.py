@@ -148,6 +148,8 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("design_finished", lambda: progress.design_finished("s1", _result(), _report(approved=True))),
         ("section_waiting", lambda: progress.section_waiting("s1", "s2")),
         ("woken", lambda: progress.woken("s1", "s2")),
+        ("design_retrying", lambda: progress.design_retrying("s1", "it filed no report")),
+        ("design_handed_back", lambda: progress.design_handed_back("s1", "it filed no report")),
     ]
 
 
@@ -175,6 +177,8 @@ NAMES = [
     "design_finished",
     "section_waiting",
     "woken",
+    "design_retrying",
+    "design_handed_back",
 ]
 
 
@@ -1189,20 +1193,6 @@ def test_design_finished_with_no_report(capsys: pytest.CaptureFixture[str]) -> N
     assert _line(capsys) == "design s4: finished with no report (5 tokens, $0.00)"
 
 
-def test_design_finished_killed(capsys: pytest.CaptureFixture[str]) -> None:
-    # Breaks when: a killed architect run reads "exit None" or "with no report" instead of "killed".
-    result = _result(exit_code=None, killed=True, tokens=210000, dollars=4.5)
-    progress.design_finished("s4", result, None)
-    assert _line(capsys) == "design s4: finished killed (210000 tokens, $4.50)"
-
-
-def test_design_finished_non_zero_exit(capsys: pytest.CaptureFixture[str]) -> None:
-    # Breaks when: an architect run that exited non-zero is reported "with no report" instead of
-    # "exit <code>".
-    progress.design_finished("s4", _result(exit_code=2, tokens=8, dollars=1.0), None)
-    assert _line(capsys) == "design s4: finished exit 2 (8 tokens, $1.00)"
-
-
 # Behavior 5: def section_waiting(sid: str, blocker: str) -> None: ...
 # "section <sid>: waiting on <blocker>"
 
@@ -1225,3 +1215,79 @@ def test_woken_names_the_section_and_the_blocker_that_landed(
     # Breaks when: the section id or the blocker is missing, swapped or misworded.
     progress.woken("s5.2", "s3.1")
     assert _line(capsys) == "section s5.2: woken, s3.1 landed"
+
+
+# Codex architect design (docs/superpowers/specs/relay-codex-architect-design.md, Modules
+# `relay/progress.py`; Order 3). The new lines also join NAMES above, so each starts with the
+# local time, goes to stdout flushed, writes one line and swallows a failed write.
+
+# def design_retrying(sid: str, what: str) -> None: ...
+# "design <sid>: <what>; running the architect again"
+# what (Modules `relay/loop.py`): "it failed: <error_line>" | "it filed no report"
+
+
+@pytest.mark.parametrize("what", ["it failed: killed", "it filed no report"])
+def test_design_retrying_names_the_section_and_why_the_architect_runs_again(
+    what: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the section id or `what` is missing or swapped, or the line does not end
+    # "; running the architect again".
+    progress.design_retrying("s4", what)
+    assert _line(capsys) == f"design s4: {what}; running the architect again"
+
+
+# def design_handed_back(sid: str, what: str) -> None: ...
+# "design <sid>: <what>; back to the lead with the architect's message"
+# what (Modules `relay/loop.py`): "it failed: <error_line>" | "it filed no report" | "it rejected
+# the brief as steering" | "it did not approve the design"
+
+
+@pytest.mark.parametrize(
+    "what",
+    [
+        "it failed: exit 2",
+        "it filed no report",
+        "it rejected the brief as steering",
+        "it did not approve the design",
+    ],
+)
+def test_design_handed_back_names_the_section_and_why_the_lead_gets_it_back(
+    what: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: the section id or `what` is missing or swapped, or the line does not end
+    # "; back to the lead with the architect's message".
+    progress.design_handed_back("s4", what)
+    assert _line(capsys) == f"design s4: {what}; back to the lead with the architect's message"
+
+
+# def design_finished(sid, result: RunResult, report: DesignReport | None) -> None:
+# "As now; runner.run_failed(result) words "failed: <runner.error_line(result)>" in place of its
+# own killed and exit cases." A failed run is killed, exits nonzero or ends in a backend error
+# (Why: "tests `killed`, `exit_code` and `is_error`"); the error lines are those of
+# test_research_finished_after_a_failed_run_names_its_error_line, for a log with no stderr.
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "killed", "error_text", "error"),
+    [
+        (None, True, None, "killed"),
+        (2, False, None, "exit 2"),
+        (0, False, "Prompt is too long", "Prompt is too long"),
+    ],
+    ids=["killed", "exit-2", "error-result"],
+)
+def test_design_finished_after_a_failed_run_names_its_error_line(
+    exit_code: int | None,
+    killed: bool,
+    error_text: str | None,
+    error: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed architect run reads "killed", "exit <n>" or "with no report" instead
+    # of "failed: <error line>", or the line drops its spend.
+    result = _result(exit_code=exit_code, killed=killed, tokens=9, dollars=0.25)
+    if error_text is not None:
+        stream = dataclasses.replace(result.stream, result_text=error_text, is_error=True)
+        result = dataclasses.replace(result, stream=stream)
+    progress.design_finished("s4", result, None)
+    assert _line(capsys) == f"design s4: finished failed: {error} (9 tokens, $0.25)"

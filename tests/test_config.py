@@ -663,3 +663,29 @@ def test_ladder_keys_leave_the_other_keys_alone(tmp_path: Path, home: Path) -> N
     assert cfg.lead_command == DEFAULT_LEAD
     assert cfg.research_command == DEFAULT_LEAD + RESEARCH_TAIL
     assert cfg.section_dollar_cap == 12.5
+
+
+# The Codex path (design: relay-codex-architect-design.md, Homes "Agent commands per backend";
+# Order 5). Behavior: under backend `codex`, the lead, recut, research and design commands all
+# start with `codex`.
+
+
+@pytest.mark.parametrize(
+    ("text", "overrides"),
+    [('backend = "codex"\n', {}), ("", {"backend": "codex"}), ('backend = "claude"\n', {"backend": "codex"})],
+    ids=["file", "override", "override-beats-file"],
+)
+def test_codex_backend_agent_commands_all_start_with_codex(
+    tmp_path: Path, home: Path, text: str, overrides: dict[str, object]
+) -> None:
+    # Breaks when any of the four agent commands under codex defaults to a `claude` argv.
+    cfg = _load_ok(_toml(tmp_path, text), overrides)
+    assert cfg.backend == "codex"
+    commands = {
+        "lead": cfg.lead_command,
+        "recut": cfg.recut_command,
+        "research": cfg.research_command,
+        "design": cfg.design_command,
+    }
+    starts = {name: command[:1] for name, command in commands.items()}
+    assert starts == {name: ["codex"] for name in commands}, starts

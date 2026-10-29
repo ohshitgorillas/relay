@@ -12,6 +12,7 @@ from relay.queue import Section
 from relay.state import SectionState
 
 GUESS = " | guess: "
+SPECS = Path("docs/superpowers/specs")
 Rung = Literal[1, 2, 3]
 
 
@@ -24,12 +25,16 @@ class Climb:
 def climb(kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None, sid: str) -> Climb:
     """RECUT on a section that is not from_recut, or on a design_changed one: rung 1.
     Any other RECUT, or DESIGN, when design is not None: rung 2.
-    design None at rung 2: rung 3, "no design to amend: the queue names none".
+    design None at rung 2: rung 3, "no design to amend: the queue names no design
+    file under docs/superpowers/specs/".
     A design change never sends a section to the owner (owner's ruling, 28 Oct); the budget bounds it."""
     if kind == "RECUT" and (s.design_changed or not s.from_recut):
         return Climb(1, "recut")
     if design is None:
-        return Climb(3, "no design to amend: the queue names none")
+        return Climb(
+            3,
+            "no design to amend: the queue names no design file under docs/superpowers/specs/",
+        )
     return Climb(2, "design change")
 
 
@@ -116,10 +121,14 @@ def decision_numbers(report: DesignReport) -> tuple[int, ...]:
 
 def design_of(design_line: str | None, top: Path) -> Path | None:
     """The queue head's design path (queue.queue_design), resolved against `top` when relative;
-    None when design_line is None."""
+    None when design_line is None, or when the resolved path is not a `.md` file directly under
+    top/SPECS."""
     if design_line is None:
         return None
-    return top / design_line
+    path = top / design_line
+    if path.suffix != ".md" or path.resolve().parent != (top / SPECS).resolve():
+        return None
+    return path
 
 
 def section_cap(cfg: Config, section: Section) -> float | None:
@@ -128,7 +137,7 @@ def section_cap(cfg: Config, section: Section) -> float | None:
 
 
 def cap_text(sid: str, spent: float, cap: float) -> str:
-    """"section <sid> spent $<spent:.2f> of its $<cap:.2f> cap; raise `cap:` in the queue or
+    """ "section <sid> spent $<spent:.2f> of its $<cap:.2f> cap; raise `cap:` in the queue or
     --section-dollar-cap to go on"."""
     return (
         f"section {sid} spent ${spent:.2f} of its ${cap:.2f} cap; "
@@ -137,12 +146,21 @@ def cap_text(sid: str, spent: float, cap: float) -> str:
 
 
 def decisions_text(sid: str, design: Path, report: DesignReport) -> str:
-    """"the design change for <sid> in <design> needs a product choice:" then each decision
+    """ "the design change for <sid> in <design> needs a product choice:" then each decision
     and unfiled line verbatim, each with its recommendation and alternative."""
     head = f"the design change for {sid} in {design} needs a product choice:"
     return "\n".join([head, *report.decisions, *report.unfiled])
 
 
 def failed_text(sid: str, design: Path, what: str) -> str:
-    """"the design change for <sid> in <design> did not land: <what>"."""
+    """ "the design change for <sid> in <design> did not land: <what>"."""
     return f"the design change for {sid} in {design} did not land: {what}"
+
+
+def handback_text(what: str, said: str) -> str:
+    """The guidance a lead gets when the architect filed no design change."""
+    return (
+        f"Relay's architect filed no design change for this section's last DESIGN or RECUT ({what}). "
+        "Its final message, as guidance: go on with the section, or end with RECUT: if its cut is "
+        f"wrong:\n{said}"
+    )
