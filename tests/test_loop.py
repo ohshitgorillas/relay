@@ -4472,27 +4472,6 @@ def test_an_architect_that_files_a_report_on_its_rerun_lands_the_design_change(
     assert state.section("s1").status != "parked"
 
 
-def test_a_lead_that_asks_for_design_after_design_against_a_reportless_architect_is_stopped_by_the_budget(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
-) -> None:
-    # Breaks when: a section handed back to its lead after reportless architect runs, whose lead
-    # asks for DESIGN again and again, loops without the dollar budget ending the go, or is parked
-    # for the owner on the way (the budget is the only bound; owner's ruling, 29 Oct).
-    queue = _ladder(queue_file, cfg, tmp_path)
-    scenario(_lines(DONE_LEAD))
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
-    cfg = _sequenced(cfg, tmp_path, leads, cycle=True)
-    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS)))])
-    cfg = _stop_on_ping(cfg, queue)
-    cfg = dataclasses.replace(cfg, dollar_budget=0.075)
-    assert run(queue, cfg) == ExitCode.BUDGET
-    assert _runs(tmp_path, "recut") == []
-    assert len(_runs(tmp_path, "lead")) >= 2
-    section = State.open(queue, cfg).section("s1")
-    assert section.status == "open"
-    assert section.failures == 0
-
-
 # An architect run that crashes or files no report retries once, then hands the section back to
 # its lead with guidance: no park, no failure (relay-codex-architect-design.md, `relay/loop.py`,
 # `design_retry_brief`, `handback_text`, `design_retrying`, `design_handed_back`; Order 5).
@@ -4558,6 +4537,185 @@ def _retry_line(tmp_path: Path) -> str:
     added = retry[-2]
     assert added.startswith("lead new: "), added
     return added
+
+
+def _seed_design_failures(queue: Path, cfg: Config, count: int) -> None:
+    """A persisted record left by earlier architect cycles, before this go starts."""
+    state = State.open(queue, cfg)
+    state.set_last_session("s1", "earlier-lead")
+    path = state.stop_file.parent / "state.json"
+    data = json.loads(path.read_text())
+    data["sections"]["s1"].update(design_failures=count, design_failure="it filed no report")
+    path.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("outcome", ["reportless", "killed", "exit", "error", "zero", "rejected", "unapproved"])
+def test_two_unusable_architect_cycles_stop_without_a_budget_or_cap(
+    outcome: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path], capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: child invocations count as cycles, or repeated unusable cycles spend forever.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    queue.write_text(re.sub(r" \| cap: \$[\d.]+", "", queue.read_text()))
+    scenario(_lines(DONE_LEAD))
+    request = _step(str(_status_lead(tmp_path, "request", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [request, request, _step(NO_STATUS_LEAD)])
+    expected_runs = 4
+    if outcome in ("rejected", "unapproved"):
+        architect = _step(ARCHITECT_REJECTED if outcome == "rejected" else ARCHITECT_UNAPPROVED)
+        expected_runs = 2
+    else:
+        path = _architect_run(tmp_path, "unusable", "API Error: overloaded" if outcome == "error" else REPORTLESS,
+                              is_error=outcome == "error", context=cfg.hard_ceiling if outcome == "killed" else 1206,
+                              result=outcome != "zero")
+        if outcome == "zero":
+            path.write_text(path.read_text().splitlines()[0] + "\n")
+        architect = _step(str(path), exit=1 if outcome == "exit" else 0)
+    cfg = _with_architect(cfg, tmp_path, [architect])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert cfg.token_budget is None and cfg.dollar_budget is None and cfg.section_dollar_cap is None
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    section = State.open(queue, cfg).section("s1")
+    assert section.design_failures == 2
+    assert section.design_failure
+    assert section.failures == 0
+    assert section.status == "open" and section.question is None
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert len(_runs(tmp_path, "design")) == expected_runs
+    assert HANDBACK in str(_runs(tmp_path, "lead")[1]["prompt"])
+    assert _runs(tmp_path, "recut") == []
+    messages = [" ".join(p) for p in _pings(tmp_path)]
+    assert len(messages) == 1
+    for detail in ("architect failed repeatedly", "s1", "2", section.design_failure, "relay answer"):
+        assert detail in messages[0]
+    assert "architect failed repeatedly" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("usable", ["decisions", "unfiled", "approved"])
+def test_usable_architect_progress_clears_failures_before_park_or_failed_recut(
+    usable: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: usable progress retains the earlier failure, including when its recut fails.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    _seed_design_failures(queue, cfg, 1)
+    park = State.park
+
+    def park_after_reset(self, sid, *args, **kwargs):
+        section = State.open(queue, cfg).section(sid)
+        assert (section.design_failures, section.design_failure) == (0, None)
+        return park(self, sid, *args, **kwargs)
+
+    monkeypatch.setattr(State, "park", park_after_reset)
+    scenario(_lines(DONE_LEAD))
+    request = _step(str(_status_lead(tmp_path, "request", f"DESIGN: {PROBLEM}")))
+    before_recut = tmp_path / "state-before-recut.json"
+    state_path = State.open(queue, cfg).stop_file.parent / "state.json"
+    cfg = _sequenced(cfg, tmp_path, [request], recuts=[_step(DIVVYER_RUN, exit=1, write=(state_path, before_recut))])
+    report = ARCHITECT_APPROVED if usable == "approved" else ARCHITECT_DECISION
+    if usable == "unfiled":
+        events = [json.loads(line) for line in (FIXTURES / ARCHITECT_DECISION).read_text().splitlines()]
+        text = events[-1]["result"]
+        text = text.replace(f"  {DECISION_1}\n", "")
+        text = text.replace(f"  {DECISION_2}\n", "")
+        events[-1]["result"] = text.replace("UNFILED\n", "UNFILED\n  Should two() return 2?\n")
+        unfiled = tmp_path / "unfiled.jsonl"
+        unfiled.write_text("".join(json.dumps(event) + "\n" for event in events))
+        report = str(unfiled)
+    cfg = _with_architect(cfg, tmp_path, [_step(report)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    section = State.open(queue, cfg).section("s1")
+    assert (section.design_failures, section.design_failure) == (0, None)
+    assert section.status == "parked"
+    assert len(_runs(tmp_path, "recut")) == (1 if usable == "approved" else 0)
+    if usable == "approved":
+        section_before_recut = json.loads(before_recut.read_text())["sections"]["s1"]
+        assert (section_before_recut["design_failures"], section_before_recut["design_failure"]) == (0, None)
+
+
+@pytest.mark.parametrize("answered", [False, True])
+def test_restart_at_architect_bound_launches_nothing_until_explicit_answer(
+    answered: bool, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path], fake_run,
+) -> None:
+    # Breaks when: a restart launches any agent at the bound, or relay answer cannot recover it.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    state = State.open(queue, cfg)
+    if answered:
+        state.park("s1", "Product choice?", design=(DESIGN_PATH, (1,)))
+        state.set_answer("s1", "1: proceed")
+    _seed_design_failures(queue, cfg, 2)
+    state.set_last_log("s1", _status_lead(tmp_path, "earlier-lead", f"DESIGN: {PROBLEM}"))
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert fake_run.calls == []
+    assert State.open(queue, cfg).section("s1").design_failures == 2
+    State.open(queue, cfg).stop_file.unlink(missing_ok=True)
+    assert State.open(queue, cfg).set_answer("s1", "The cause is fixed; retry.")
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert fake_run.calls
+
+
+def test_answered_design_failure_propagates_architect_stop(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the answered-decision path loses an architect stop or launches another lead.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    state = State.open(queue, cfg)
+    state.park("s1", "Product choice?", design=(DESIGN_PATH, (1,)))
+    state.set_answer("s1", "1: proceed")
+    _seed_design_failures(queue, cfg, 1)
+    state.set_last_log("s1", _status_lead(tmp_path, "earlier-lead", f"DESIGN: {PROBLEM}"))
+    scenario(_lines(DONE_LEAD))
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "lead") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.design_failures == 2 and section.failures == 0
+    assert "architect failed repeatedly" in " ".join(_pings(tmp_path)[0])
+
+
+def test_lead_retirement_keeps_the_previous_architect_cycle_failure(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: retiring a lead clears its section's earlier architect cycle failure.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    _seed_design_failures(queue, cfg, 1)
+    scenario(_lines(DONE_LEAD))
+    request = _step(str(_status_lead(tmp_path, "request", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), request, _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    section = State.open(queue, cfg).section("s1")
+    assert section.design_failures == 2
+    assert section.failures == 0
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert len(_runs(tmp_path, "design")) == 1
+
+
+def test_restart_at_architect_bound_stops_before_research_launch(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: the persisted bound is checked after a runnable section starts research.
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _seed_design_failures(queue, cfg, 2)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    result = run(queue, cfg)
+    assert _research_runs(tmp_path) == []
+    assert _runs(tmp_path, "lead") == []
+    assert result == ExitCode.FAILED_TWICE
+    assert State.open(queue, cfg).section("s1").design_failures == 2
 
 
 def _handed_back_unparked(queue: Path, cfg: Config, tmp_path: Path) -> str:

@@ -26,7 +26,7 @@ from relay.prompts import (
 )
 from relay.queue import Section, blocked_by, parse_queue, queue_design
 from relay.runner import RunResult, error_line, run_agent, run_failed
-from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
+from relay.state import CHECK_LIMIT, DESIGN_FAILURE_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
@@ -115,13 +115,14 @@ def _run_section(
         return None
     if _over_cap(cfg, queue, state, ledger, section):
         return None
+    if current.design_failures >= DESIGN_FAILURE_LIMIT:
+        return _design_failed_stop(sid, current.design_failures, current.design_failure)
     if current.design_open is not None:
         answer = state.take_answer(sid)
         if answer is not None:
-            _design_answer(
+            return _design_answer(
                 queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer
             )
-            return None
     m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
     if spent:
         return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
@@ -493,6 +494,15 @@ def _failed_twice(sid: str) -> _Stop:
     return ExitCode.FAILED_TWICE, "failed twice", f"section {sid} failed twice"
 
 
+def _design_failed_stop(sid: str, count: int, reason: str | None) -> _Stop:
+    return (
+        ExitCode.FAILED_TWICE,
+        "architect failed repeatedly",
+        f"section {sid}: {count} unusable architect cycles; last failure: {reason or 'unknown'}; "
+        "fix the cause, then relay answer to retry",
+    )
+
+
 def _climb(
     queue: Path,
     cfg: Config,
@@ -521,7 +531,7 @@ def _climb(
         _park(cfg, queue, state, sid, step.why)
     else:
         # ladder.climb gives rung 2 only with a design in hand.
-        _design_change(
+        return _design_change(
             queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log
         )
     return None
@@ -539,7 +549,7 @@ def _design_change(
     design: Path,
     problem: str,
     lead_log: Path,
-) -> None:
+) -> _Stop | None:
     """Run the architect on `design` for `problem`, then act on its report."""
     if _over_cap(cfg, queue, state, ledger, section):
         return
@@ -550,7 +560,7 @@ def _design_change(
         design, queue, section, problem, evidence, cfg.design_approval,
         current.answers, _lead_code(cwd, section.id, current.last_report),
     )
-    _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
+    return _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
 
 
 def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, str | None] | None:
@@ -578,7 +588,7 @@ def _design_answer(
     section: Section,
     design_open: str,
     answer: str,
-) -> None:
+) -> _Stop | None:
     """Run the architect with the owner's `answer` to the open decisions, then act on its report."""
     sid = section.id
     current = state.section(sid)
@@ -593,7 +603,7 @@ def _design_answer(
     numbers = tuple(current.design_numbers or ())
     brief = design_answer_brief(design, numbers, answer, cfg.design_approval)
     problem = f"the owner ruled on the open design decisions: {answer}"
-    _architect(
+    return _architect(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
         Path(current.last_log),
     )
@@ -624,7 +634,7 @@ def _architect(
     brief: str,
     problem: str,
     lead_log: Path,
-) -> None:
+) -> _Stop | None:
     """The architect run on `design` with `brief`, run once more when it failed or filed no report
     (the reason and its final message added to the brief) unless the budget or the section's cap is
     spent; then act on its report."""
@@ -639,7 +649,7 @@ def _architect(
             progress.design_retrying(sid, _went_wrong(result, report) or "it filed no report")
             retry = design_retry_brief(brief, ladder.said(result.stream.result_text), error)
             result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
-    _design_outcome(
+    return _design_outcome(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
     )
 
@@ -701,21 +711,21 @@ def _design_outcome(
     lead_log: Path,
     result: RunResult,
     report: ladder.DesignReport | None,
-) -> None:
-    """Park on an undecided design change (decisions for the owner); on an approved one, recut from
-    it at rung 2. A run that failed, filed no report (both already rerun once), was rejected or did
-    not approve parks nothing: the section goes back to its lead, no failure counted, with the
-    architect's final message as guidance (owner's ruling, 29 Oct: never park over a technical gap).
-    Each lead, architect and design pass then meets the loop's budget check and the section's cap,
-    the only bound on DESIGN after DESIGN."""
+) -> _Stop | None:
+    """Reset the failure bound on usable progress; otherwise count the completed unusable
+    cycle, handing back below the limit and stopping at it without a product-choice park."""
     sid = section.id
     what = _went_wrong(result, report)
     if what is not None:
-        progress.design_handed_back(sid, what)
+        count = state.record_design_failure(sid, what)
         state.set_design_open(sid, None)
+        if count >= DESIGN_FAILURE_LIMIT:
+            return _design_failed_stop(sid, count, what)
         state.set_guidance(sid, ladder.handback_text(what, ladder.said(result.stream.result_text)))
+        progress.design_handed_back(sid, what)
         return
     assert report is not None
+    state.clear_design_failures(sid)
     if report.decisions or report.unfiled:
         _park(
             cfg, queue, state, sid, ladder.decisions_text(sid, design, report),

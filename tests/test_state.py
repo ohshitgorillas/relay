@@ -20,6 +20,134 @@ from relay.state import SectionState, State
 QUEUE = "workboard-queue.md"
 
 
+def test_design_cycle_failures_persist_independently_and_old_records_default(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: old records fail to load, or architect cycles share lead/section counts.
+    state = State.open(queue, fake_cfg)
+    state.record_failure("s1")
+    path = _dir(state) / "state.json"
+    old = json.loads(path.read_text())
+    old["sections"]["s1"].pop("design_failures", None)
+    old["sections"]["s1"].pop("design_failure", None)
+    path.write_text(json.dumps(old))
+    section = State.open(queue, fake_cfg).section("s1")
+    assert (section.design_failures, section.design_failure) == (0, None)
+    assert state_module.DESIGN_FAILURE_LIMIT == 2
+    assert State.open(queue, fake_cfg).record_design_failure("s1", "it filed no report") == 1
+    assert State.open(queue, fake_cfg).record_design_failure("s1", "it did not approve the design") == 2
+    section = State.open(queue, fake_cfg).section("s1")
+    assert (section.design_failures, section.design_failure) == (2, "it did not approve the design")
+    assert section.failures == 1
+    assert State.open(queue, fake_cfg).section("s2").design_failures == 0
+
+
+@pytest.mark.parametrize("reset", ["clear", "answer", "done"])
+def test_design_failure_resets_are_persisted(queue: Path, fake_cfg: Config, reset: str) -> None:
+    # Breaks when: explicit recovery or completion leaves the architect bound or reason saved.
+    state = State.open(queue, fake_cfg)
+    state.record_design_failure("s1", "it filed no report")
+    state.record_design_failure("s2", "it rejected the brief as steering")
+    if reset == "clear":
+        state.clear_design_failures("s1")
+    elif reset == "answer":
+        assert state.set_answer("s1", "Retry after fixing the cause.")
+    else:
+        state.mark_done("s1")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert (section.design_failures, section.design_failure) == (0, None)
+    other = State.open(queue, fake_cfg).section("s2")
+    assert (other.design_failures, other.design_failure) == (1, "it rejected the brief as steering")
+
+
+def test_ordinary_section_activity_does_not_clear_design_failures(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: lead bookkeeping, guidance consumption or ordinary recuts clear the bound.
+    state = State.open(queue, fake_cfg)
+    state.record_design_failure("s1", "it filed no report")
+    state.set_guidance("s1", "Keep going.")
+    state.take_guidance("s1")
+    state.set_last_session("s1", "retired-lead")
+    state.set_last_report("s1", "Retired with work left.")
+    state.record_failure("s1")
+    state.mark_from_recut("s1")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert (section.design_failures, section.design_failure) == (1, "it filed no report")
+    assert section.failures == 1
+
+
+def test_answer_clears_architect_failures_in_the_answer_publication(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: accepting an answer publishes its reopened state before resetting the bound,
+    # or a rejected answer changes a completed section's persisted state.
+    state = State.open(queue, fake_cfg)
+    state.park("s1", "Which direction?")
+    state.mark_done("s2")
+    path = _dir(state) / "state.json"
+    saved = json.loads(path.read_text())
+    for sid in ("s1", "s2"):
+        saved["sections"][sid]["design_failures"] = 2
+        saved["sections"][sid]["design_failure"] = "it filed no report"
+    path.write_text(json.dumps(saved))
+    before = path.read_bytes()
+    assert state.set_answer("s2", "Retry.") is False
+    assert path.read_bytes() == before
+    publications = []
+    real_replace = os.replace
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == path:
+            publications.append(json.loads(Path(os.fsdecode(src)).read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    assert state.set_answer("s1", "Use the documented direction.") is True
+    assert publications
+    for published in publications:
+        section = published["sections"]["s1"]
+        assert section["status"] == "open"
+        assert section["answer"] == "Use the documented direction."
+        assert section["question"] is None
+        assert (section["design_failures"], section["design_failure"]) == (0, None)
+        assert published["sections"]["s2"] == saved["sections"]["s2"]
+    reopened = State.open(queue, fake_cfg).section("s1")
+    assert (reopened.design_failures, reopened.design_failure) == (0, None)
+
+
+def test_done_clears_architect_failures_in_the_completion_publication(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: completion and its architect-bound reset appear in different state writes.
+    state = State.open(queue, fake_cfg)
+    state.park("s1", "Which direction?")
+    state.park("s2", "Another question.")
+    path = _dir(state) / "state.json"
+    saved = json.loads(path.read_text())
+    for sid in ("s1", "s2"):
+        saved["sections"][sid]["design_failures"] = 2
+        saved["sections"][sid]["design_failure"] = "it filed no report"
+    path.write_text(json.dumps(saved))
+    publications = []
+    real_replace = os.replace
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == path:
+            publications.append(json.loads(Path(os.fsdecode(src)).read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    state.mark_done("s1")
+    assert publications
+    for published in publications:
+        section = published["sections"]["s1"]
+        assert section["status"] == "done"
+        assert (section["design_failures"], section["design_failure"]) == (0, None)
+        assert published["sections"]["s2"] == saved["sections"]["s2"]
+    reopened = State.open(queue, fake_cfg).section("s1")
+    assert reopened.status == "done"
+    assert (reopened.design_failures, reopened.design_failure) == (0, None)
+
+
 def test_state_serializes_through_shared_publisher_while_retaining_lock(
     queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -129,6 +129,8 @@ class State:
             s.design_open = None
             s.design_numbers = None
             s.waits_on = None
+            s.design_failures = 0
+            s.design_failure = None
 
         self._update(sid, change)
         self.drop_map(sid)
@@ -246,6 +248,8 @@ class State:
             s.status = "open"
             s.question = None
             s.waits_on = None
+            s.design_failures = 0
+            s.design_failure = None
             return True
 
         return self._update(sid, change)
@@ -279,11 +283,20 @@ class State:
 
     def record_design_failure(self, sid: str, reason: str) -> int:
         """Atomically increment design_failures and store reason; return the new count."""
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> int:
+            s.design_failures += 1
+            s.design_failure = reason
+            return s.design_failures
+
+        return self._update(sid, change)
 
     def clear_design_failures(self, sid: str) -> None:
         """Atomically clear the count and reason for this section."""
-        raise NotImplementedError
+        def change(s: SectionState, _r: dict) -> None:
+            s.design_failures = 0
+            s.design_failure = None
+
+        self._update(sid, change)
 
     def set_last_session(self, sid: str, session: str, backend: str = "claude") -> None:
         def change(s: SectionState, r: dict) -> None:
