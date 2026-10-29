@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import dataclasses
+import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
 import pytest
 
 from relay.config import Config
+from harness import RECORD
 
 TESTS = Path(__file__).parent
 FAKE_CLAUDE = TESTS / "fakes" / "fake_claude.py"
 FIXTURES = TESTS / "fixtures"
+
+
+@pytest.fixture
+def loop_cfg(fake_cfg: Config, tmp_path: Path) -> Config:
+    """A loop config with recorded pings and a temporary git work tree."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    record = tmp_path / "pings.jsonl"
+    return dataclasses.replace(fake_cfg, ping_command=[sys.executable, "-c", RECORD, str(record), "{message}"])
 
 
 @pytest.fixture

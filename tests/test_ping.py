@@ -13,7 +13,7 @@ from relay.config import Config
 from relay.ping import needs_owner, ping, stopped
 
 # A ping command that appends its argv (after the record path) as one JSON line to the record path.
-_RECORD = "import sys, json; f = open(sys.argv[1], 'a'); f.write(json.dumps(sys.argv[2:]) + chr(10)); f.close()"
+from harness import RECORD as _RECORD
 
 
 def _recording_cfg(cfg: Config, record: Path) -> Config:

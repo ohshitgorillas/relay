@@ -25,6 +25,8 @@ from relay.ledger import Ledger, Spend
 from relay.loop import run
 from relay.queue import parse_queue
 from relay.state import State
+from harness import RECORD as _RECORD
+from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
 
 FIXTURES = Path(__file__).parent / "fixtures"
 WORKBOARD = "workboard-queue.md"
@@ -35,9 +37,6 @@ M2 = "m2-rest-queue.md"
 DONE_LEAD = "stream-lead.jsonl"
 NO_STATUS_LEAD = "stream-error.jsonl"
 
-# A ping command that appends its argv (after the record path) as one JSON line to the record path.
-_RECORD = "import sys, json; f = open(sys.argv[1], 'a'); f.write(json.dumps(sys.argv[2:]) + chr(10)); f.close()"
-
 # Long enough for many `poll_seconds` (0.05 in `fake_cfg`) to pass.
 SETTLE = 0.5
 
@@ -47,30 +46,13 @@ def _lines(name: str) -> list[str]:
 
 
 @pytest.fixture
-def cfg(fake_cfg: Config, tmp_path: Path) -> Config:
-    """`fake_cfg` with its pings recorded to `<tmp_path>/pings.jsonl`, and `tmp_path` a git work tree."""
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    record = tmp_path / "pings.jsonl"
-    return dataclasses.replace(fake_cfg, ping_command=[sys.executable, "-c", _RECORD, str(record), "{message}"])
-
-
-def _pings(tmp_path: Path) -> list[list[str]]:
-    record = tmp_path / "pings.jsonl"
-    if not record.exists():
-        return []
-    return [json.loads(line) for line in record.read_text().splitlines()]
+def cfg(loop_cfg: Config) -> Config:
+    return loop_cfg
 
 
 def _open_ids(queue: Path) -> list[str]:
     """Ids of the sections the queue itself leaves open, in queue order."""
     return [s.id for s in parse_queue(queue) if s.open]
-
-
-def _ledger_line(state: State, stamp: float, tokens: int, dollars: float) -> None:
-    """Append one readable ledger line stamped `stamp` to `<state dir>/ledger.jsonl`."""
-    path = state.stop_file.parent / "ledger.jsonl"
-    with path.open("a") as f:
-        f.write(json.dumps({"time": stamp, "tokens": tokens, "dollars": dollars}) + "\n")
 
 
 def _untouched(queue: Path, cfg: Config) -> None:
@@ -86,37 +68,6 @@ def _ran_on(queue: Path, cfg: Config, session: str) -> set[str]:
     """Ids of the sections whose recorded session is `session`."""
     state = State.open(queue, cfg)
     return {s.id for s in parse_queue(queue) if state.section(s.id).last_session == session}
-
-
-class _Background:
-    """One `run` on a daemon thread, so a test can act while the loop waits."""
-
-    def __init__(self, queue: Path, cfg: Config) -> None:
-        self.result: int | None = None
-        self.error: BaseException | None = None
-        self.thread = threading.Thread(target=self._body, args=(queue, cfg), daemon=True)
-        self.thread.start()
-
-    def _body(self, queue: Path, cfg: Config) -> None:
-        try:
-            self.result = run(queue, cfg)
-        except BaseException as exc:  # carried to the test thread
-            self.error = exc
-
-    def still_running(self) -> bool:
-        """True while `run` has not returned; re-raises what `run` raised."""
-        if self.thread.is_alive():
-            return True
-        if self.error is not None:
-            raise self.error
-        return False
-
-    def finish(self, timeout: float = 15.0) -> int | None:
-        self.thread.join(timeout)
-        assert not self.thread.is_alive(), "run did not return"
-        if self.error is not None:
-            raise self.error
-        return self.result
 
 
 def _park_all_but_done(queue: Path, cfg: Config, parked: str) -> State:
@@ -2352,13 +2303,6 @@ def _park_two(queue: Path, cfg: Config) -> tuple[State, str, str]:
 def _waits(texts: list[str]) -> list[set[str]]:
     """The set of ids each waiting line names, in line order."""
     return [set(t[len(_WAITING) :].split(", ")) for t in texts if t.startswith(_WAITING)]
-
-
-def _until(condition: Callable[[], bool], timeout: float = 15.0) -> None:
-    end = time.time() + timeout
-    while not condition():
-        assert time.time() < end, "condition never held"
-        time.sleep(0.02)
 
 
 def test_a_wait_that_goes_on_writes_one_waiting_line_naming_the_parked_section(
