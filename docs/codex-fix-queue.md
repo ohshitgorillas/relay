@@ -1,4 +1,5 @@
 design docs/superpowers/specs/relay-codex-architect-design.md | order docs/superpowers/specs/relay-codex-architect-design.md | main a6d6b5c
+landed 12 | 16a9650
 section s1 | lead | steps: 1 | size: lead: tokens: 1378927.4 seconds: 742.3 overruns: 0 refusals: 0
   s1.d1 | spiker | steps: 1 | writes: the scratchpad | size: spiker: tokens: 140504.6 seconds: 41.3 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s1.d1
@@ -91,21 +92,17 @@ section s4 | lead | steps: 8, 9, 10 | size: lead: tokens: 1395004.9 seconds: 743
     step: 8
     paths: relay/state.py
     check: uv run pytest tests/test_state.py
-  s4.d2 | test-writer | steps: 9 | writes: tests/test_state.py, tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
+  s4.d2 | test-writer | steps: 9 | writes: tests/test_state.py, tests/test_loop.py | size: calibration: retained red tests; remaining progress-reset verification, launch guard and retirement coverage; test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s4.d2
+    resume 01a1895a-815e-7d80-a75d-7bd89ff02e44
+    worktree: /Users/atom/dev/relay-wt/codex-fix
     red
     design: docs/superpowers/specs/relay-codex-architect-design.md step 9
-    behavior: The counter counts completed unusable architect cycles, not child invocations.
-    view: stubgen .pyi of relay/state.py
     behavior: A successful run returning decisions, unfiled questions or approval is usable progress and clears it before the corresponding park or recut.
     view: stubgen .pyi of relay/loop.py
     behavior: Lead runs, lead retirement, guidance consumption, restarts and ordinary recuts do not clear it.
-    view: stubgen .pyi of relay/state.py
+    view: stubgen .pyi of relay/loop.py
     behavior: Before launching research, lead or architect work for a runnable section, `_run_section` checks its persisted count and returns the same stop at the limit.
-    view: stubgen .pyi of relay/loop.py
-    behavior: Exercise both design requests and answered-decision handling.
-    view: stubgen .pyi of relay/loop.py
-    behavior: Preserve budget and cap stops that occur before the failure bound
     view: stubgen .pyi of relay/loop.py
     check: uv run pytest tests/test_state.py tests/test_loop.py
   s4.d3 | builder | steps: 10 | writes: relay/state.py, relay/loop.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
@@ -121,17 +118,32 @@ section s5 | lead | steps: 11 | size: lead: tokens: 1395004.9 seconds: 743.7 ove
     step: 11
     paths: README.md
     check: git diff --check
-section s6 | lead | steps: 12, 13 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s6.d1 | test-writer | steps: 12 | writes: tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6.d1
-    red
-    design: docs/superpowers/specs/relay-codex-architect-design.md step 12
-    behavior: tighten the decisions-on-rerun test so it protects the exact recorded design destination and decision state, preserving the product-choice park after the retry and the absence of a false hand-back.
-    view: stubgen .pyi of relay/loop.py
-    check: uv run pytest tests/test_loop.py -k rerun_files_decisions
-  s6.d2 | builder | steps: 13 | writes: relay/loop.py, relay/prompts.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6.d2
+section s6a | lead | steps: 13, 14, 15, 16 | size: calibration: one committable piece; stub, red tests and both builds stay together through green gates; lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0 | from: s6
+  s6a.d1 | builder | steps: 13 | writes: relay/runner.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6a.d1
+    resume 01a1897b-2dda-7ff1-9876-c11247a45f8a
+    stub
     design: docs/superpowers/specs/relay-codex-architect-design.md
     step: 13
+    paths: relay/runner.py
+  s6a.d2 | test-writer | steps: 14 | writes: tests/test_runner.py, tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6a.d2
+    red
+    design: docs/superpowers/specs/relay-codex-architect-design.md step 14
+    behavior: Cover the default and explicit token policies
+    view: stubgen .pyi of relay/runner.py
+    behavior: successful zero-token lead completion and valid generic recuts, killed/nonzero/backend-error rejection under both policies, and preserved architect zero-token retry and persistent cycle bound even with a syntactically usable report.
+    view: stubgen .pyi of relay/loop.py
+    check: uv run pytest tests/test_runner.py tests/test_loop.py
+  s6a.d3 | builder | steps: 15 | writes: relay/runner.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6a.d3
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 15
+    paths: relay/runner.py
+    check: uv run pytest tests/test_runner.py
+  s6a.d4 | builder | steps: 16 | writes: relay/loop.py, relay/prompts.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue /Users/atom/dev/relay-wt/codex-fix/docs/codex-fix-queue.md s6a.d4
+    design: docs/superpowers/specs/relay-codex-architect-design.md
+    step: 16
     paths: relay/loop.py, relay/prompts.py
-    check: uv run pytest tests/test_loop.py tests/test_prompts.py
+    check: uv run pytest tests/test_loop.py tests/test_prompts.py tests/test_progress.py

@@ -173,7 +173,8 @@ def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, app
         if (m := re.match(r"(\d+):", line)) and int(m.group(1)) in numbers
     ]
     if not kept:
-        kept = [_ruling(f"{numbers[0]}:", answer) if len(numbers) == 1 else _ruling("new:", answer)]
+        marker = f"{numbers[0]}:" if len(numbers) == 1 else "new:"
+        kept = [_ruling(marker, answer)]
     return "\n".join([f"rulings {design}", *kept, _ruling("approve:", approval)]) + "\n"
 
 

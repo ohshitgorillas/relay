@@ -898,6 +898,55 @@ def test_generic_loop_ignores_budgets_and_accepts_plain_stdout(
     assert run(queue, generic) == ExitCode.QUEUE_EMPTY
 
 
+@pytest.mark.parametrize("backend", ["generic", "claude"])
+def test_zero_token_successful_lead_completes_for_each_token_policy_backend(
+    backend: str, cfg: Config, tmp_path: Path,
+    queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when lead success requires usage, including for a metered backend.
+    queue = queue_file(WORKBOARD)
+    sid = _only_first_open(queue, cfg)
+    if backend == "generic":
+        cfg = dataclasses.replace(cfg, backend=backend, lead_command=[
+            sys.executable, "-c", "import sys; sys.stdin.read(); print('DONE')",
+        ])
+    else:
+        events = [json.loads(line) for line in _lines(DONE_LEAD)]
+        for event in events:
+            event.pop("usage", None)
+            event.pop("total_cost_usd", None)
+            if "message" in event:
+                event["message"].pop("usage", None)
+        scenario([json.dumps(event) for event in events])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    section = State.open(queue, cfg).section(sid)
+    assert section.status == "done" and section.failures == 0
+    assert _entries(queue, cfg, "lead")[0]["tokens"] == 0
+
+
+def test_zero_token_generic_recut_accepts_a_valid_changed_queue(
+    cfg: Config, tmp_path: Path,
+) -> None:
+    # Breaks when recut requires tokens or fails to run the newly cut section.
+    queue = _queue_of(tmp_path / "generic-queue.md", "s1")
+    lead = [sys.executable, "-c", (
+        "import pathlib,sys; sys.stdin.read(); "
+        "print('RECUT: split work' if 'section s1 |' in pathlib.Path(sys.argv[1]).read_text() else 'DONE')"
+    ), str(queue)]
+    recut = [sys.executable, "-c", (
+        "import pathlib,sys; sys.stdin.read(); "
+        "pathlib.Path(sys.argv[1]).write_text('section s1a | lead | steps: 1\\n  new work\\n')"
+    ), str(queue)]
+    cfg = dataclasses.replace(cfg, backend="generic", lead_command=lead, recut_command=recut)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    state = State.open(queue, cfg)
+    assert _open_ids(queue) == ["s1a"]
+    assert state.section("s1a").status == "done"
+    assert state.section("s1").failures == 0
+    recuts = _entries(queue, cfg, "recut")
+    assert len(recuts) == 1 and recuts[0]["tokens"] == 0
+
+
 def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
     cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
@@ -4632,6 +4681,38 @@ def test_usable_architect_progress_clears_failures_before_park_or_failed_recut(
     if usable == "approved":
         section_before_recut = json.loads(before_recut.read_text())["sections"]["s1"]
         assert (section_before_recut["design_failures"], section_before_recut["design_failure"]) == (0, None)
+
+
+@pytest.mark.parametrize("report", [ARCHITECT_APPROVED, ARCHITECT_DECISION])
+def test_zero_token_usable_architect_reports_retry_then_reach_persistent_cycle_bound(
+    report: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when valid report text overrides zero-token failure or clears its cycle count.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    events = [json.loads(line) for line in _lines(report)]
+    for event in events:
+        event.pop("usage", None)
+        event.pop("total_cost_usd", None)
+        if "message" in event:
+            event["message"].pop("usage", None)
+    stream = tmp_path / "zero-token-architect.jsonl"
+    stream.write_text("".join(json.dumps(event) + "\n" for event in events))
+    request = _step(str(_status_lead(tmp_path, "request", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [request])
+    cfg = _with_architect(cfg, tmp_path, [_step(str(stream))])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    section = State.open(queue, cfg).section("s1")
+    assert section.design_failures == 2 and section.failures == 0
+    assert section.status == "open" and section.question is None
+    assert len(_runs(tmp_path, "lead")) == 2
+    assert len(_runs(tmp_path, "design")) == 4
+    assert _runs(tmp_path, "recut") == []
+    assert HANDBACK in str(_runs(tmp_path, "lead")[1]["prompt"])
+    assert all(entry["tokens"] == 0 for entry in _entries(queue, cfg, "design"))
+    assert "architect failed repeatedly" in " ".join(_pings(tmp_path)[0])
 
 
 @pytest.mark.parametrize("answered", [False, True])

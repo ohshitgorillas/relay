@@ -36,13 +36,13 @@ class RunResult:
     log: Path
 
 
-def run_failed(result: RunResult) -> bool:
-    """Killed, exited nonzero, its result marked an error, or no tokens used."""
+def run_failed(result: RunResult, *, require_tokens: bool = True) -> bool:
+    """True for a killed run, nonzero exit, backend error, or required but absent tokens."""
     return (
         result.killed
         or result.exit_code != 0
         or result.stream.is_error
-        or result.stream.spend.tokens == 0
+        or (require_tokens and result.stream.spend.tokens == 0)
     )
 
 

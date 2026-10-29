@@ -170,7 +170,7 @@ def _run_section(
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
-    failed = result.killed or result.exit_code != 0 or result.stream.is_error or status is None
+    failed = run_failed(result, require_tokens=False) or status is None
     if watch.idle_retired and not result.stream.is_error:
         pass  # handled as RETIRED: no failure recorded
     elif failed:
@@ -640,13 +640,14 @@ def _architect(
     spent; then act on its report."""
     sid = section.id
     result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, brief, problem)
-    if _retryable(result, report):
+    failed = run_failed(result)
+    if failed or report is None:
         if _over_cap(cfg, queue, state, ledger, section):
             return
         if ledger.over(cfg, Spend(0, 0.0), since) is None:
-            failed = run_failed(result)
             error = error_line(result) if failed else None
-            progress.design_retrying(sid, _went_wrong(result, report) or "it filed no report")
+            what = f"it failed: {error}" if failed else "it filed no report"
+            progress.design_retrying(sid, what)
             retry = design_retry_brief(brief, ladder.said(result.stream.result_text), error)
             result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
     return _design_outcome(
@@ -674,11 +675,6 @@ def _architect_run(
     report = ladder.parse_report(result.stream.result_text)
     progress.design_finished(section.id, result, report)
     return result, report
-
-
-def _retryable(result: RunResult, report: ladder.DesignReport | None) -> bool:
-    """The architect run failed or filed no parseable report."""
-    return run_failed(result) or report is None
 
 
 def _went_wrong(result: RunResult, report: ladder.DesignReport | None) -> str | None:
@@ -771,7 +767,7 @@ def _recut(
             cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief,
             cwd, retire_flag, None, rung,
         )
-        failed = result.killed or result.exit_code != 0 or result.stream.is_error
+        failed = run_failed(result, require_tokens=False)
         if not failed:
             try:
                 after = parse_queue(queue)
