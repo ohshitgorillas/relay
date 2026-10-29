@@ -35,6 +35,7 @@ _KEYS = frozenset(
         "recut_command",
         "ping_command",
         "state_root",
+        "backend",
     }
 )
 
@@ -87,6 +88,11 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
             raise ConfigError(f"unknown config key {key!r}")
     merged = {**data, **{k: v for k, v in overrides.items() if v is not None}}
     home = Path.home()
+    backend = merged.get("backend", "claude")
+    if not isinstance(backend, str) or backend not in {"claude", "codex", "generic"}:
+        raise ConfigError(f"unknown backend {backend!r}")
+    if backend == "generic" and "lead_command" not in merged:
+        raise ConfigError("generic backend requires an explicit lead_command")
 
     context_limit = _int(merged, "context_limit", 100_000)
     assert context_limit is not None
@@ -98,7 +104,11 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         )
     poll_seconds = _number(merged, "poll_seconds", 30)
     assert poll_seconds is not None
-    lead_command = _command(merged, "lead_command", list(_DEFAULT_LEAD))
+    lead_default = _DEFAULT_LEAD if backend == "claude" else ["codex"]
+    lead_command = _command(merged, "lead_command", lead_default)
+    recut_default = (
+        [*lead_command, "--agent", "divvyer"] if backend == "claude" else lead_command
+    )
 
     state_value = merged.get("state_root")
     if state_value is None:
@@ -115,9 +125,10 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         hard_ceiling=hard_ceiling,
         poll_seconds=poll_seconds,
         lead_command=lead_command,
-        recut_command=_command(merged, "recut_command", [*lead_command, "--agent", "divvyer"]),
+        recut_command=_command(merged, "recut_command", recut_default),
         ping_command=_command(
             merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"]
         ),
         state_root=state_root,
+        backend=backend,
     )

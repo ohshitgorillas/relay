@@ -172,3 +172,60 @@ def test_wrong_type_in_file_raises_config_error(tmp_path: Path, home: Path) -> N
 def test_bad_cli_override_raises_config_error(tmp_path: Path, home: Path) -> None:
     with pytest.raises(ConfigError):
         load_config(_toml(tmp_path, ""), {"token_budget": "many"})
+
+
+def test_backend_defaults_preserve_claude_commands(tmp_path: Path, home: Path) -> None:
+    # Breaks when backend selection changes legacy default commands.
+    cfg = load_config(_toml(tmp_path, ""), {})
+    assert cfg.backend == "claude"
+    assert cfg.lead_command == DEFAULT_LEAD
+    assert cfg.recut_command == DEFAULT_LEAD + ["--agent", "divvyer"]
+    try:
+        explicit = load_config(_toml(tmp_path, 'backend = "claude"\n'), {})
+    except ConfigError as exc:
+        assert False, str(exc)
+    assert explicit == cfg
+
+
+def test_generic_requires_explicit_command(tmp_path: Path, home: Path) -> None:
+    # Breaks when generic silently launches the default Claude command.
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, 'backend = "generic"\n'), {})
+    try:
+        cfg = load_config(_toml(tmp_path, 'backend = "generic"\nlead_command = ["worker"]\n'), {})
+    except ConfigError as exc:
+        assert False, str(exc)
+    assert cfg.lead_command == ["worker"]
+
+
+def test_generic_recut_defaults_without_claude_flags(tmp_path: Path, home: Path) -> None:
+    # Breaks when generic recut inherits Claude's agent flag.
+    try:
+        cfg = load_config(_toml(tmp_path, 'backend = "generic"\nlead_command = ["worker", "--plain"]\n'), {})
+    except ConfigError as exc:
+        assert False, str(exc)
+    assert cfg.backend == "generic"
+    assert cfg.lead_command == ["worker", "--plain"]
+    assert cfg.recut_command == ["worker", "--plain"]
+
+
+def test_backend_override_selects_generic_defaults(tmp_path: Path, home: Path) -> None:
+    # Breaks when CLI backend selection is ignored during command defaulting.
+    try:
+        cfg = load_config(_toml(tmp_path, 'backend = "claude"\nlead_command = ["worker"]\n'), {"backend": "generic"})
+    except ConfigError as exc:
+        assert False, str(exc)
+    assert cfg.backend == "generic"
+    assert cfg.recut_command == ["worker"]
+
+
+@pytest.mark.parametrize("backend", ["unknown", 123])
+def test_invalid_backend_is_config_error(tmp_path: Path, home: Path, backend: object) -> None:
+    # Breaks when invalid backend selections survive config validation.
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, ""), {"backend": backend})
+    try:
+        cfg = load_config(_toml(tmp_path, ""), {"backend": "claude"})
+    except ConfigError as exc:
+        assert False, str(exc)
+    assert cfg.backend == "claude"
