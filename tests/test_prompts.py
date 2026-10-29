@@ -858,7 +858,7 @@ def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_numbered_li
 
 def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_new_line() -> None:
     # Breaks when: an unnumbered multi-line answer to several decisions becomes `new:` plus bare lines.
-    brief = design_answer_brief(DESIGN, (1, 2), "do both\n\tthe cheap way\n", APPROVAL)
+    brief = design_answer_brief(DESIGN, (1, 2), "do both\n\tthe cheap way", APPROVAL)
     assert _illegal(brief) == []
     assert brief.splitlines() == [f"rulings {DESIGN}", "new: do both the cheap way", f"approve: {APPROVAL}"]
 
@@ -876,23 +876,31 @@ def _reason_line(brief: str, retry: str) -> str:
 
 def test_design_retry_brief_puts_the_no_report_reason_in_a_lead_new_line_before_approve() -> None:
     # Breaks when: the reason follows approve:, replaces a line of the brief, or does not say the
-    # final message had no BRIEF … END DESIGN block and carry that message.
+    # final message had no BRIEF … END DESIGN block and carry that message, or does not say the
+    # architect filed no design change and tell it to make the design change or file a report
+    # saying why none is needed (spec relay-codex-architect-design.md:42-45).
     brief = _ml_design_brief()
     line = _reason_line(brief, design_retry_brief(brief, SAID_ML, None))
     assert line.startswith("lead new: ")
     assert "its final message had no BRIEF … END DESIGN block" in line
     assert _flat(SAID_ML) in line
+    assert "filed no design change" in line
+    assert re.search(r"[Mm]ake the design change, or file a report saying why none is needed", line)
 
 
 def test_design_retry_brief_puts_the_failure_reason_in_a_lead_new_line_before_approve() -> None:
     # Breaks when: a failed run's error is left out of the reason line, worded other than
-    # "it failed: <error>", or the run is called reportless instead.
+    # "it failed: <error>", the run is called reportless instead, or the line does not say the
+    # architect filed no design change and tell it to make the design change or file a report
+    # saying why none is needed (spec relay-codex-architect-design.md:42-45).
     brief = _ml_design_brief()
     line = _reason_line(brief, design_retry_brief(brief, SAID_ML, "exit 1: codex crashed"))
     assert line.startswith("lead new: ")
     assert "it failed: exit 1: codex crashed" in line
     assert "had no BRIEF" not in line
     assert _flat(SAID_ML) in line
+    assert "filed no design change" in line
+    assert re.search(r"[Mm]ake the design change, or file a report saying why none is needed", line)
 
 
 def test_design_retry_brief_on_an_answer_brief_puts_the_reason_before_approve() -> None:

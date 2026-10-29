@@ -126,7 +126,7 @@ def design_of(design_line: str | None, top: Path) -> Path | None:
     if design_line is None:
         return None
     path = top / design_line
-    if path.suffix != ".md" or path.parent != top / SPECS:
+    if path.suffix != ".md" or path.resolve().parent != (top / SPECS).resolve():
         return None
     return path
 

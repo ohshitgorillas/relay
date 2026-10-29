@@ -396,6 +396,13 @@ def test_design_of_resolves_a_relative_design_against_top() -> None:
     )
 
 
+def test_design_of_returns_an_absolute_design_directly_under_top_specs() -> None:
+    # breaks when: an absolute design line naming a `.md` file directly under top/SPECS is
+    # rejected as outside the specs directory, or is rewritten rather than returned.
+    design = "/no-such-repo/docs/superpowers/specs/ladder-design.md"
+    assert design_of(design, Path("/no-such-repo")) == Path(design)
+
+
 def test_design_of_none_is_none() -> None:
     # breaks when: a queue with no design line yields a path, such as `top` itself.
     assert design_of(None, Path("/no-such-repo")) is None
