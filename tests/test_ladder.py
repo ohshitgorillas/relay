@@ -22,7 +22,9 @@ from relay.ladder import (
     decisions_text,
     design_of,
     failed_text,
+    lead_branch,
     parse_report,
+    said,
     section_cap,
     split_reason,
 )
@@ -481,3 +483,28 @@ def test_decisions_text_with_only_unfiled_lines_carries_them() -> None:
     # breaks when: the lines are read from decisions alone, so an unfiled-only report shows nothing.
     report = DesignReport(rejected=False, approved=True, decisions=(), unfiled=(UNFILED_1,))
     assert UNFILED_1 in decisions_text("s2", DESIGN, report)
+
+
+# The architect's unparsed final message for the owner, and the lead's code location.
+
+
+def test_said_quotes_a_short_message_whole_and_a_long_one_by_its_end() -> None:
+    # Breaks when: an architect message without a report is not quoted to the owner (Gauntlet s2,
+    # run 29: a bare END DESIGN parked as "the architect filed no report"), or a long one is cut
+    # from its end, where the reason is, or not cut at all.
+    assert said("  Blocked: no findings.\n\nEND DESIGN\n") == "Blocked: no findings.\n\nEND DESIGN"
+    assert said(None) == "(nothing)"
+    long = "x" * 5000 + "the reason"
+    quoted = said(long)
+    assert quoted.endswith("the reason")
+    assert quoted.startswith("…")
+    assert len(quoted) <= 1501
+
+
+def test_lead_branch_reads_the_last_branch_line_of_the_lead_report() -> None:
+    # Breaks when: the lead's branch and worktree are not taken from its report's BRANCH line,
+    # an earlier BRANCH line wins, or a report with none gives one.
+    report = "BRANCH lead/old /tmp/old\nSLICE q s2\nBRANCH lead/m2-images /Users/a/gauntlet-wt/m2 images\nEND LEAD"
+    assert lead_branch(report) == ("lead/m2-images", Path("/Users/a/gauntlet-wt/m2 images"))
+    assert lead_branch("DONE") is None
+    assert lead_branch(None) is None

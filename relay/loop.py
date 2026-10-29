@@ -542,8 +542,25 @@ def _design_change(
         return
     check_log = state.check_log(lead_log)
     evidence = [lead_log, *([check_log] if check_log.exists() else [])]
-    brief = design_brief(design, queue, section, problem, evidence, cfg.design_approval)
+    current = state.section(section.id)
+    brief = design_brief(
+        design, queue, section, problem, evidence, cfg.design_approval,
+        current.answers, _lead_code(cwd, section.id, current.last_report),
+    )
     _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
+
+
+def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, Path, str | None] | None:
+    """(branch, worktree, head commit) of the lead's code: the BRANCH line of its report, else the
+    worktree on lead/<sid>; None when neither is found."""
+    found = ladder.lead_branch(report)
+    if found is None:
+        tree = git.section_worktree(cwd, sid)
+        if tree is None:
+            return None
+        found = (f"lead/{sid}", tree)
+    branch, tree = found
+    return branch, tree, git.head(tree) if tree.is_dir() else None
 
 
 def _design_answer(
@@ -642,7 +659,7 @@ def _design_outcome(
     elif result.stream.is_error:
         what = "the architect backend reported an error"
     elif report is None:
-        what = "the architect filed no report"
+        what = f"the architect filed no report; its final message:\n{ladder.said(result.stream.result_text)}"
     elif report.rejected:
         what = "the architect rejected the brief as steering"
     elif report.decisions or report.unfiled:

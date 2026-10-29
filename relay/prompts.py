@@ -104,15 +104,30 @@ def design_brief(
     problem: str,
     evidence: list[Path],
     approval: str,
+    answers: list[str] | tuple[str, ...] = (),
+    code: tuple[str, Path, str | None] | None = None,
 ) -> str:
-    """Three lines: rulings, lead new, approve."""
+    """rulings, lead new (with where the lead's code is), one `new:` per owner answer verbatim,
+    approve; then the section's text from the queue."""
     steps = ", ".join(section.steps) if section.steps else "steps unnamed"
     paths = ", ".join(str(path) for path in evidence)
+    where = ""
+    if code is not None:
+        branch, tree, commit = code
+        at = f" at {commit}" if commit else ""
+        show = f"`git show {commit}:<path>`" if commit else f"`git show {branch}:<path>`"
+        where = (
+            f" The lead's code is on branch {branch}{at}, worktree {tree}, not in this checkout; "
+            f"read it with {show} or under that worktree."
+        )
+    owner = "".join(f"new: {answer}\n" for answer in answers)
     return (
         f"rulings {design}\n"
         f"lead new: Section {section.id} of the queue at {queue}, under this design's Order "
-        f"{steps}, cannot go on: {problem} Evidence: {paths}.\n"
+        f"{steps}, cannot go on: {problem} Evidence: {paths}.{where}\n"
+        f"{owner}"
         f"approve: {approval}\n"
+        f"\nSection {section.id} as the queue has it:\n{section.body.rstrip()}\n"
     )
 
 

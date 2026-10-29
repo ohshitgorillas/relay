@@ -4369,6 +4369,45 @@ def test_rung_3_a_rejected_or_unapproved_design_report_parks_the_section_as_a_de
     assert _entries(queue, cfg, "recut") == []
 
 
+def test_a_design_brief_carries_the_owner_answers_section_text_and_lead_code_and_a_reportless_architect_is_quoted(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when (Gauntlet s2, runs 24-29): an owner answer the lead took never reaches the
+    # architect; the brief lacks the section's text or the branch, worktree and head commit of the
+    # lead's code named on its report's BRANCH line; or an architect that ends without a report
+    # parks the section, and pings the owner, without quoting what it said.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    tree = tmp_path / "lead-tree"
+    tree.mkdir()
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "step 21"]):
+        subprocess.run([*_GIT, *args], cwd=tree, check=True, capture_output=True)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True).stdout.strip()
+    state = State.open(queue, cfg)
+    state.set_answer("s1", "Compress the spec throughout.")
+    state.set_answer("s1", "The cap stays at 40,000 bytes.")
+    scenario(_lines(DONE_LEAD))
+    status = f"BRANCH lead/m2-images {tree}\nEND LEAD\nDESIGN: {PROBLEM}"
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", status)))]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    said = "Blocked: the cited Relay log is outside the repository.\n\nEND DESIGN"
+    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", said)))])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+
+    brief = str(_runs(tmp_path, "design")[0]["prompt"])
+    lines = brief.splitlines()
+    assert "new: Compress the spec throughout." in lines
+    assert "new: The cap stays at 40,000 bytes." in lines
+    assert f"branch lead/m2-images at {commit}, worktree {tree}" in lines[1]
+    s1 = next(sec for sec in parse_queue(queue) if sec.id == "s1")
+    assert s1.body.rstrip() in brief
+    question = State.open(queue, cfg).section("s1").question
+    assert question is not None
+    assert "the architect filed no report" in question
+    assert "Blocked: the cited Relay log is outside the repository." in question
+    assert any("Blocked: the cited Relay log is outside the repository." in " ".join(p) for p in _pings(tmp_path))
+
+
 def test_rung_3_a_design_decision_parks_with_its_recommendation_and_relay_answer_resumes_the_architect(
     cfg: Config,
     tmp_path: Path,

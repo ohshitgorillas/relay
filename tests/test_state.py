@@ -165,6 +165,16 @@ def test_set_answer_is_kept_across_reopening_and_take_answer_consumes_it(
     assert State.open(queue, fake_cfg).section("s5").answer is None
 
 
+def test_every_answer_is_kept_in_order_after_take_answer(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: an owner answer is dropped once a lead takes it, so a later architect brief for
+    # the section cannot carry it (Gauntlet s2), or a later answer replaces an earlier one.
+    state = State.open(queue, fake_cfg)
+    state.set_answer("s5", "Use port 8080.")
+    state.take_answer("s5")
+    state.set_answer("s5", "Compress the spec.\nKeep the cap.")
+    assert State.open(queue, fake_cfg).section("s5").answers == ["Use port 8080.", "Compress the spec.\nKeep the cap."]
+
+
 def test_take_answer_with_no_answer_returns_none(queue: Path, fake_cfg: Config) -> None:
     assert State.open(queue, fake_cfg).take_answer("s6") is None
 

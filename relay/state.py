@@ -7,7 +7,7 @@ import fcntl
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import IO, Callable, Iterator, Literal, TypeVar
 
@@ -46,6 +46,7 @@ class SectionState:
     last_report: str | None = None
     last_backend: str = "claude"
     research_backend: str = "claude"
+    answers: list[str] = field(default_factory=list)  # every owner answer to this section, in order
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -237,6 +238,7 @@ class State:
             if s.status == "done":
                 return False
             s.answer = answer
+            s.answers.append(answer)
             s.status = "open"
             s.question = None
             s.waits_on = None

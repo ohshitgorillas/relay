@@ -522,20 +522,47 @@ def test_lead_prompt_with_the_status_rule_keeps_everything_else() -> None:
         assert form in prompt
 
 
-# Behavior 1 and 6: design_brief is three lines and nothing else; it carries the problem, the
-# steps and the evidence paths, and the guess appears nowhere in it.
+# Behavior 1 and 6: design_brief is the rulings, lead new and approve lines, then the section's
+# text; it carries the problem, the steps and the evidence paths, and the lead's guess stays out.
 
 
-def test_design_brief_is_the_three_lines_and_nothing_else() -> None:
+def test_design_brief_is_the_three_lines_then_the_section_text() -> None:
     # Breaks when: a line is added, dropped or worded otherwise, the steps or evidence are joined
-    # other than with ", ", or the section body is copied in.
+    # other than with ", ", or the section's text from the queue is left out or reworded.
     brief = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL)
     assert brief.splitlines() == [
         f"rulings {DESIGN}",
         f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order 6, 7, cannot go on: "
         f"{PROBLEM} Evidence: {EVIDENCE[0]}, {EVIDENCE[1]}.",
         f"approve: {APPROVAL}",
+        "",
+        "Section s4 as the queue has it:",
+        *BODY.rstrip().splitlines(),
     ]
+
+
+def test_design_brief_carries_every_owner_answer_verbatim_as_new_lines() -> None:
+    # Breaks when: an owner answer recorded for the section never reaches the architect (Gauntlet
+    # s2, runs 24-28: the answer went only to the lead), only the last is kept, one is reworded,
+    # or they land after the approve line.
+    answers = ["Compress the spec throughout, {keep} 100% of its contracts.", "Yes: the cap stays."]
+    lines = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, answers).splitlines()
+    assert lines[2:5] == [f"new: {answers[0]}", f"new: {answers[1]}", f"approve: {APPROVAL}"]
+
+
+def test_design_brief_names_the_lead_branch_worktree_and_head_commit() -> None:
+    # Breaks when: the architect, run in the main checkout, is not told the branch, worktree and
+    # commit holding the lead's code (Gauntlet s2: gauntlet/seams/images.py only on lead/m2-images).
+    tree = Path("/work/repo-wt/m2-images")
+    code = ("lead/m2-images", tree, "54f611a5")
+    lead_new = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=code).splitlines()[1]
+    assert lead_new.startswith("lead new: ")
+    assert f"branch lead/m2-images at 54f611a5, worktree {tree}" in lead_new
+    assert "`git show 54f611a5:<path>`" in lead_new
+    no_commit = design_brief(
+        DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", tree, None)
+    )
+    assert "`git show lead/m2-images:<path>`" in no_commit
 
 
 def test_design_brief_with_no_steps_says_steps_unnamed() -> None:
@@ -558,11 +585,10 @@ def test_design_brief_carries_the_given_design_queue_and_approval() -> None:
     assert lines[2] == "approve: approved by the owner"
 
 
-def test_design_brief_holds_no_guess_from_the_section() -> None:
-    # Breaks when: the section's title or body, which may carry a lead's guess, reaches the
-    # architect's brief, or the problem, steps or evidence paths are dropped.
-    body = f"## Check limit\n\nRECUT: {PROBLEM}{' | guess: '}{GUESS_FIX}\n"
-    section = _stepped(body=body, title=f"Check limit, guess: {GUESS_FIX}")
+def test_design_brief_holds_no_guess_from_the_title() -> None:
+    # Breaks when: the section's title, which may carry a lead's guess, reaches the architect's
+    # brief, or the problem, steps or evidence paths are dropped.
+    section = _stepped(title=f"Check limit, guess: {GUESS_FIX}")
     brief = design_brief(DESIGN, QUEUE, section, PROBLEM, EVIDENCE, APPROVAL)
     assert PROBLEM in brief
     assert "Order 6, 7," in brief

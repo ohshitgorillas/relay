@@ -87,6 +87,28 @@ def parse_report(result_text: str | None) -> DesignReport | None:
     return DesignReport(False, approved, tuple(decisions), tuple(unfiled))
 
 
+SAID_LIMIT = 1500  # characters of an unparsed architect message quoted to the owner
+
+
+def said(result_text: str | None) -> str:
+    """The architect's final message for the owner: stripped, its last SAID_LIMIT characters
+    after "…" when longer, "(nothing)" when empty."""
+    text = (result_text or "").strip()
+    if not text:
+        return "(nothing)"
+    return text if len(text) <= SAID_LIMIT else "…" + text[-SAID_LIMIT:]
+
+
+def lead_branch(report: str | None) -> tuple[str, Path] | None:
+    """(branch, worktree) from the last `BRANCH <branch> <worktree path>` line of a lead's
+    report; None when there is none."""
+    for line in reversed((report or "").splitlines()):
+        parts = line.strip().split(" ", 2)
+        if len(parts) == 3 and parts[0] == "BRANCH" and parts[1] and parts[2].strip():
+            return parts[1], Path(parts[2].strip())
+    return None
+
+
 def decision_numbers(report: DesignReport) -> tuple[int, ...]:
     """The leading <n> of each decision line, in order."""
     return tuple(int(d.split("|", 1)[0].strip()) for d in report.decisions)
