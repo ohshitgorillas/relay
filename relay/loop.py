@@ -70,17 +70,19 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
             return ExitCode.BUDGET, "over budget", f"the {over} budget is spent"
 
         sections = parse_queue(queue)
+        _wake(sections, state, cwd)
         parked = {s.id for s in sections if state.section(s.id).status == "parked"}
-        blocked = blocked_by(sections, parked)
+        waiting_ids = {s.id for s in sections if state.section(s.id).status == "waiting"}
+        blocked = blocked_by(sections, parked | waiting_ids)
         runnable = [
             s
             for s in sections
             if s.open and state.section(s.id).status == "open" and s.id not in blocked
         ]
         if not runnable:
-            if not parked:
+            if not parked and not waiting_ids:
                 return ExitCode.QUEUE_EMPTY, "queue empty", "every section is done"
-            waiting = sorted(parked)
+            waiting = sorted(parked | waiting_ids)
             if waiting != last_waiting:
                 progress.waiting(waiting)
                 last_waiting = waiting
@@ -172,6 +174,8 @@ def _run_section(
         )
         if stop is not None:
             return stop
+    elif status.kind == "WAITING":
+        _wait(queue, cfg, state, sections, section, status.text)
     elif status.kind == "NEEDS-OWNER":
         _park(cfg, queue, state, sid, status.text)
     # RETIRED: nothing to record; the next pass runs a fresh lead on the same section.
@@ -179,6 +183,66 @@ def _run_section(
     if watch.budget_hit:
         return ExitCode.BUDGET, "over budget", "a lead was retired when the budget ran out"
     return None
+
+
+def _landed(blocker: str, sections: list[Section], state: State, cwd: Path) -> bool:
+    """A blocker in the queue has landed when done and its section worktree is not dirty; one
+    gone from the queue, when every section recut from it has landed (or none exists)."""
+    found = next((s for s in sections if s.id == blocker), None)
+    if found is None:
+        return all(_landed(s.id, sections, state, cwd) for s in sections if s.came_from == blocker)
+    if state.section(blocker).status != "done" and found.open:
+        return False
+    tree = git.section_worktree(cwd, blocker)
+    return tree is None or git.clean(tree) is not False
+
+
+def _wake(sections: list[Section], state: State, cwd: Path) -> None:
+    """Reopen each waiting section whose blocker has landed. No ping."""
+    for s in sections:
+        record = state.section(s.id)
+        blocker = record.waits_on
+        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd):
+            state.wake(s.id)
+            progress.woken(s.id, blocker)
+
+
+def _wait(
+    queue: Path, cfg: Config, state: State, sections: list[Section], section: Section, blocker: str
+) -> None:
+    """WAITING: hold the section on its blocker with no ping, or park it when that cannot work."""
+    sid = section.id
+    by_id = {s.id: s for s in sections}
+    known = blocker in by_id or any(s.came_from == blocker for s in sections)
+    reason = None
+    if not known:
+        reason = f"it waits on {blocker}, which is not in the queue"
+    elif blocker == sid:
+        reason = "it waits on itself"
+    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent)):
+        reason = f"it waits on {blocker}, which has already landed"
+    else:
+        seen: set[str] = set()
+        todo = [blocker]
+        while todo and reason is None:
+            cur = todo.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            if cur == sid:
+                reason = f"it waits on {blocker}, which waits on it"
+            elif cur in by_id:
+                todo.extend(by_id[cur].depends_on)
+                onward = state.section(cur).waits_on
+                if onward is not None:
+                    todo.append(onward)
+            else:  # recut out of the queue: it lands through the sections cut from it
+                todo.extend(s.id for s in sections if s.came_from == cur)
+    if reason is not None:
+        _park(cfg, queue, state, sid, f"Section {sid} cannot wait: {reason}.")
+        return
+    state.wait(sid, blocker)
+    progress.section_waiting(sid, blocker)
 
 
 def _section_cwd(cwd: Path, sid: str) -> Path:

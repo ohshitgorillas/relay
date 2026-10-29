@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 
@@ -3853,6 +3853,20 @@ def _stop_on_ping(cfg: Config, queue: Path) -> Config:
     return dataclasses.replace(cfg, ping_command=[sys.executable, "-I", "-S", "-c", touch, str(stop), "{message}"])
 
 
+def _record_and_stop_on_ping(cfg: Config, queue: Path, tmp_path: Path) -> Config:
+    """`cfg` whose every ping is recorded to `<tmp_path>/pings.jsonl`, as `cfg` records them, and
+    then touches the queue's stop file, so a park's own ping both ends the run with `STOP_FILE`
+    and stays readable through `_pings`."""
+    stop = State.open(queue, cfg).stop_file
+    record = tmp_path / "pings.jsonl"
+    script = (
+        "import json, pathlib, sys; f = open(sys.argv[1], 'a'); f.write(json.dumps(sys.argv[3:]) + chr(10)); "
+        "f.close(); pathlib.Path(sys.argv[2]).touch()"
+    )
+    command = [sys.executable, "-I", "-S", "-c", script, str(record), str(stop), "{message}"]
+    return dataclasses.replace(cfg, ping_command=command)
+
+
 # Rung 1: a recut as now, and its ledger line.
 
 
@@ -4290,3 +4304,288 @@ def test_the_third_failed_check_under_a_queue_naming_a_design_still_parks_with_n
     assert len(_runs(tmp_path, "lead")) == 3
     assert _runs(tmp_path, "design") == []
     assert _runs(tmp_path, "recut") == []
+
+
+# Auto-wake (relay-ladder-design.md, Order 8; `_wait`, `_wake`, `_landed`): `WAITING: <id>` holds
+# the section with no ping until queue section <id> lands. A blocker still in the queue has
+# landed when it is done and `git.clean` on its section worktree is not False (with no worktree,
+# done is enough); a blocker gone from the queue has landed when every section whose `from:`
+# names it has landed. An unknown, self, landed or cyclic blocker parks the section instead.
+
+WOKEN = "section s1: woken, s2 landed"
+
+
+def _waiting_lead(tmp_path: Path, session: str, blocker: str) -> dict[str, object]:
+    """A lead step in session `session` ending `WAITING: <blocker>`."""
+    return _step(str(_status_lead(tmp_path, session, f"WAITING: {blocker}")))
+
+
+def _repo_queue(repo: GitRepo) -> Path:
+    """Sections s1 and s2, neither depending on the other, in the repository's main checkout."""
+    return _queue_of(repo.root / "queue.md", "s1", "s2")
+
+
+def _stop_lead(queue: Path, cfg: Config) -> dict[str, object]:
+    """A lead step past the ones a test scripts: it touches the stop file and ends with no status
+    line, so a loop that runs one lead more than the behavior allows stops with `STOP_FILE` and
+    the test's count of lead runs fails, instead of the plan's last step running forever."""
+    stop = State.open(queue, cfg).stop_file
+    touch = [sys.executable, "-I", "-S", "-c", "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()", str(stop)]
+    return _step(NO_STATUS_LEAD, then=touch)
+
+
+@pytest.fixture
+def stop_after() -> Iterator[Callable[[Path, Config], None]]:
+    """Arm a watchdog that touches the queue's stop file 15 seconds on, so a loop left holding or
+    waiting where the behavior says it wakes or stops ends with `STOP_FILE` and the test's own
+    asserts fail, instead of the run never returning; every watchdog is cancelled at teardown."""
+    timers: list[threading.Timer] = []
+
+    def arm(queue: Path, cfg: Config) -> None:
+        timer = threading.Timer(15.0, State.open(queue, cfg).stop_file.touch)
+        timer.daemon = True
+        timer.start()
+        timers.append(timer)
+
+    yield arm
+    for timer in timers:
+        timer.cancel()
+
+
+def test_waiting_holds_the_section_on_its_blocker_with_no_ping_while_the_loop_goes_on(
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: WAITING parks the section, pings the owner, counts a failure, or leaves it
+    # open so its lead runs again before its blocker lands; or no "waiting on" line is written.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    scenario(_lines(DONE_LEAD))
+    cfg = _sequenced(cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(NEEDS_OWNER_LEAD)])
+    state = State.open(queue, cfg)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: State.open(queue, cfg).section("s2").status == "parked")
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        waiting = State.open(queue, cfg).section("s1")
+        assert waiting.status == "waiting"
+        assert waiting.waits_on == "s2"
+        assert waiting.failures == 0
+        runs = _runs(tmp_path, "lead")
+        assert len(runs) == 2
+        assert _body(queue, "s2") in str(runs[1]["prompt"])
+        pings = _pings(tmp_path)
+        assert len(pings) == 1
+        assert QUESTION in pings[0][0]
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    assert loop.finish() == ExitCode.STOP_FILE
+    assert "section s1: waiting on s2" in _texts(capsys.readouterr().out)
+
+
+def test_a_waiting_section_wakes_once_its_blocker_is_done_with_a_clean_worktree_and_sends_no_ping(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: a blocker done in state with a clean `lead/<sid>` worktree does not wake its
+    # waiter, the wake pings the owner, or no "woken" line is written.
+    queue = _repo_queue(git_repo)
+    git_repo.worktree("s2")
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3
+    assert _body(queue, "s2") in str(runs[1]["prompt"])
+    assert _body(queue, "s1") in str(runs[2]["prompt"])
+    state = State.open(queue, cfg)
+    assert state.section("s1").status == "done"
+    assert state.section("s1").waits_on is None
+    # The one ping is the stop's own: every stop sends one stopped ping.
+    assert len(_pings(tmp_path)) == 1
+    assert WOKEN in _texts(capsys.readouterr().out)
+
+
+def test_a_waiting_section_stays_held_while_its_done_blockers_worktree_is_dirty_and_wakes_once_it_is_clean(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: `_landed` takes a done blocker as landed though `git.clean` on its section
+    # worktree is False, or never tests it again, so the waiter wakes early or never.
+    queue = _repo_queue(git_repo)
+    stray = git_repo.worktree("s2") / "stray.txt"
+    stray.write_text("uncommitted\n")
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    state = State.open(queue, cfg)
+    loop = _Background(queue, cfg)
+    try:
+        _until(lambda: State.open(queue, cfg).section("s2").status == "done")
+        time.sleep(SETTLE)
+        assert loop.still_running()
+        assert State.open(queue, cfg).section("s1").status == "waiting"
+        assert len(_runs(tmp_path, "lead")) == 2
+        stray.unlink()
+        assert loop.finish() == ExitCode.QUEUE_EMPTY
+    finally:
+        state.stop_file.touch()
+        loop.thread.join(15)
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3
+    assert _body(queue, "s1") in str(runs[2]["prompt"])
+    assert State.open(queue, cfg).section("s1").status == "done"
+
+
+def test_a_waiting_section_wakes_only_after_every_recut_sibling_of_its_blocker_lands(
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+    stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: a blocker the divvyer recut away counts as landed (or unknown) at once, or
+    # once its first `from:` sibling is done, so the waiter runs before s2b; or it never wakes.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    siblings = tmp_path / "siblings.md"
+    siblings.write_text(
+        "section s1 | lead | steps: 1\n  s1 work\n"
+        "section s2a | lead | steps: 1 | from: s2\n  s2a work\n"
+        "section s2b | lead | steps: 1 | from: s2\n  s2b work\n"
+    )
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(RECUT_LEAD)] + [_step(DONE_LEAD)] * 3
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(siblings, queue))])
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(_runs(tmp_path, "recut")) == 1
+    runs = [str(r["prompt"]) for r in _runs(tmp_path, "lead")]
+    assert len(runs) == 5
+    assert "s1 work" in runs[0]
+    assert "s2 work" in runs[1]
+    assert "s2a work" in runs[2]
+    assert "s2b work" in runs[3]
+    assert "s1 work" in runs[4]
+    state = State.open(queue, cfg)
+    assert state.section("s1").status == "done"
+    assert state.section("s1").waits_on is None
+    assert len(_pings(tmp_path)) == 1
+    assert WOKEN in _texts(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("blocker", ["unknown", "self", "landed", "depends-on-the-section"])
+def test_waiting_on_an_unknown_self_landed_or_dependent_blocker_parks_the_section_with_a_ping(
+    blocker: str,
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: `_wait` holds the section as waiting on a blocker that is not in the queue,
+    # is the section itself, has already landed, or depends on the section, instead of parking
+    # it for the owner with a ping and a reason.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    waits_for = {"unknown": "s9", "self": "s1", "landed": "s2", "depends-on-the-section": "s2"}[blocker]
+    if blocker == "landed":
+        State.open(queue, cfg).mark_done("s2")
+    if blocker == "depends-on-the-section":
+        _with_depends(queue, {"s2": "s1"})
+    scenario(_lines(DONE_LEAD))
+    cfg = _sequenced(cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", waits_for), _stop_lead(queue, cfg)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question
+    assert section.waits_on is None
+    assert section.failures == 0
+    # The last ping is the stop's own; the park's ping comes before it and carries its reason.
+    parked = [p for p in _pings(tmp_path)[:-1] if section.question in p[0]]
+    assert len(parked) == 1
+
+
+def test_waiting_on_a_section_that_waits_on_it_parks_the_second_waiter_with_a_ping(
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: `_wait` misses a cycle through `waits_on`, so s2 waits on s1 while s1 waits
+    # on s2 and neither ever wakes.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "sess-wait-1", "s2"), _waiting_lead(tmp_path, "sess-wait-2", "s1")]
+    cfg = _sequenced(cfg, tmp_path, leads + [_stop_lead(queue, cfg)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "lead")) == 2
+    state = State.open(queue, cfg)
+    assert state.section("s1").status == "waiting"
+    assert state.section("s1").waits_on == "s2"
+    cycled = state.section("s2")
+    assert cycled.status == "parked"
+    assert cycled.question
+    assert cycled.waits_on is None
+    assert cycled.failures == 0
+    # The last ping is the stop's own; s2's park ping comes before it and carries its reason.
+    parked = [p for p in _pings(tmp_path)[:-1] if cycled.question in p[0]]
+    assert len(parked) == 1
+
+
+@pytest.mark.parametrize("through", ["depends_on", "waits_on"])
+def test_waiting_on_a_blocker_recut_out_of_the_queue_whose_recut_section_needs_the_waiter_parks_it_with_a_ping(
+    through: str,
+    cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: `_wait` checks only the blocker's own `waits_on` and `depends_on`, so s1 is
+    # set waiting on s2, which the divvyer recut into s2a (`from: s2`), though s2a depends on s1
+    # or waits on s1: s2 then lands only after s1 does, and s1 waits forever with no ping.
+    queue = _queue_of(tmp_path / "queue.md", "s2", "s1")
+    recut = tmp_path / "recut.md"
+    # The queue runs its first open section not blocked: s1 first where s2a depends on it, and
+    # s2a first where it is to wait on s1.
+    s1 = "section s1 | lead | steps: 1\n  s1 work\n"
+    if through == "depends_on":
+        recut.write_text(s1 + "section s2a | lead | steps: 1 | from: s2 | depends: s1\n  s2a work\n")
+    else:
+        recut.write_text("section s2a | lead | steps: 1 | from: s2\n  s2a work\n" + s1)
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD)]
+    if through == "waits_on":
+        leads.append(_waiting_lead(tmp_path, "sess-wait-2a", "s1"))
+    leads += [_waiting_lead(tmp_path, "sess-wait-1", "s2"), _stop_lead(queue, cfg)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert len(_runs(tmp_path, "recut")) == 1
+    runs = [str(r["prompt"]) for r in _runs(tmp_path, "lead")]
+    assert len(runs) == len(leads) - 1
+    assert "s1 work" in runs[-1]
+    state = State.open(queue, cfg)
+    cycled = state.section("s1")
+    assert cycled.status == "parked"
+    assert cycled.question
+    assert cycled.waits_on is None
+    assert cycled.failures == 0
+    # The last ping is the stop's own; s1's park ping comes before it and carries its reason.
+    parked = [p for p in _pings(tmp_path)[:-1] if cycled.question in p[0]]
+    assert len(parked) == 1
