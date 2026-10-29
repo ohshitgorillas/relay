@@ -152,6 +152,10 @@ class State:
     def check_log(self, run_log: Path) -> Path:
         return run_log.with_suffix(".check")
 
+    def rejected_cut(self, run_log: Path) -> Path:
+        """Where a recut's rejected cut is kept: beside the recut's run log."""
+        return run_log.with_suffix(".rejected")
+
     def set_last_log(self, sid: str, log: Path) -> None:
         def change(s: SectionState, _r: dict) -> None:
             s.last_log = str(log)

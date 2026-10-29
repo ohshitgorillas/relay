@@ -654,10 +654,11 @@ def _design_outcome(
     else:
         state.set_design_open(sid, None)
         state.mark_design_changed(sid)
-        if _recut(
+        failed = _recut(
             queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
-        ):
-            _park(cfg, queue, state, sid, ladder.failed_text(sid, design, "the recut made no usable change"))
+        )
+        if failed:
+            _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
         return
     _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
 
@@ -675,8 +676,8 @@ def _recut(
     lead_log: Path,
     design: Path | None = None,
     rung: Literal[1, 2] = 1,
-) -> bool:
-    """Run a transactional recut; True when failed, with failure policy owned by the caller."""
+) -> str | None:
+    """Run a transactional recut; why it failed, else None, with failure policy owned by the caller."""
     brief = recut_brief(queue, section, reason, lead_log, design)
     original_queue = queue.read_bytes()
     original_mode = stat.S_IMODE(queue.stat().st_mode)
@@ -685,6 +686,8 @@ def _recut(
     changed = False
     after = before
     known = {s.id for s in before}
+    nested: list[str] = []
+    kept: Path | None = None
     try:
         result, _ = _run(
             cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief,
@@ -698,8 +701,12 @@ def _recut(
                 failed = True
             else:
                 changed = after != before
-                nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
-                failed = not changed or nested
+                nested = sorted(s.id for s in after if s.id not in known and s.id.startswith(f"{section.id}."))
+                if nested:
+                    # A rejected recut's sections never run: keep the cut beside the run log.
+                    kept = state.rejected_cut(result.log)
+                    atomic_write(kept, queue.read_bytes())
+                failed = not changed or bool(nested)
     except BaseException:
         atomic_write(queue, original_queue, mode=original_mode)
         raise
@@ -707,9 +714,13 @@ def _recut(
         # A failed restoration must propagate without attempting it again.
         atomic_write(queue, original_queue, mode=original_mode)
         changed = False
+    if nested:
+        why = f"Relay rejects nested ids ({', '.join(nested)})"
+        progress.recut_finished(section.id, result, False, why)
+        return f"{why}; the rejected cut is kept in {kept}"
     progress.recut_finished(section.id, result, changed)
     if failed:
-        return True
+        return "the recut made no usable change"
     if section.id not in {s.id for s in after}:
         state.drop_map(section.id)
     for made in after:
@@ -717,4 +728,4 @@ def _recut(
             state.mark_from_recut(made.id)
             if design is not None:
                 state.mark_design_changed(made.id)
-    return False
+    return None

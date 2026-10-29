@@ -3530,6 +3530,123 @@ def test_a_recut_that_adds_an_id_nested_under_the_section_counts_as_a_failure_of
     assert len(_runs(tmp_path, "recut")) == 1
     assert State.open(queue, cfg).section("s1").failures == 1
     assert "section s1: failed (1 of 2)" in _texts(capsys.readouterr().out)
+    # The rejected cut is put back: the second lead runs on s1, and no nested section exists.
+    assert [s.id for s in parse_queue(queue)] == ["s1", "s2"]
+    assert "Section: s1\n" in str(_runs(tmp_path, "lead")[1]["prompt"])
+
+
+# Nested recut behavior 1: A recut that replaces a section with ids nested under it (`s1` cut into
+# `s1.1`, `s1.2`) fails the recut, and a rejected recut's sections never run: the queue is put
+# back to its text from before the recut, and the next lead runs on the parent section, never on
+# a nested one; this holds for a ladder recut and for the recut after a lead's design change.
+# Nested recut behavior 2: When the recut after a design change is rejected for nested ids, the
+# parent section stays in the queue and is parked with a question that names the nested ids and
+# says Relay rejects nested ids, never "the recut made no usable change"; the rejected cut is kept
+# in a file beside the recut's run log, and the question gives that file's path.
+# Both run on the ladder queue (see "The escalation ladder" below for its helpers).
+
+NO_USABLE_CHANGE = "the recut made no usable change"
+
+
+def _nested_cut(queue: Path, out: Path) -> Path:
+    """`queue`'s text with `s1` cut into the nested ids `s1.1` and `s1.2`: `s1`'s header and every
+    `depends:` on it renamed to `s1.1`, and a section `s1.2` appended."""
+    _renamed(queue, "s1", "s1.1", out)
+    out.write_text(out.read_text() + "section s1.2 | lead | steps: 2\n  s1.2 work\n")
+    return out
+
+
+def _on_parent_only(prompt: str) -> bool:
+    """The lead prompt names section `s1` itself, and no section nested under it."""
+    return re.search(r"Section: s1(?![.\w])", prompt) is not None and "Section: s1." not in prompt
+
+
+def _design_change_leads(tmp_path: Path) -> list[dict[str, object]]:
+    """A lead on s1 ending `DESIGN: <problem>`, then a lead with no status line."""
+    return [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+
+
+def _answer_and_rerun(queue: Path, cfg: Config) -> None:
+    """Clear the stop file the park's ping touched, answer the parked s1 and run the queue again."""
+    State.open(queue, cfg).stop_file.unlink(missing_ok=True)
+    State.open(queue, cfg).set_answer("s1", "Go on.")
+    _Background(queue, cfg).finish()
+
+
+@pytest.mark.parametrize("how", ["ladder-recut", "design-change-recut"])
+def test_a_recut_into_nested_ids_is_put_back_and_the_next_lead_runs_on_the_parent_section(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: `_recut` keeps a cut that adds `<sid>.<n>` ids, or fails it without writing the
+    # queue's text from before the recut back, so the next lead runs on `s1.1` or `s1.2`; for the
+    # ladder recut or for the recut after a design change.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    before = queue.read_text()
+    nested = _nested_cut(queue, tmp_path / "nested.md")
+    scenario(_lines(DONE_LEAD))
+    recuts = [_step(DIVVYER_RUN, write=(nested, queue))]
+    if how == "ladder-recut":
+        cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(NO_STATUS_LEAD)], recuts=recuts)
+        cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+        cfg = _stop_on_ping(cfg, queue)
+        run(queue, cfg)
+    else:
+        cfg = _sequenced(cfg, tmp_path, _design_change_leads(tmp_path), recuts=recuts)
+        cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+        cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+        run(queue, cfg)
+        assert queue.read_text() == before
+        _answer_and_rerun(queue, cfg)
+    assert len(_runs(tmp_path, "recut")) == 1
+    assert queue.read_text() == before
+    assert [s.id for s in parse_queue(queue)] == ["s1", "s2", "s3"]
+    leads = [str(r["prompt"]) for r in _runs(tmp_path, "lead")]
+    assert len(leads) >= 2
+    assert all("Section: s1." not in prompt for prompt in leads)
+    assert _on_parent_only(leads[1])
+
+
+def test_a_design_change_recut_into_nested_ids_parks_the_parent_with_a_question_giving_the_kept_cut(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a design-change recut rejected for nested ids leaves `s1` open or drops it from
+    # the queue, parks it with "the recut made no usable change" or a question that names neither
+    # nested id nor says Relay rejects nested ids, or keeps no copy of the rejected cut beside the
+    # recut's run log at a path the question gives, parks it with a question that does not open
+    # "the design change for s1 in <design> did not land: <what>", or records a failure
+    # (relay-ladder-design.md, `_design_outcome` and `failed_text`).
+    queue = _ladder(queue_file, cfg, tmp_path)
+    nested = _nested_cut(queue, tmp_path / "nested.md")
+    cut = nested.read_text()
+    scenario(_lines(DONE_LEAD))
+    recuts = [_step(DIVVYER_RUN, write=(nested, queue))]
+    cfg = _sequenced(cfg, tmp_path, _design_change_leads(tmp_path), recuts=recuts)
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    run(queue, cfg)
+    assert [s.id for s in parse_queue(queue)] == ["s1", "s2", "s3"]
+    state = State.open(queue, cfg)
+    parked = state.section("s1")
+    assert parked.status == "parked"
+    question = parked.question
+    assert question is not None
+    assert re.match(_failed_design("s1"), question), question
+    assert parked.failures == 0
+    assert "s1.1" in question and "s1.2" in question
+    assert "rejects nested ids" in question.lower()
+    assert NO_USABLE_CHANGE not in question
+    run_dir = str(state.run_dir).rstrip("/")
+    recut_logs = [p for p in state.run_dir.glob("*.jsonl") if "sess-recut-1" in p.read_text()]
+    assert len(recut_logs) == 1, recut_logs
+    named = [m.rstrip(".,;:)'\"") for m in re.findall(re.escape(run_dir) + r"/\S+", question)]
+    kept = [Path(p) for p in named if Path(p) != recut_logs[0] and Path(p).is_file()]
+    assert len(kept) == 1, named
+    assert kept[0].parent == recut_logs[0].parent
+    assert kept[0].read_text() == cut
 
 
 # Research behaviors (relay-research design, Order 7): `_research` maps a section's code before

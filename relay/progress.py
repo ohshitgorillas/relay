@@ -94,11 +94,15 @@ def recut_started(sid: str, reason: str) -> None:
     _write(f"recut {sid}: started: {_cut(reason)}")
 
 
-def recut_finished(sid: str, result: RunResult, changed: bool) -> None:
+def recut_finished(
+    sid: str, result: RunResult, changed: bool, rejected: str | None = None
+) -> None:
     if result.killed:
         outcome = "killed"
     elif result.exit_code != 0:
         outcome = f"exit {result.exit_code}"
+    elif rejected is not None:
+        outcome = f"with the cut rejected: {_cut(rejected)}"
     elif not changed:
         outcome = "with the queue unchanged"
     else:
