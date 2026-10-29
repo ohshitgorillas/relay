@@ -48,12 +48,12 @@ class Config:
     research_command: list[str] = field(default_factory=list)  # empty asks for the default
     map_max_lines: int = 150
     map_max_chars: int = 12_000
-    design_command: list[str] | None = None  # None asks for the default, set in __post_init__
+    design_command: list[str] = field(default_factory=list)  # empty asks for the default
     section_dollar_cap: float | None = None  # positive; None is no cap
     design_approval: str = _STANDING_APPROVAL  # quoted on the architect's approve: line
 
     def __post_init__(self) -> None:
-        if self.design_command is None:
+        if not self.design_command:
             object.__setattr__(self, "design_command", [*self.lead_command, "--agent", "architect"])
         if self.idle_ceiling == 0:
             object.__setattr__(
@@ -213,7 +213,7 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         map_max_lines=map_max_lines,
         map_max_chars=map_max_chars,
         design_command=(
-            _command(merged, "design_command", []) if "design_command" in merged else None
+            _command(merged, "design_command", []) if "design_command" in merged else []
         ),
         section_dollar_cap=_number(merged, "section_dollar_cap", None),
         design_approval=approval,

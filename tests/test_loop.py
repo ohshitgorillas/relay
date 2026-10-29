@@ -1174,8 +1174,11 @@ def test_two_recuts_that_leave_the_queue_unchanged_stop_with_failed_twice(
     assert State.open(queue, cfg).section(first).failures == 2
 
 
-# A section a recut made that itself ends RECUT is parked for the owner with the lead's reason,
-# and gets no second recut.
+# A section a recut made that itself ends RECUT climbs to rung 2, a design change
+# (relay-ladder-design.md:58). With no design named by the queue, rung 2 is rung 3, parked for the
+# owner with "no design to amend: the queue names none" (relay-ladder-design.md:61, 243), and it
+# gets no second recut.
+NO_DESIGN = "no design to amend: the queue names none"
 
 
 def _queue_of(path: Path, *ids: str) -> Path:
@@ -1183,10 +1186,11 @@ def _queue_of(path: Path, *ids: str) -> Path:
     return path
 
 
-def test_a_section_from_a_recut_that_ends_recut_is_parked_with_the_reason_and_not_recut_again(
+def test_a_section_from_a_recut_that_ends_recut_with_no_design_is_parked_as_no_design_to_amend_and_not_recut_again(
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
-    # Breaks when: a recut section's RECUT runs the divvyer again, parks without the reason, or counts a failure.
+    # Breaks when: a recut section's RECUT under a queue naming no design runs the divvyer again,
+    # parks without "no design to amend: the queue names none", or counts a failure.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`, `s1b`.
     recut = _queue_of(tmp_path / "recut.md", "s1a", "s1b", "s2")
@@ -1198,16 +1202,17 @@ def test_a_section_from_a_recut_that_ends_recut_is_parked_with_the_reason_and_no
     state = State.open(queue, cfg)
     parked = state.section("s1a")
     assert parked.status == "parked"
-    assert parked.question is not None and RECUT_REASON in parked.question
+    assert parked.question is not None and NO_DESIGN in parked.question
     assert parked.failures == 0
     assert state.section("s1b").from_recut
     assert not state.section("s2").from_recut
 
 
-def test_a_section_from_a_recut_that_ends_recut_pings_the_owner_with_the_reason_once_parked(
+def test_a_section_from_a_recut_that_ends_recut_with_no_design_pings_the_owner_with_no_design_to_amend_once_parked(
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
-    # Breaks when: the parked recut section sends no needs-owner ping, or pings before it is parked.
+    # Breaks when: the recut section parked for having no design to amend sends no needs-owner ping,
+    # pings without "no design to amend: the queue names none", or pings before it is parked.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`.
     recut = _queue_of(tmp_path / "recut.md", "s1a", "s2")
@@ -1218,7 +1223,7 @@ def test_a_section_from_a_recut_that_ends_recut_pings_the_owner_with_the_reason_
     leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
     run(queue, cfg)
-    asked = [p for p in _pings(tmp_path) if RECUT_REASON in p[0]]
+    asked = [p for p in _pings(tmp_path) if NO_DESIGN in p[0]]
     assert len(asked) == 1
     message, status = asked[0]
     assert "s1a" in message and "needs the owner" in message
@@ -1248,7 +1253,8 @@ def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_it
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: a section the recut rewrote in place under its own id is not taken as the recut's,
-    # so its next RECUT runs the divvyer again instead of going to the owner.
+    # so its next RECUT, under a queue naming no design, runs the divvyer again instead of parking
+    # with "no design to amend: the queue names none" (relay-ladder-design.md:58, 61).
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     widened = tmp_path / "widened.md"
     widened.write_text(
@@ -1264,7 +1270,7 @@ def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_it
     kept = state.section("s1")
     assert kept.from_recut
     assert kept.status == "parked"
-    assert kept.question is not None and RECUT_REASON in kept.question
+    assert kept.question is not None and NO_DESIGN in kept.question
     assert kept.failures == 0
     assert "s1 work, paths widened" in str(_runs(tmp_path, "lead")[1]["prompt"])
     assert not state.section("s2").from_recut
@@ -3764,3 +3770,207 @@ def test_a_recut_that_keeps_the_section_id_keeps_its_map_for_the_next_pass(
     assert MAP_BODY in str(leads[1]["prompt"])
     texts = _texts(capsys.readouterr().out)
     assert f"research s1: map at {commit} still current, reused" in texts, texts
+
+
+# The escalation ladder (relay-ladder-design.md, Order 8): which move a RECUT or DESIGN takes,
+# run on the ladder queue, whose head line names `docs/superpowers/specs/ladder-design.md`.
+
+LADDER = "ladder-queue.md"
+LADDER_DESIGN = "ladder-design.md"
+ARCHITECT_APPROVED = "stream-architect-approved.jsonl"
+
+# A lead's reason in the problem / guess form (relay-ladder-design.md, The architect's brief).
+PROBLEM = "two() reads one() before one.py lands"
+GUESS_FIX = "split Order 3 so one.py lands first"
+
+
+def _ladder(queue_file: Callable[[str], Path], cfg: Config, tmp_path: Path) -> Path:
+    """The ladder queue under `tmp_path`, its design where its head line names it, and every
+    section but `s1` done in state; return the queue."""
+    queue = queue_file(LADDER)
+    design = tmp_path / "docs" / "superpowers" / "specs" / LADDER_DESIGN
+    design.parent.mkdir(parents=True, exist_ok=True)
+    design.write_bytes((FIXTURES / LADDER_DESIGN).read_bytes())
+    state = State.open(queue, cfg)
+    for sid in ("s2", "s3"):
+        state.mark_done(sid)
+    return queue
+
+
+def _renamed(source: Path, old: str, new: str, out: Path) -> Path:
+    """`source`'s text with section `old`'s header, and every `depends:` on it, renamed to `new`,
+    written to `out`: the divvyer's recut of `old` into the flat sibling `new`
+    (relay-check-design.md:297)."""
+    text = source.read_text().replace(f"section {old} |", f"section {new} |")
+    out.write_text(text.replace(f"| depends: {old} |", f"| depends: {new} |"))
+    return out
+
+
+def _status_lead(tmp_path: Path, session: str, status: str) -> Path:
+    """A scripted lead in session `session` whose result ends with the status line `status`."""
+    streams = tmp_path / "streams"
+    streams.mkdir(exist_ok=True)
+    usage = {"input_tokens": 6, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 1000, "output_tokens": 30}
+    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
+    body = {"id": f"msg_{session}", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Stuck."}], "usage": usage}
+    message = {"type": "assistant", "message": body, "session_id": session}
+    result = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 800,
+        "num_turns": 1,
+        "result": f"Stuck.\n{status}",
+        "session_id": session,
+        "total_cost_usd": 0.01,
+        "usage": usage,
+    }
+    path = streams / f"{session}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in (init, message, result)))
+    return path
+
+
+def _with_architect(cfg: Config, tmp_path: Path, steps: list[dict[str, object]]) -> Config:
+    """`cfg` with each architect run taking the next step of its plan, recorded as role "design".
+    The fake comes from `design_command`, which `_sequenced` leaves as `fake_cfg` set it: after
+    `_sequenced`, `lead_command[0]` is the plan's interpreter, not the fake."""
+    return dataclasses.replace(cfg, design_command=_plan(tmp_path, cfg.design_command[0], "design", steps, False))
+
+
+def _entries(queue: Path, cfg: Config, kind: str) -> list[dict[str, Any]]:
+    """The ledger's lines of kind `kind`, in order."""
+    path = State.open(queue, cfg).stop_file.parent / "ledger.jsonl"
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    return [e for e in lines if e.get("kind") == kind]
+
+
+def _stop_on_ping(cfg: Config, queue: Path) -> Config:
+    """`cfg` whose every ping touches the queue's stop file, so a section parked for the owner ends
+    the run with `STOP_FILE` instead of leaving the loop waiting (relay-ladder-design.md: rung 2
+    sends no ping)."""
+    stop = State.open(queue, cfg).stop_file
+    touch = "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()"
+    return dataclasses.replace(cfg, ping_command=[sys.executable, "-I", "-S", "-c", touch, str(stop), "{message}"])
+
+
+# Rung 1: a recut as now, and its ledger line.
+
+
+def test_rung_1_a_recut_on_a_section_no_recut_made_runs_the_divvyer_not_the_architect_and_its_ledger_line_carries_rung_1(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the recut's ledger line carries no rung, or rung 2; or a first RECUT on a
+    # section whose queue names a design goes to the architect instead of the divvyer.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    split = _renamed(queue, "s1", "s1a", tmp_path / "split.md")
+    scenario(_lines(DONE_LEAD))
+    leads = [_step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(split, queue))])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    assert _runs(tmp_path, "design") == []
+    recuts = _runs(tmp_path, "recut")
+    assert len(recuts) == 1
+    assert RECUT_REASON in str(recuts[0]["prompt"])
+    assert "was amended for this problem" not in str(recuts[0]["prompt"])
+    assert "Section: s1a" in str(_runs(tmp_path, "lead")[1]["prompt"])
+    state = State.open(queue, cfg)
+    assert state.section("s1").failures == 0
+    assert state.section("s1a").from_recut
+    lines = _entries(queue, cfg, "recut")
+    assert len(lines) == 1
+    assert lines[0]["section"] == "s1"
+    assert lines[0].get("rung") == 1
+    # relay-ladder-design.md, Why: a ledger line carries a rung only when one is given.
+    assert all("rung" not in e for e in _entries(queue, cfg, "lead"))
+
+
+# Rung 2 from RECUT on a recut section and from DESIGN: the architect's brief holds no guess,
+# the divvyer is briefed with the design, the new sections run in the same `relay go`, and the
+# `design` and `recut` ledger lines carry rung 2.
+
+
+@pytest.mark.parametrize("how", ["recut-on-a-recut-section", "design"])
+def test_rung_2_runs_the_architect_without_the_guess_then_the_divvyer_with_the_design_and_the_new_sections_in_the_same_go(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the guess after ` | guess: ` reaches the architect's or the divvyer's brief;
+    # the rung-2 recut is briefed without the amended design; the loop stops or parks after
+    # the design change instead of running the new section; or the design or recut line
+    # carries no rung 2.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    scenario(_lines(DONE_LEAD))
+    reason = f"{PROBLEM} | guess: {GUESS_FIX}"
+    if how == "design":
+        asker = "s1"
+        asking = "sess-design"
+        leads = [_step(str(_status_lead(tmp_path, asking, f"DESIGN: {reason}"))), _step(NO_STATUS_LEAD)]
+        after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
+        recuts = [_step(DIVVYER_RUN, write=(after, queue))]
+        rungs = [2]
+    else:
+        asker = "s1a"
+        asking = "sess-recut-again"
+        first = _renamed(queue, "s1", "s1a", tmp_path / "split.md")
+        after = _renamed(first, "s1a", "s1b", tmp_path / "amended.md")
+        leads = [
+            _step(RECUT_LEAD),
+            _step(str(_status_lead(tmp_path, asking, f"RECUT: {reason}"))),
+            _step(NO_STATUS_LEAD),
+        ]
+        recuts = [_step(DIVVYER_RUN, write=(first, queue)), _step(DIVVYER_RUN, write=(after, queue))]
+        rungs = [1, 2]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+
+    designs = _runs(tmp_path, "design")
+    assert len(designs) == 1
+    brief = str(designs[0]["prompt"])
+    head = brief.splitlines()[0]
+    assert head.startswith("rulings ")
+    assert head.endswith(f"docs/superpowers/specs/{LADDER_DESIGN}")
+    assert PROBLEM in brief
+    assert asker in brief
+    assert GUESS_FIX not in brief
+    assert "guess" not in brief
+    assert f"approve: {cfg.design_approval}" in brief
+    # relay-ladder-design.md, `_design_change` and `design_brief`: the brief names the asking
+    # section's own `steps:` (s1's, which its recut s1a keeps) and, as evidence, the asking
+    # lead's run log, plus the section's last check log only when one exists (none ran here).
+    assert "under this design's Order 1, 2, cannot go on" in brief
+    state = State.open(queue, cfg)
+    named = sorted(set(re.findall(re.escape(str(state.run_dir).rstrip("/")) + r"/\d+\.jsonl", brief)))
+    assert len(named) == 1, named
+    lead_log = Path(named[0])
+    assert lead_log.exists()
+    assert asking in lead_log.read_text()
+    assert not state.check_log(lead_log).exists()
+    assert f"Evidence: {lead_log}." in brief
+
+    recut_runs = _runs(tmp_path, "recut")
+    assert len(recut_runs) == len(rungs)
+    divvyer = str(recut_runs[-1]["prompt"])
+    assert "was amended for this problem" in divvyer
+    assert f"docs/superpowers/specs/{LADDER_DESIGN}" in divvyer
+    assert PROBLEM in divvyer
+    assert GUESS_FIX not in divvyer
+
+    assert "Section: s1b" in str(_runs(tmp_path, "lead")[len(rungs)]["prompt"])
+    state = State.open(queue, cfg)
+    assert state.section(asker).status != "parked"
+    assert state.section("s1b").last_session == "sess-lead-2"
+
+    design_lines = _entries(queue, cfg, "design")
+    assert len(design_lines) == 1
+    assert design_lines[0]["section"] == asker
+    assert design_lines[0].get("rung") == 2
+    recut_lines = _entries(queue, cfg, "recut")
+    assert [e.get("rung") for e in recut_lines] == rungs
+    assert recut_lines[-1]["section"] == asker

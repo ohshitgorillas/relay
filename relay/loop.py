@@ -5,15 +5,22 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Literal, cast
 
-from relay import git, ping, progress, research
+from relay import git, ladder, ping, progress, research
 from relay.check import owner_text, run_checks
 from relay.config import Config
 from relay.errors import ExitCode, ResearchError
 from relay.ledger import Kind, Ledger, Spend
-from relay.prompts import ask_brief, check_feedback, lead_prompt, recut_brief, research_brief
-from relay.queue import Section, blocked_by, parse_queue
+from relay.prompts import (
+    ask_brief,
+    check_feedback,
+    design_brief,
+    lead_prompt,
+    recut_brief,
+    research_brief,
+)
+from relay.queue import Section, blocked_by, parse_queue, queue_design
 from relay.runner import RunResult, run_agent
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT, State
 from relay.status import parse_status
@@ -148,13 +155,12 @@ def _run_section(
             return _failed_twice(sid)
     elif status.kind == "DONE":
         _verify(cfg, queue, state, ledger, cwd, section, state.check_log(result.log))
-    elif status.kind == "RECUT" and current.from_recut:
-        # A section a recut made gets no second recut: the owner decides what happens to it.
-        question = f"a section from a recut asked to recut again: {status.text}"
-        _park(cfg, queue, state, sid, question)
-    elif status.kind == "RECUT":
-        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, status.text, result):
-            return _failed_twice(sid)
+    elif status.kind in ("RECUT", "DESIGN"):
+        stop = _climb(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, status.kind, status.text, result.log
+        )
+        if stop is not None:
+            return stop
     elif status.kind == "NEEDS-OWNER":
         _park(cfg, queue, state, sid, status.text)
     # RETIRED: nothing to record; the next pass runs a fresh lead on the same section.
@@ -181,6 +187,7 @@ def _run(
     cwd: Path,
     flag: Path,
     map_commit: str | None = None,
+    rung: int | None = None,
 ) -> tuple[RunResult, _Watch]:
     """The one agent run: watch it, run it, ledger it. Returns the result and its watch."""
     watch = _watcher(cfg, ledger, since, kind, sid, cwd)
@@ -192,6 +199,7 @@ def _run(
         result.stream.spend,
         map_commit,
         result.stream.activity.agents,
+        rung,
     )
     return result, watch
 
@@ -372,6 +380,118 @@ def _failed_twice(sid: str) -> _Stop:
     return ExitCode.FAILED_TWICE, "failed twice", f"section {sid} failed twice"
 
 
+def _climb(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    kind: Literal["RECUT", "DESIGN"],
+    text: str,
+    lead_log: Path,
+) -> _Stop | None:
+    """The ladder's move for a RECUT or DESIGN: rung 1 a recut, rung 2 a design change, rung 3 a park."""
+    sid = section.id
+    design = ladder.design_of(queue_design(queue), cwd)
+    step = ladder.climb(kind, state.section(sid), design, sid)
+    problem = ladder.split_reason(text)[0]
+    if step.rung == 1:
+        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log):
+            second, count = _fail(state, sid)
+            progress.failed(sid, count)
+            if second:
+                return _failed_twice(sid)
+    elif step.rung == 3:
+        _park(cfg, queue, state, sid, step.why)
+    else:
+        # ladder.climb gives rung 2 only with a design in hand.
+        _design_change(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log
+        )
+    return None
+
+
+def _design_change(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    problem: str,
+    lead_log: Path,
+) -> None:
+    """Run the architect on `design` for `problem`, then act on its report."""
+    sid = section.id
+    cap = ladder.section_cap(cfg, section)
+    if cap is not None:
+        spent = ledger.section_spend(sid).dollars
+        if spent > cap:
+            _park(cfg, queue, state, sid, ladder.cap_text(sid, spent, cap))
+            return
+    check_log = state.check_log(lead_log)
+    evidence = [lead_log, *([check_log] if check_log.exists() else [])]
+    brief = design_brief(design, queue, section, problem, evidence, cfg.design_approval)
+    progress.design_started(sid, design, section.steps, problem)
+    result, _ = _run(
+        cfg, state, ledger, since, "design", sid, cfg.design_command, brief,
+        _git_top(design.parent), retire_flag, None, 2,
+    )
+    report = ladder.parse_report(result.stream.result_text)
+    progress.design_finished(sid, result, report)
+    _design_outcome(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
+    )
+
+
+def _design_outcome(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    design: Path,
+    problem: str,
+    lead_log: Path,
+    result: RunResult,
+    report: ladder.DesignReport | None,
+) -> None:
+    """Park on a failed or undecided design change; on an approved one, recut from it at rung 2."""
+    sid = section.id
+    if result.killed:
+        what = "the architect was killed"
+    elif result.exit_code != 0:
+        what = f"the architect exited {result.exit_code}"
+    elif report is None:
+        what = "the architect filed no report"
+    elif report.rejected:
+        what = "the architect rejected the brief as steering"
+    elif report.decisions or report.unfiled:
+        state.set_design_open(sid, str(design))
+        _park(cfg, queue, state, sid, ladder.decisions_text(sid, design, report))
+        return
+    elif not report.approved:
+        what = "the architect did not approve the design"
+    else:
+        state.set_design_open(sid, None)
+        state.mark_design_changed(sid)
+        if _recut(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
+        ):
+            _park(cfg, queue, state, sid, ladder.failed_text(sid, design, "the recut made no usable change"))
+        return
+    _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
+
+
 def _recut(
     queue: Path,
     cfg: Config,
@@ -382,14 +502,16 @@ def _recut(
     retire_flag: Path,
     section: Section,
     reason: str,
-    lead: RunResult,
+    lead_log: Path,
+    design: Path | None = None,
+    rung: Literal[1, 2] = 1,
 ) -> bool:
-    """Run the divvyer's recut; True when it failed and that was the section's second failure."""
-    brief = recut_brief(queue, section, reason, lead.log)
+    """Run the divvyer's recut; True when it failed. The caller records the failure or parks."""
+    brief = recut_brief(queue, section, reason, lead_log, design)
     before = parse_queue(queue)
     progress.recut_started(section.id, reason)
     result, _ = _run(
-        cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief, cwd, retire_flag
+        cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief, cwd, retire_flag, None, rung
     )
     after = parse_queue(queue)
     if section.id not in {s.id for s in after}:
@@ -404,8 +526,6 @@ def _recut(
         for made in after:
             if made.id not in known or made.id == section.id:
                 state.mark_from_recut(made.id)
-    if result.killed or result.exit_code != 0 or not changed or nested:
-        second, count = _fail(state, section.id)
-        progress.failed(section.id, count)
-        return second
-    return False
+                if design is not None:
+                    state.mark_design_changed(made.id)
+    return bool(result.killed or result.exit_code != 0 or not changed or nested)
