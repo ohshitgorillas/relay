@@ -4895,10 +4895,12 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
     tmp_path: Path,
     queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: a report with decisions, filed on the rerun after a failed architect run, is
     # handed back to the lead instead of parking the section for the owner with each decision
-    # line and design_open; or the failed first run parks with failed_text and is never rerun.
+    # line and the exact design_open destination; the decision is marked as a landed change;
+    # false hand-back guidance is emitted; or the failed first run is never rerun.
     scenario(_lines(DONE_LEAD))
     failed = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
     queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [failed, _step(ARCHITECT_DECISION)])
@@ -4911,6 +4913,8 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
     assert section.status == "parked"
     assert section.design_open is not None
     assert section.design_open.endswith(DESIGN_PATH)
+    assert section.design_open == str((tmp_path / DESIGN_PATH).resolve())
+    assert section.design_changed is False
     assert section.question is not None
     assert f"{DESIGN_PATH} needs a product choice:" in section.question
     # The last ping is the stop's own; the park's ping comes before it and carries the decisions.
@@ -4920,6 +4924,9 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
         assert line in section.question
         assert line in pings[0][0]
     assert section.failures == 0
+    assert (section.design_failures, section.design_failure) == (0, None)
+    texts = _texts(capsys.readouterr().out)
+    assert all(not t.endswith("; back to the lead with the architect's message") for t in texts), texts
 
 
 @pytest.mark.parametrize("how", ["nonzero-exit", "backend-error"])
