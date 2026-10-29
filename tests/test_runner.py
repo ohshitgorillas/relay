@@ -20,6 +20,11 @@ import pytest
 
 from relay.config import Config
 from relay.runner import RunResult, run_agent
+from relay.backends.base import Capabilities
+from relay.stream import StreamState
+from relay.ledger import Spend
+from dataclasses import replace
+from relay.backends import replay
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -422,6 +427,114 @@ while left:
 FLOOD_BYTES = 4 * 1024 * 1024
 
 
+class PollingBackend:
+    capabilities = Capabilities(True, True, False, False)
+
+    def __init__(self, command: list[str]) -> None:
+        self.command = command
+        self.outputs: list[Path] = []
+        self.finished = False
+
+    def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+        self.outputs.append(output)
+        return self.command
+
+    def parse(self, state: StreamState, line: str) -> StreamState:
+        return replace(state, result_text="stream answer")
+
+    def poll(self, state: StreamState) -> StreamState:
+        return replace(state, context_tokens=321, spend=Spend(654, 0.0))
+
+    def finish(self, state: StreamState, output: Path) -> StreamState:
+        self.finished = True
+        return replace(self.poll(state), result_text="final answer")
+
+    def resume_hint(self, session_id: str) -> str:
+        return f"previous thread {session_id}"
+
+
+def test_backend_poll_reaches_callback_while_stdout_is_quiet(
+    fake_cfg: Config, tmp_path: Path, run_dir: Path
+) -> None:
+    # Breaks when quiet stdout prevents backend polling or callback-driven killing.
+    pidfile = tmp_path / "quiet-pid"
+    completed = tmp_path / "quiet-completed"
+    command = [
+        sys.executable, "-c",
+        "import os, sys, time; from pathlib import Path; "
+        "Path(sys.argv[1]).write_text(str(os.getpid())); "
+        "time.sleep(2); Path(sys.argv[2]).touch()",
+        str(pidfile), str(completed),
+    ]
+
+    class DelayedPollingBackend(PollingBackend):
+        polls = 0
+
+        def poll(self, state: StreamState) -> StreamState:
+            self.polls += 1
+            if self.polls == 1 or not pidfile.exists():
+                return state
+            return super().poll(state)
+
+    backend = DelayedPollingBackend(command)
+    seen: list[int] = []
+
+    def watch(state: StreamState) -> str:
+        seen.append(state.context_tokens)
+        return "kill" if state.context_tokens == 321 else "go"
+
+    try:
+        result = run_agent(command, "handoff", tmp_path, run_dir, watch,
+                           tmp_path / "retire", backend=backend, cfg=fake_cfg)
+    finally:
+        _cleanup(pidfile)
+    assert pidfile.exists()
+    assert _gone_within(_pid(pidfile))
+    assert not completed.exists()
+    assert seen[0] != 321
+    assert 321 in seen
+    assert result.killed is True
+    assert backend.finished is True
+    assert result.stream.context_tokens == 321
+
+
+def test_backend_finish_and_unique_output_are_used_for_every_run(
+    fake_cfg: Config, tmp_path: Path, run_dir: Path
+) -> None:
+    # Breaks when finish is skipped, its state is discarded, or outputs are reused.
+    command = [sys.executable, "-c", "print('wire answer')"]
+    backend = PollingBackend(command)
+    results = [run_agent(command, "handoff", tmp_path, run_dir, _go,
+                         tmp_path / "retire", backend=backend, cfg=fake_cfg)
+               for _ in range(2)]
+    assert len(backend.outputs) == 2
+    assert backend.outputs[0] != backend.outputs[1]
+    assert all(path.parent == run_dir for path in backend.outputs)
+    assert all(result.stream.result_text == "final answer" for result in results)
+    assert all(result.stream.spend == Spend(654, 0.0) for result in results)
+
+
+def test_replay_restores_runner_telemetry_beside_legacy_claude_logs(
+    fake_cfg: Config, tmp_path: Path, run_dir: Path,
+) -> None:
+    # Breaks when runner telemetry is lost or metadata-free Claude logs stop replaying.
+    command = [sys.executable, "-c", "print('wire answer')"]
+    backend = PollingBackend(command)
+    cfg = replace(fake_cfg, backend="generic")
+    result = run_agent(command, "handoff", tmp_path, run_dir, _go,
+                       tmp_path / "retire", backend=backend, cfg=cfg)
+
+    restored = replay(result.log)
+    assert restored.context_tokens == 321
+    assert restored.spend == Spend(654, 0.0)
+    assert restored.result_text == "final answer"
+    legacy = run_dir / "legacy.jsonl"
+    legacy.write_text("\n".join(LINES) + "\n")
+    historical = replay(legacy)
+    assert historical.session_id == "sess-r"
+    assert historical.result_text == "DONE"
+
+
 def _stderr_file(result: RunResult) -> Path:
     return result.log.with_name(result.log.stem + ".stderr")
 
@@ -499,3 +612,129 @@ def test_stream_log_stdout_and_stream_state_are_unchanged_when_the_child_also_wr
     assert seen[-1] == clean.stream
     assert _stderr_file(result).is_file()
     assert _stderr_file(result).read_text().splitlines() == [noise] * len(LINES)
+
+
+def test_direct_exit_cleans_inherited_stdout_and_drains_buffered_output(
+    tmp_path: Path, run_dir: Path,
+) -> None:
+    # Breaks when inherited stdout postpones cleanup until descendant EOF.
+    pidfile = tmp_path / "direct-pid"
+    grandfile = tmp_path / "inherited-pid"
+    expired = tmp_path / "descendant-expired"
+    wire = "\n".join(LINES[:-1] + [LINES[-1].replace("DONE", "DONE λ")])
+    script = """
+import os, signal, sys, time
+from pathlib import Path
+signal.alarm(8)
+Path(sys.argv[1]).write_text(str(os.getpid()))
+pid = os.fork()
+if pid == 0:
+    signal.alarm(8)
+    time.sleep(4)
+    Path(sys.argv[3]).touch()
+    os._exit(0)
+Path(sys.argv[2]).write_text(str(pid))
+sys.stdout.buffer.write(sys.argv[4].encode())
+sys.stdout.buffer.flush()
+os._exit(7)
+"""
+    try:
+        result = run_agent(
+            [sys.executable, "-c", script, str(pidfile), str(grandfile), str(expired), wire],
+            "", tmp_path, run_dir, _go, tmp_path / "retire",
+        )
+        assert not expired.exists(), "descendant-held stdout delayed cleanup until natural exit"
+        assert result.exit_code == 7
+        assert result.killed is False
+        assert result.log.read_text().splitlines() == wire.splitlines()
+        assert result.stream.result_text == "DONE λ"
+        assert _gone_within(_pid(grandfile))
+    finally:
+        _cleanup(grandfile, pidfile)
+        for path in (pidfile, grandfile):
+            if path.exists():
+                pid = _pid(path)
+                assert _gone_within(pid)
+                proof = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
+                assert proof.returncode == 1, proof.stdout
+
+
+@pytest.mark.parametrize("interrupt", [False, True], ids=["concurrent-reader", "interrupted-writer"])
+def test_telemetry_publication_preserves_complete_snapshots(
+    interrupt: bool, fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when telemetry truncates the published inode or exposes partial writes.
+    first = "published-first-observation"
+    second = "published-second-observation"
+    published: list[Path] = []
+    preceding: list[bytes] = []
+    observed: list[bytes] = []
+    temporary: list[Path] = []
+    readers: list[object] = []
+    pidfile = tmp_path / "snapshot-pid"
+    command = [sys.executable, "-c",
+               "import os,time; from pathlib import Path; "
+               "Path('snapshot-pid').write_text(str(os.getpid())); time.sleep(0.7)"]
+
+    class SnapshotBackend(PollingBackend):
+        def poll(self, state: StreamState) -> StreamState:
+            if not published:
+                for path in run_dir.iterdir():
+                    if path.is_file() and first.encode() in path.read_bytes():
+                        published.append(path)
+                        preceding.append(path.read_bytes())
+                        readers.append(path.open("rb"))
+                        break
+            return replace(state, result_text=second if published else first)
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            return self.poll(state)
+
+    def observe_publication(original: Callable[..., object]) -> Callable[..., object]:
+        def publish(source: object, destination: object, *args: object, **kwargs: object) -> object:
+            if published and not observed and Path(destination) == published[0]:
+                candidate = Path(source)
+                assert candidate != published[0]
+                assert candidate.parent == published[0].parent
+                contents = candidate.read_text()
+                json.loads(contents)
+                assert second in contents
+                temporary.append(candidate)
+                observed.append(published[0].read_bytes())
+                if interrupt:
+                    raise OSError("snapshot-write-interrupted")
+            return original(source, destination, *args, **kwargs)
+        return publish
+
+    monkeypatch.setattr(os, "replace", observe_publication(os.replace))
+    monkeypatch.setattr(os, "rename", observe_publication(os.rename))
+    failure = None
+    try:
+        try:
+            run_agent(command, "", tmp_path, run_dir, _go, tmp_path / "retire",
+                      backend=SnapshotBackend(command), cfg=fake_cfg)
+        except OSError as exc:
+            failure = exc
+        assert published, "no first telemetry snapshot was published"
+        assert observed, "no second telemetry snapshot was written"
+        assert all(value == preceding[0] for value in observed)
+        readers[0].seek(0)
+        assert readers[0].read() == preceding[0]
+        if interrupt:
+            assert str(failure) == "snapshot-write-interrupted"
+            assert published[0].read_bytes() == preceding[0]
+            assert all(not path.exists() for path in temporary)
+        else:
+            assert failure is None
+            assert second in published[0].read_text()
+            json.loads(published[0].read_text())
+    finally:
+        for reader in readers:
+            reader.close()
+        _cleanup(pidfile)
+        if pidfile.exists():
+            pid = _pid(pidfile)
+            assert _gone_within(pid)
+            proof = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
+            assert proof.returncode == 1, proof.stdout

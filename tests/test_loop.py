@@ -19,6 +19,9 @@ import pytest
 import relay.ping
 import relay.queue
 import relay.runner
+import relay.backends
+from relay.backends.base import Capabilities
+from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
@@ -912,6 +915,69 @@ def _only_first_open(queue: Path, cfg: Config) -> str:
         if sid != ids[0]:
             state.mark_done(sid)
     return ids[0]
+
+
+def test_generic_loop_ignores_budgets_and_accepts_plain_stdout(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path]
+) -> None:
+    # Breaks when the loop uses Claude parsing or budget capabilities for generic.
+    queue = queue_file(WORKBOARD)
+    _only_first_open(queue, cfg)
+    command = [sys.executable, "-c", "import sys; sys.stdin.read(); print('DONE')"]
+    generic = dataclasses.replace(cfg, backend="generic", lead_command=command,
+                                  recut_command=command, token_budget=1,
+                                  dollar_budget=0.01)
+    _ledger_line(State.open(queue, cfg), time.time() + 3600, 900, 5.0)
+    assert run(queue, generic) == ExitCode.QUEUE_EMPTY
+
+
+def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when rotation omits the backend hint/report or resumes the retired process.
+    queue = queue_file(WORKBOARD)
+    _only_first_open(queue, cfg)
+    prompts: list[Path] = []
+    roles: list[str] = []
+    report = "Committed rotation checkpoint.\nRETIRED"
+
+    class RotatingBackend:
+        capabilities = Capabilities(True, True, False, False)
+
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            roles.append(role)
+            prompt = tmp_path / f"prompt-{len(prompts)}"
+            prompts.append(prompt)
+            answer = report if len(prompts) == 1 else "DONE"
+            script = (
+                "import pathlib,sys; "
+                "pathlib.Path(sys.argv[1]).write_text(sys.stdin.read()); "
+                "print(sys.argv[2])"
+            )
+            return [sys.executable, "-c", script, str(prompt), answer]
+
+        def parse(self, state: StreamState, line: str) -> StreamState:
+            return dataclasses.replace(
+                state, session_id=f"thread-{len(prompts)}",
+                result_text=(state.result_text or "") + line,
+            )
+
+        def poll(self, state: StreamState) -> StreamState:
+            return state
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            return state
+
+        def resume_hint(self, session_id: str) -> str:
+            return f"Prior thread: {session_id}; native history: codex exec resume {session_id}"
+
+    monkeypatch.setattr(relay.backends, "get_backend", lambda name: RotatingBackend())
+    assert run(queue, dataclasses.replace(cfg, backend="codex")) == ExitCode.QUEUE_EMPTY
+    assert roles == ["lead", "lead"]
+    assert report not in prompts[0].read_text()
+    assert report in prompts[1].read_text()
+    assert "native history: codex exec resume thread-1" in prompts[1].read_text()
 
 
 def _body(queue: Path, sid: str) -> str:

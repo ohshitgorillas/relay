@@ -8,12 +8,12 @@ import time
 from pathlib import Path
 
 from relay import agents, loop
+from relay.backends import replay
 from relay.config import Config, load_config
 from relay.errors import ExitCode, QueueFormatError, RelayError
-from relay.ledger import Ledger, Spend
+from relay.ledger import Ledger
 from relay.queue import parse_queue
 from relay.state import State
-from relay.stream import StreamState, feed
 
 _WEEK = 7 * 24 * 60 * 60
 
@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     go.add_argument("--token-budget", type=int)
     go.add_argument("--dollar-budget", type=float)
     go.add_argument("--context-limit", type=int)
+    go.add_argument("--backend")
     commands.add_parser("stop").add_argument("queue", type=Path)
     answer = commands.add_parser("answer")
     answer.add_argument("queue", type=Path)
@@ -54,6 +55,7 @@ def _go(args: argparse.Namespace) -> int:
             "token_budget": args.token_budget,
             "dollar_budget": args.dollar_budget,
             "context_limit": args.context_limit,
+            "backend": args.backend,
         }
     )
     return loop.run(args.queue.resolve(), cfg)
@@ -89,11 +91,8 @@ def _section_activity(state: State, ledger: Ledger) -> dict[str, agents.Activity
     )
     found: dict[str, agents.Activity] = {}
     for log in logs:
-        stream = StreamState(None, 0, Spend(0, 0.0), None, False)
         try:
-            with log.open(errors="replace") as handle:
-                for line in handle:
-                    stream = feed(stream, line)
+            stream = replay(log)
         except OSError:
             continue
         owners = sections.get(stream.session_id or "")

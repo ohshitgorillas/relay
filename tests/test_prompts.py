@@ -184,3 +184,39 @@ def test_lead_prompt_without_a_report_holds_no_report_heading() -> None:
     prompt = _with_report(None)
     assert "resume sess-lead-7" in prompt
     assert HEADING not in prompt.lower()
+
+
+def test_prerendered_handoff_replaces_default_resume_text_and_keeps_report() -> None:
+    # Breaks when: a backend hint is ignored, altered, or accompanied by Claude's default resume line.
+    hint = "Prior thread: thread-42.\n  The supplied report is the handoff."
+    prompt = lead_prompt(
+        QUEUE, _section(), resume="thread-42", report=REPORT, answer=ANSWER,
+        retire_flag=RETIRE_FLAG, handoff_hint=hint,
+    )
+    assert hint in prompt
+    assert "resume thread-42" not in prompt
+    assert REPORT in prompt
+    assert BODY in prompt
+    assert ANSWER in prompt
+
+
+def test_prerendered_handoff_is_optional_and_does_not_replace_default_on_later_calls() -> None:
+    # Breaks when: selecting a backend hint changes the default handoff for subsequent prompts.
+    hint = "Prior thread: thread-73; use the supplied handoff."
+    custom = lead_prompt(
+        QUEUE, _section(), resume="thread-73", report=None, answer=None,
+        retire_flag=RETIRE_FLAG, handoff_hint=hint,
+    )
+    default = lead_prompt(
+        QUEUE, _section(), resume="sess-lead-7", report=None, answer=None,
+        retire_flag=RETIRE_FLAG,
+    )
+    explicit_default = lead_prompt(
+        QUEUE, _section(), resume="sess-lead-7", report=None, answer=None,
+        retire_flag=RETIRE_FLAG, handoff_hint=None,
+    )
+    assert hint in custom
+    assert "resume thread-73" not in custom
+    assert "resume sess-lead-7" in default
+    assert hint not in default
+    assert explicit_default == default

@@ -117,7 +117,18 @@ class Ledger:
         *,
         capabilities: Capabilities | None = None,
     ) -> Literal["tokens", "dollars"] | None:
-        raise NotImplementedError
+        if capabilities is None:
+            from relay.backends import get_backend
+
+            capabilities = get_backend(cfg.backend).capabilities
+        past = self.total(since)
+        if (capabilities.tokens and cfg.token_budget is not None
+                and past.tokens + live.tokens > cfg.token_budget):
+            return "tokens"
+        if (capabilities.dollars and cfg.dollar_budget is not None
+                and past.dollars + live.dollars > cfg.dollar_budget):
+            return "dollars"
+        return None
 
     def unreadable(self) -> list[int]:
         return [number for number, fields in self._lines() if fields is None]

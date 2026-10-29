@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable, Literal
 
-from relay import ping, progress
+from relay import backends, ping, progress
 from relay.config import Config
 from relay.errors import ExitCode
 from relay.ledger import Ledger, Spend
@@ -96,13 +96,18 @@ def _run_section(
     sid = section.id
     current = state.section(sid)
     resume = current.last_session or state.last_session_any
+    backend = backends.get_backend(cfg.backend)
     answer = state.take_answer(sid)
-    prompt = lead_prompt(queue, section, resume, current.last_report, answer, retire_flag)
+    prompt = lead_prompt(
+        queue, section, resume, current.last_report, answer, retire_flag,
+        handoff_hint=backend.resume_hint(resume) if resume is not None else None,
+    )
     on_event, budget_hit = _watcher(cfg, ledger, since, "lead", sid)
 
     retire_flag.unlink(missing_ok=True)
     progress.lead_started(sid, resume, answer is not None)
-    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, on_event, retire_flag)
+    result = run_agent(cfg.lead_command, prompt, cwd, state.run_dir, on_event, retire_flag,
+                       backend=backend, cfg=cfg, role="lead")
     session = result.stream.session_id
     ledger.append("lead", sid, session, result.stream.spend)
     if session is not None:
@@ -146,22 +151,23 @@ def _watcher(
     hit = [False]
     retiring = [False]
     shown = [0]  # agent events already printed
+    capabilities = backends.get_backend(cfg.backend).capabilities
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
         events = stream.activity.events
         for event in events[shown[0] :]:
             progress.agent_event(who, sid, event)
         shown[0] = len(events)
-        if stream.context_tokens >= cfg.hard_ceiling:
+        if capabilities.context and stream.context_tokens >= cfg.hard_ceiling:
             progress.killing(sid, stream.context_tokens)
             return "kill"
-        if ledger.over(cfg, stream.spend, since) is not None:
+        if ledger.over(cfg, stream.spend, since, capabilities=capabilities) is not None:
             hit[0] = True
             if not retiring[0]:
                 retiring[0] = True
                 progress.retiring(sid, "budget", stream.context_tokens)
             return "retire"
-        if stream.context_tokens >= cfg.context_limit:
+        if capabilities.context and stream.context_tokens >= cfg.context_limit:
             if not retiring[0]:
                 retiring[0] = True
                 progress.retiring(sid, "context", stream.context_tokens)
@@ -198,7 +204,8 @@ def _recut(
     before = parse_queue(queue)
     on_event, _hit = _watcher(cfg, ledger, since, "recut", section.id)
     progress.recut_started(section.id, reason)
-    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag)
+    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag,
+                       backend=backends.get_backend(cfg.backend), cfg=cfg, role="recut")
     ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
     changed = parse_queue(queue) != before
     progress.recut_finished(section.id, result, changed)
