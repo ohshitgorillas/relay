@@ -36,6 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     go.add_argument("--dollar-budget", type=float)
     go.add_argument("--context-limit", type=int)
     go.add_argument("--idle-ceiling", type=int)
+    go.add_argument("--section-dollar-cap", type=float)
     commands.add_parser("stop").add_argument("queue", type=Path)
     answer = commands.add_parser("answer")
     answer.add_argument("queue", type=Path)
@@ -60,6 +61,7 @@ def _go(args: argparse.Namespace) -> int:
             "dollar_budget": args.dollar_budget,
             "context_limit": args.context_limit,
             "idle_ceiling": args.idle_ceiling,
+            "section_dollar_cap": args.section_dollar_cap,
         }
     )
     return loop.run(args.queue.resolve(), cfg)
@@ -135,7 +137,10 @@ def _status(args: argparse.Namespace) -> int:
     ledger = Ledger(path)
     activity = _section_activity(state, ledger)
     for section in parse_queue(queue):
-        line = f"{section.id}  {state.section(section.id).status}"
+        record = state.section(section.id)
+        line = f"{section.id}  {record.status}"
+        if record.status == "waiting":
+            line += f" on {record.waits_on}"
         print(line + _agent_summary(activity.get(section.id)))
     week = ledger.total(time.time() - _WEEK)
     total = ledger.total(None)

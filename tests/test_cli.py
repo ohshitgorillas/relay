@@ -833,3 +833,41 @@ def test_ask_whose_answer_is_over_map_max_chars_exits_1(
     _ask_config(home, fake_cfg, asked, map_max_chars=len(ASK_ANSWER) - 1)
     assert _exit(["ask", str(queue), ASK_SID, QUESTION]) == 1
     assert capsys.readouterr().out == ""
+
+
+# `relay go` gains `--section-dollar-cap` (float), which becomes the `section_dollar_cap`
+# override; `relay status` prints a waiting section as `<id>  waiting on <blocker>`
+# (relay-ladder design, Modules, `relay/cli.py` (extended); Order 8).
+
+
+@pytest.mark.parametrize(
+    ("value", "cap"),
+    [("2.5", 2.5), ("5", 5.0)],
+    ids=["decimal", "whole"],
+)
+def test_go_passes_the_section_dollar_cap_option_as_an_override(
+    value: str, cap: float, queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `relay go` has no `--section-dollar-cap`, drops it so the default None holds,
+    # or passes it as a string rather than a float.
+    calls: list[tuple[Path, Config]] = []
+    _patch_run(monkeypatch, _recording_run(calls, ExitCode.QUEUE_EMPTY))
+    assert _exit(["go", str(queue), "--section-dollar-cap", value]) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    cfg = calls[0][1]
+    assert cfg.section_dollar_cap == cap
+    assert isinstance(cfg.section_dollar_cap, float)
+    assert cfg.dollar_budget is None
+    assert cfg.state_root == fake_cfg.state_root
+
+
+def test_status_prints_a_waiting_section_with_its_blocker(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: status prints a waiting section as open or parked, or leaves out the
+    # section it waits on.
+    State.open(queue, fake_cfg).wait("s3", "s2")
+    assert _exit(["status", str(queue)]) == 0
+    out = capsys.readouterr().out
+    assert "s3  waiting on s2" in _section_line(out, "s3")
+    assert "open" in _section_line(out, "s4")
