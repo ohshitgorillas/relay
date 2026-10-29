@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -111,7 +110,7 @@ def _run_section(
         return None
     if _over_cap(cfg, queue, state, ledger, section):
         return None
-    if current.design_open is not None:
+    if current.design_open is not None and current.design_numbers is not None:
         answer = state.take_answer(sid)
         if answer is not None:
             _design_answer(queue, cfg, state, ledger, since, cwd, retire_flag, section, answer)
@@ -348,9 +347,17 @@ def _watcher(
     return watch
 
 
-def _park(cfg: Config, queue: Path, state: State, sid: str, question: str) -> None:
-    """Park `sid` with `question`, ping the owner and show the question: the one park."""
-    state.park(sid, question)
+def _park(
+    cfg: Config,
+    queue: Path,
+    state: State,
+    sid: str,
+    question: str,
+    design_numbers: tuple[int, ...] | None = None,
+) -> None:
+    """Park `sid` with `question`, ping the owner and show the question: the one park.
+    `design_numbers` marks the question as the open design decisions' (state.park)."""
+    state.park(sid, question, design_numbers)
     ping.needs_owner(cfg, queue, sid, question)
     progress.needs_answer(sid, question)
 
@@ -471,20 +478,13 @@ def _design_answer(
         what = "no lead log is recorded for the section"
         _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
         return
-    # The open decision numbers are those `decisions_text` wrote into the parked question.
-    numbers = _open_numbers(current.question)
+    numbers = tuple(cast(list[int], current.design_numbers))
     brief = design_answer_brief(design, numbers, answer, cfg.design_approval)
     problem = f"the owner ruled on the open design decisions: {answer}"
     _architect(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
         Path(current.last_log),
     )
-
-
-def _open_numbers(question: str | None) -> tuple[int, ...]:
-    """The decision numbers in a parked design question: its `<n> | ...` lines."""
-    lines = tuple(line for line in (question or "").splitlines() if re.match(r"\s*\d+\s*\|", line))
-    return ladder.decision_numbers(ladder.DesignReport(False, False, lines, ()))
 
 
 def _over_cap(cfg: Config, queue: Path, state: State, ledger: Ledger, section: Section) -> bool:
@@ -554,7 +554,9 @@ def _design_outcome(
         what = "the architect rejected the brief as steering"
     elif report.decisions or report.unfiled:
         state.set_design_open(sid, str(design))
-        _park(cfg, queue, state, sid, ladder.decisions_text(sid, design, report))
+        _park(
+            cfg, queue, state, sid, ladder.decisions_text(sid, design, report), ladder.decision_numbers(report)
+        )
         return
     elif not report.approved:
         what = "the architect did not approve the design"

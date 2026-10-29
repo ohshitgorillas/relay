@@ -40,6 +40,9 @@ class SectionState:
     last_log: str | None = None  # the run log of the section's last lead run
     design_changed: bool = False  # this section had a design change, or a design-change recut made it
     design_open: str | None = None  # the design path whose product decision awaits the owner's answer
+    # The open decision numbers of the park now awaiting that answer; None when the section's
+    # current park (or run) is for another reason, so an answer to it is not a design answer.
+    design_numbers: list[int] | None = None
     waits_on: str | None = None  # the section id a waiting section waits for
 
 
@@ -126,6 +129,7 @@ class State:
             s.check_feedback = None
             s.check_pending = False
             s.design_open = None
+            s.design_numbers = None
             s.waits_on = None
 
         self._update(sid, change)
@@ -169,10 +173,19 @@ class State:
             return self.check_log(Path(recorded))
         return self.run_dir / f"check-{sid}.check"
 
-    def park(self, sid: str, question: str) -> None:
+    def park(self, sid: str, question: str, design_numbers: tuple[int, ...] | None = None) -> None:
+        """Park `sid` on `question`. `design_numbers` marks it as the open design decisions'
+        question (their numbers); any other park clears both design fields, so no design decision is
+        recorded as waiting and its answer is no design answer."""
+
         def change(s: SectionState, _r: dict) -> None:
             s.status = "parked"
             s.question = question
+            if design_numbers is None:
+                s.design_open = None
+                s.design_numbers = None
+            else:
+                s.design_numbers = list(design_numbers)
 
         self._update(sid, change)
 
@@ -187,6 +200,7 @@ class State:
             s.design_open = design
             if design is None:
                 s.question = None
+                s.design_numbers = None
 
         self._update(sid, change)
 
@@ -223,8 +237,7 @@ class State:
                 return False
             s.answer = answer
             s.status = "open"
-            if s.design_open is None:
-                s.question = None  # an open design question keeps its decision numbers for the answer
+            s.question = None
             s.waits_on = None
             return True
 
