@@ -14,7 +14,7 @@ from relay.ledger import Kind
 from relay.research import Map
 from relay.runner import RunResult
 from relay.state import CHECK_LIMIT, FAILURE_LIMIT
-from relay.status import LeadStatus
+from relay.status import TEXT_NAMES, LeadStatus
 
 if TYPE_CHECKING:
     from relay.ladder import DesignReport
@@ -68,7 +68,7 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
         outcome = f"exit {result.exit_code}"
     elif status is None:
         outcome = "with no status line"
-    elif status.kind == "RECUT":
+    elif status.kind in TEXT_NAMES and status.kind != "NEEDS-OWNER":
         outcome = f"{status.kind}: {_cut(status.text)}"
     else:
         outcome = status.kind
@@ -80,6 +80,8 @@ def retiring(
 ) -> None:
     if why == "context":
         _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
+    elif why == "cap":
+        _write_for(who, f"{who} {sid}: asked to retire, section cap spent")
     else:
         _write_for(who, f"{who} {sid}: asked to retire, budget spent")
 
@@ -181,16 +183,32 @@ def map_reused(sid: str, m: Map) -> None:
 
 
 def design_started(sid: str, design: Path, steps: tuple[str, ...], problem: str) -> None:
-    raise NotImplementedError
+    named = f"Order {', '.join(steps)}" if steps else "steps unnamed"
+    _write(f"design {sid}: amending {design} {named}: {_cut(problem)}")
 
 
 def design_finished(sid: str, result: RunResult, report: DesignReport | None) -> None:
-    raise NotImplementedError
+    if result.killed:
+        outcome = "killed"
+    elif result.exit_code != 0:
+        outcome = f"exit {result.exit_code}"
+    elif report is None:
+        outcome = "with no report"
+    elif report.rejected:
+        outcome = "rejected"
+    elif report.decisions:
+        n = len(report.decisions)
+        outcome = f"with {n} {'decision' if n == 1 else 'decisions'} for the owner"
+    elif report.approved:
+        outcome = "approved"
+    else:
+        outcome = "with no report"
+    _write(f"design {sid}: finished {outcome} {_spend(result)}")
 
 
 def section_waiting(sid: str, blocker: str) -> None:
-    raise NotImplementedError
+    _write(f"section {sid}: waiting on {blocker}")
 
 
 def woken(sid: str, blocker: str) -> None:
-    raise NotImplementedError
+    _write(f"section {sid}: woken, {blocker} landed")

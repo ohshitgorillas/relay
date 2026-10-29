@@ -1,8 +1,10 @@
 """Builds every text Relay sends to an agent."""
 
+import re
 from pathlib import Path
 
 from relay.config import Config
+from relay.ladder import GUESS
 from relay.check import CheckResult, outcome_text
 from relay.queue import Section
 from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN
@@ -53,6 +55,12 @@ def lead_prompt(
         "section whose cut is wrong or too big."
     )
     parts.append(
+        "Status rule: the text after RECUT: or DESIGN: is the problem: what fails, its evidence, "
+        f"and the design step it is under. A fix you have in mind follows only after `{GUESS}`. "
+        "DESIGN: is for when the section's design lacks something no recut can supply. "
+        "WAITING: <id> is for when the section cannot go on until queue section <id> lands."
+    )
+    parts.append(
         "Status contract: the last line of your final message is exactly one of these, "
         "and nothing follows it:\n" + "\n".join(_status_form(kind) for kind in KINDS)
     )
@@ -67,6 +75,12 @@ def recut_brief(
         f"A lead asked for this recut. Its reason: {reason}\n"
         f"The lead's run log: {lead_log}\n\n"
         f"Section body:\n{section.body}\n"
+        + (
+            f"\nThe design {design} was amended for this problem. "
+            "Cut this section's work again from it, its new Order steps included.\n"
+            if design is not None
+            else ""
+        )
     )
 
 
@@ -79,12 +93,26 @@ def design_brief(
     approval: str,
 ) -> str:
     """Three lines: rulings, lead new, approve."""
-    raise NotImplementedError
+    steps = ", ".join(section.steps) if section.steps else "steps unnamed"
+    paths = ", ".join(str(path) for path in evidence)
+    return (
+        f"rulings {design}\n"
+        f"lead new: Section {section.id} of the queue at {queue}, under this design's Order "
+        f"{steps}, cannot go on: {problem} Evidence: {paths}.\n"
+        f"approve: {approval}\n"
+    )
 
 
 def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, approval: str) -> str:
     """The rulings line, the answer lines, the approve line."""
-    raise NotImplementedError
+    kept = [
+        line
+        for line in answer.splitlines()
+        if (m := re.match(r"(\d+):", line)) and int(m.group(1)) in numbers
+    ]
+    if not kept:
+        kept = [f"{numbers[0]}: {answer}" if len(numbers) == 1 else f"new: {answer}"]
+    return "\n".join([f"rulings {design}", *kept, f"approve: {approval}"]) + "\n"
 
 
 def check_feedback(result: CheckResult) -> str:
