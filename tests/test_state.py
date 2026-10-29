@@ -811,3 +811,76 @@ def test_mark_done_clears_waits_on(queue: Path, fake_cfg: Config) -> None:
     section = State.open(queue, fake_cfg).section("s3")
     assert section.status == "done"
     assert section.waits_on is None
+# Order 17, behavior 1: It holds ... the last session id and the last lead's final report per
+# section (design: Modules, `relay/state.py`).
+# Order 17, behavior 2: last_report: str | None = None  # RunResult.stream.result_text of the
+# section's most recent lead run; a record without it loads as None
+# Order 17, behavior 3: def set_last_report(self, sid: str, report: str | None) -> None: ...  # None clears it
+# `getattr` with a default keeps a missing field or method an assertion failure, not an AttributeError.
+
+REPORT_A = "Step 2 committed at 1a2b3c.\n  Next: step 3, the build.\nRETIRED"
+REPORT_B = "Red tests written for s2.\nDONE"
+
+
+def _set_last_report(state: State, sid: str, report: str | None) -> None:
+    setter = getattr(state, "set_last_report", None)
+    assert setter is not None, "State.set_last_report"
+    setter(sid, report)
+
+
+def test_a_section_with_no_record_has_no_last_report(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: SectionState has no last_report, or a fresh section's is not None.
+    section = State.open(queue, fake_cfg).section("s1")
+    assert getattr(section, "last_report", "missing") is None
+
+
+def test_last_report_is_kept_per_section_verbatim_across_reopening(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: the report is not saved, is altered, or is kept for the queue rather than per section.
+    state = State.open(queue, fake_cfg)
+    _set_last_report(state, "s1", REPORT_A)
+    _set_last_report(state, "s2", REPORT_B)
+    reopened = State.open(queue, fake_cfg)
+    assert getattr(reopened.section("s1"), "last_report", None) == REPORT_A
+    assert getattr(reopened.section("s2"), "last_report", None) == REPORT_B
+    assert getattr(reopened.section("s3"), "last_report", "missing") is None
+
+
+def test_a_later_report_replaces_the_earlier_one(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: set_last_report keeps the first report, or appends the second to it.
+    state = State.open(queue, fake_cfg)
+    _set_last_report(state, "s1", REPORT_A)
+    _set_last_report(state, "s1", REPORT_B)
+    assert getattr(State.open(queue, fake_cfg).section("s1"), "last_report", None) == REPORT_B
+
+
+def test_set_last_report_none_clears_it_for_that_section_only(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: None is ignored, stored as a string, or clears another section's report too.
+    state = State.open(queue, fake_cfg)
+    _set_last_report(state, "s1", REPORT_A)
+    _set_last_report(state, "s2", REPORT_B)
+    _set_last_report(state, "s1", None)
+    reopened = State.open(queue, fake_cfg)
+    assert getattr(reopened.section("s1"), "last_report", "missing") is None
+    assert getattr(reopened.section("s2"), "last_report", None) == REPORT_B
+
+
+def test_the_last_report_and_the_last_session_are_kept_side_by_side(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: setting one of the two overwrites or clears the other.
+    state = State.open(queue, fake_cfg)
+    state.set_last_session("s1", "session-a")
+    _set_last_report(state, "s1", REPORT_A)
+    state.set_last_session("s1", "session-b")
+    section = State.open(queue, fake_cfg).section("s1")
+    assert section.last_session == "session-b"
+    assert getattr(section, "last_report", None) == REPORT_A
+
+
+def test_a_record_saved_before_last_report_existed_loads_with_it_none(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: a state.json from an older relay, without the key, no longer loads or loads a report.
+    state = State.open(queue, fake_cfg)
+    old = '{"sections": {"s1": {"status": "open", "failures": 1, "question": null, "answer": null, "last_session": "session-a"}}, "last_any": "session-a"}'
+    (_dir(state) / "state.json").write_text(old)
+    section = state.section("s1")
+    assert section.last_session == "session-a"
+    assert section.failures == 1
+    assert getattr(section, "last_report", "missing") is None

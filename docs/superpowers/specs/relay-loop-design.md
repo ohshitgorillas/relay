@@ -71,7 +71,7 @@ def parse_queue(path: Path) -> list[Section]: ...   # raises QueueFormatError
 def blocked_by(sections: list[Section], parked: set[str]) -> set[str]: ...  # ids that depend, transitively, on a parked id
 ```
 
-`relay/state.py`: Relay's own record for one queue, kept under `state_root/<slug of the queue's absolute path>/`. It holds per-section status, failure counts, parked questions, owner answers, the last session id per section, the stop file and the lock. Every write goes through a temp file and `os.replace`.
+`relay/state.py`: Relay's own record for one queue, kept under `state_root/<slug of the queue's absolute path>/`. It holds per-section status, failure counts, parked questions, owner answers, the last session id and the last lead's final report per section, the stop file and the lock. Every write goes through a temp file and `os.replace`.
 
 ```python
 SectionStatus = Literal["open", "done", "parked"]
@@ -83,6 +83,7 @@ class SectionState:
     question: str | None        # set while parked
     answer: str | None          # set by `relay answer`; consumed by the next lead prompt
     last_session: str | None
+    last_report: str | None = None  # RunResult.stream.result_text of the section's most recent lead run; a record without it loads as None
 
 class State:
     @classmethod
@@ -95,6 +96,7 @@ class State:
     def take_answer(self, sid: str) -> str | None: ...
     def record_failure(self, sid: str) -> int: ...            # returns the new count
     def set_last_session(self, sid: str, session: str) -> None: ...
+    def set_last_report(self, sid: str, report: str | None) -> None: ...  # None clears it
     @property
     def last_session_any(self) -> str | None: ...
     @property
@@ -181,9 +183,12 @@ def parse_status(result_text: str | None) -> LeadStatus | None: ...   # None = n
 
 ```python
 def lead_prompt(queue: Path, section: Section, resume: str | None,
-                answer: str | None, retire_flag: Path) -> str: ...
+                report: str | None, answer: str | None, retire_flag: Path) -> str: ...
 # Opens "You are a lead". Holds: the queue path, the section id and body verbatim,
-# "resume <session id>" when resume is set, the owner's answer verbatim when set,
+# "resume <session id>" when resume is set; when report is set, next to that line,
+# the report verbatim under a heading naming it the previous lead's final report,
+# saying it is that session's last reply so the new lead need not recall it;
+# the owner's answer verbatim when set,
 # the retire contract (on reaching a safe point, after a step's commit, if retire_flag
 # exists end with RETIRED), and the status contract: the last line is exactly one of
 # "DONE", "RECUT: <reason>", "NEEDS-OWNER: <question>", "RETIRED".
@@ -212,10 +217,10 @@ Each pass does the following, in order:
 3. Re-parse the queue. Pick the first section that is open in the queue, not `done` or `parked` in state, and not blocked by a parked section.
 4. If no such section exists and nothing is parked, stop with `QUEUE_EMPTY`.
 5. If no section is runnable but some are parked, wait, holding the lock: check every `poll_seconds` for the stop file (stop with `STOP_FILE`) or a `relay answer` on a parked section (start the next pass). The ping for each parked section went out when it parked; waiting sends none.
-6. Otherwise, run a lead with `resume` set to the section's `last_session`, or else `last_session_any`. During the run, `on_event` returns:
+6. Otherwise, run a lead with `resume` set to the section's `last_session`, or else `last_session_any`, and `report` set to the section's own `last_report`. A report from another section is never passed, even when `resume` comes from `last_session_any`. During the run, `on_event` returns:
    - `retire` once `context_tokens ≥ context_limit` or the live spend passes a budget;
    - `kill` at `hard_ceiling`.
-7. Append the run's spend to the ledger and record its session.
+7. Append the run's spend to the ledger, record its session, and record `result.stream.result_text` with `set_last_report`, both only when the run has a session. A run with a session but no result text clears the report; a run with no session leaves the old session and the old report in place.
 8. Act on the status:
    - DONE: `mark_done`.
    - RETIRED: run a fresh lead on the same section; this is no failure.
@@ -280,4 +285,6 @@ Relay replaces nothing: no copy exists in the tree.
 13. Loop and CLI: red tests. `test-writer` writes `tests/test_loop.py` and `tests/test_cli.py`.
 14. Loop and CLI: build. `builder` writes `relay/loop.py` and `relay/cli.py`.
 15. State path accessors: red tests. `test-writer` writes `tests/test_state.py`, covering `State.ledger_path` and `State.retire_flag`.
-16. State path accessors: build. `builder` writes `relay/state.py` (`ledger_path`, `retire_flag`), `relay/loop.py` and `relay/cli.py`, replacing the paths built at `relay/loop.py:46`, `relay/loop.py:49` and `relay/cli.py:81` with those accessors.
+16. State path accessors: build. `builder` writes `relay/state.py` (`ledger_path`, `retire_flag`), `relay/loop.py` and `relay/cli.py`, taking the ledger and retire-flag paths only from those accessors (`relay/loop.py:49`, `relay/loop.py:52`, `relay/cli.py:123`).
+17. Previous lead's report: red tests. `test-writer` writes `tests/test_state.py`, `tests/test_prompts.py` and `tests/test_loop.py`.
+18. Previous lead's report: build. `builder` writes `relay/state.py` (`SectionState.last_report`, `set_last_report`), `relay/prompts.py` (`lead_prompt`'s `report`) and `relay/loop.py` (steps 6 and 7 above, at the `lead_prompt` call `relay/loop.py:100` and the session record `relay/loop.py:106`).

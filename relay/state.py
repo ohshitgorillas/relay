@@ -44,6 +44,7 @@ class SectionState:
     # current park (or run) is for another reason, so an answer to it is not a design answer.
     design_numbers: list[int] | None = None
     waits_on: str | None = None  # the section id a waiting section waits for
+    last_report: str | None = None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -265,6 +266,12 @@ class State:
         def change(s: SectionState, r: dict) -> None:
             s.last_session = session
             r["last_any"] = session
+
+        self._update(sid, change)
+
+    def set_last_report(self, sid: str, report: str | None) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.last_report = report
 
         self._update(sid, change)
 

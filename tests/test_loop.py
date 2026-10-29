@@ -4589,3 +4589,119 @@ def test_waiting_on_a_blocker_recut_out_of_the_queue_whose_recut_section_needs_t
     # The last ping is the stop's own; s1's park ping comes before it and carries its reason.
     parked = [p for p in _pings(tmp_path)[:-1] if cycled.question in p[0]]
     assert len(parked) == 1
+# Order 17, behavior 5: run a lead with `resume` set to the section's `last_session`, or else
+# `last_session_any`, and `report` set to the section's own `last_report`. A report from another
+# section is never passed, even when `resume` comes from `last_session_any`.
+# Order 17, behavior 6: 7. Append the run's spend to the ledger, record its session, and record
+# `result.stream.result_text` with `set_last_report`; a run with no result text clears it.
+# `getattr` with a default keeps a missing `last_report` or `set_last_report` an assertion
+# failure, not an AttributeError.
+
+# The result texts of the scripted leads, verbatim.
+DONE_LEAD_REPORT = "Step committed.\nDONE"
+NO_STATUS_LEAD_REPORT = "Prompt is too long"
+RETIRED_LEAD_REPORT = "Step committed; retire flag found.\nRETIRED"
+
+OWN_REPORT = "Step 1 of s1 committed at 4d5e6f.\nRETIRED"
+OTHER_REPORT = "Step 3 of another section committed at 7a8b9c.\nRETIRED"
+
+
+def _set_last_report(state: State, sid: str, report: str) -> None:
+    setter = getattr(state, "set_last_report", None)
+    assert setter is not None, "State.set_last_report"
+    setter(sid, report)
+
+
+def _last_report(queue: Path, cfg: Config, sid: str) -> object:
+    return getattr(State.open(queue, cfg).section(sid), "last_report", "missing")
+
+
+def test_the_lead_is_given_its_sections_own_last_report(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop passes no report, or another section's, though the section has its own.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first, other = _open_ids(queue)[:2]
+    state = State.open(queue, cfg)
+    state.set_last_session(first, "sess-own")
+    _set_last_report(state, first, OWN_REPORT)
+    state.set_last_session(other, "sess-other")
+    _set_last_report(state, other, OTHER_REPORT)
+    run(queue, _shimmed(cfg, tmp_path))
+    prompt = str(_record(tmp_path, 0)["prompt"])
+    assert "resume sess-own" in prompt
+    assert OWN_REPORT in prompt
+    assert OTHER_REPORT not in prompt
+
+
+def test_a_report_from_another_section_is_never_passed_when_resume_comes_from_last_session_any(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop takes the report from the section whose session it resumes.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    other = _open_ids(queue)[1]
+    state = State.open(queue, cfg)
+    state.set_last_session(other, "sess-other")
+    _set_last_report(state, other, OTHER_REPORT)
+    run(queue, _shimmed(cfg, tmp_path))
+    prompt = str(_record(tmp_path, 0)["prompt"])
+    assert "resume sess-other" in prompt
+    assert OTHER_REPORT not in prompt
+
+
+def test_a_fresh_lead_after_a_retired_one_is_given_the_retired_leads_final_report(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop never records the result text, or never passes it to the next lead.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _only_first_open(queue, cfg)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 2, f"{len(runs)} lead runs"
+    assert RETIRED_LEAD_REPORT not in str(runs[0]["prompt"]), "report passed to the first lead"
+    assert "resume sess-lead-3" in str(runs[1]["prompt"]), "resume after the retire"
+    assert RETIRED_LEAD_REPORT in str(runs[1]["prompt"]), "report passed after the retire"
+
+
+def test_each_lead_runs_result_text_is_recorded_as_its_sections_last_report(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop records no report, records it on another section, or alters it.
+    queue = queue_file(M2)
+    scenario(_lines(DONE_LEAD))
+    run(queue, cfg)
+    for sid in _open_ids(queue):
+        assert _last_report(queue, cfg, sid) == DONE_LEAD_REPORT, sid
+
+
+def test_a_failed_lead_runs_result_text_is_recorded_too(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop records the report only for a run that ends with a valid status.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(NO_STATUS_LEAD))
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    first = _open_ids(queue)[0]
+    assert _last_report(queue, cfg, first) == NO_STATUS_LEAD_REPORT, "failed lead's report"
+    assert _last_report(queue, cfg, _open_ids(queue)[1]) is None, "untouched section's report"
+
+
+def test_a_run_with_no_result_text_clears_the_sections_last_report(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a killed run, which has no result text, leaves the earlier lead's report in place.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_LEAD)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3, f"{len(runs)} lead runs"
+    assert RETIRED_LEAD_REPORT in str(runs[1]["prompt"]), "report passed after the retire"
+    assert RETIRED_LEAD_REPORT not in str(runs[2]["prompt"]), "report passed after the kill"
+    assert _last_report(queue, cfg, first) is None, "report left after the kill"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from pathlib import Path
 
 from relay.check import CheckResult
@@ -39,7 +40,7 @@ def _section(sid: str = "s4", body: str = BODY) -> Section:
 
 
 def _lead(section: Section | None = None) -> str:
-    return lead_prompt(QUEUE, section or _section(), resume=None, answer=None, retire_flag=RETIRE_FLAG)
+    return lead_prompt(QUEUE, section or _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
 
 
 # Behavior 3: `relay/prompts.py`: builds every text Relay sends to an agent.
@@ -86,14 +87,14 @@ def test_lead_prompt_holds_the_given_section_not_another() -> None:
 
 def test_lead_prompt_holds_resume_with_the_session_id_when_resume_is_set() -> None:
     # Breaks when: lead_prompt ignores `resume` or words it other than "resume <session id>".
-    prompt = lead_prompt(QUEUE, _section(), resume="sess-lead-7", answer=None, retire_flag=RETIRE_FLAG)
+    prompt = lead_prompt(QUEUE, _section(), resume="sess-lead-7", report=None, answer=None, retire_flag=RETIRE_FLAG)
     assert "resume sess-lead-7" in prompt
 
 
 def test_lead_prompt_holds_the_owners_answer_verbatim_when_set() -> None:
     # Breaks when: lead_prompt ignores `answer` or alters its text.
     answer = "Yes: ship it as `relay`.\n  Keep the old name as an alias."
-    prompt = lead_prompt(QUEUE, _section(), resume=None, answer=answer, retire_flag=RETIRE_FLAG)
+    prompt = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=answer, retire_flag=RETIRE_FLAG)
     assert answer in prompt
 
 
@@ -156,6 +157,7 @@ def _with_feedback(feedback: str | None = FEEDBACK) -> str:
         QUEUE,
         _section(),
         resume="sess-lead-7",
+        report=None,
         answer=None,
         retire_flag=RETIRE_FLAG,
         check_feedback=feedback,
@@ -302,6 +304,7 @@ def _with_map(map_block: str | None = MAP_BLOCK) -> str:
         QUEUE,
         _section(),
         resume="sess-lead-7",
+        report=None,
         answer=None,
         retire_flag=RETIRE_FLAG,
         map_block=map_block,
@@ -655,3 +658,62 @@ def test_recut_brief_with_a_design_keeps_everything_else() -> None:
     assert str(QUEUE) in brief
     assert brief.count(AMENDED) == 1
     assert brief.replace(AMENDED, " ").split() == plain.split()
+# Order 17, behavior 4: "resume <session id>" when resume is set; when report is set, next to
+# that line, the report verbatim under a heading naming it the previous lead's final report,
+# saying it is that session's last reply so the new lead need not recall it;
+# The signature check keeps a missing `report` parameter an assertion failure, not a TypeError.
+
+REPORT = (
+    "Step 2 committed at 1a2b3c: `relay/state.py` built.\n"
+    "  Next: step 3, red tests for {prompts}.\n"
+    "\tLeft: 100% of step 4\n"
+    "RETIRED"
+)
+ANSWER = "Use port 8080."
+HEADING = "previous lead's final report"
+
+
+def _with_report(report: str | None, resume: str | None = "sess-lead-7", answer: str | None = ANSWER) -> str:
+    assert "report" in inspect.signature(lead_prompt).parameters, "lead_prompt has no `report`"
+    return lead_prompt(QUEUE, _section(), resume=resume, report=report, answer=answer, retire_flag=RETIRE_FLAG)
+
+
+def test_lead_prompt_holds_the_report_verbatim_when_set() -> None:
+    # Breaks when: lead_prompt ignores `report`, or reflows, strips or escapes its text.
+    prompt = _with_report(REPORT)
+    assert REPORT in prompt
+    assert "resume sess-lead-7" in prompt
+
+
+def test_lead_prompt_puts_the_report_under_a_heading_naming_it_the_previous_leads_final_report() -> None:
+    # Breaks when: the report is pasted with no heading, or the heading follows the report.
+    prompt = _with_report(REPORT)
+    heading = prompt.lower().find(HEADING)
+    assert heading != -1
+    assert heading < prompt.index(REPORT)
+
+
+def test_lead_prompt_says_the_report_is_that_sessions_last_reply() -> None:
+    # Breaks when: the prompt does not tell the new lead the report is the resumed session's last reply.
+    prompt = _with_report(REPORT)
+    before_report = prompt[: prompt.index(REPORT)].lower()
+    assert "last reply" in before_report
+
+
+def test_lead_prompt_puts_the_report_next_to_the_resume_line() -> None:
+    # Breaks when: the report lands apart from the resume line, with the body, the answer or the
+    # retire contract between them.
+    prompt = _with_report(REPORT)
+    resume = prompt.index("resume sess-lead-7")
+    report = prompt.index(REPORT)
+    between = prompt[min(resume, report) : max(resume, report)]
+    assert BODY not in between
+    assert ANSWER not in between
+    assert str(RETIRE_FLAG) not in between
+
+
+def test_lead_prompt_without_a_report_holds_no_report_heading() -> None:
+    # Breaks when: the heading is written even when no report is given.
+    prompt = _with_report(None)
+    assert "resume sess-lead-7" in prompt
+    assert HEADING not in prompt.lower()

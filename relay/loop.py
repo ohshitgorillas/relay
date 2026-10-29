@@ -129,6 +129,7 @@ def _run_section(
         queue,
         section,
         resume,
+        current.last_report,
         answer,
         retire_flag,
         feedback,
@@ -155,6 +156,7 @@ def _run_section(
     state.set_last_log(sid, result.log)
     if session is not None:
         state.set_last_session(sid, session)
+        state.set_last_report(sid, result.stream.result_text or None)
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
