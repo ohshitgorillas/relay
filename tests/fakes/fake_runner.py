@@ -63,7 +63,11 @@ class FakeRunner:
                     source, target = map(Path, step['write'])
                     target.write_bytes(source.read_bytes())
                 if step.get('then'):
-                    subprocess.run(step['then'], cwd=cwd, stdin=subprocess.DEVNULL, check=True)
+                    # Like run_agent, keep the agent's stderr beside the run's log.
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    stderr = run_dir / f'{_next_number(run_dir)}.stderr'
+                    with stderr.open('ab') as err:
+                        subprocess.run(step['then'], cwd=cwd, stdin=subprocess.DEVNULL, stderr=err, check=True)
             else:
                 steps = json.loads(argv[2])
                 step = steps[min(n, len(steps) - 1)]
