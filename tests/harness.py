@@ -36,6 +36,7 @@ class Background:
         self.result: int | None = None
         self.error: BaseException | None = None
         self.thread = threading.Thread(target=self._body, args=(queue, cfg), daemon=True)
+        self.thread._relay_stop_file = State.open(queue, cfg).stop_file
         self.thread.start()
 
     def _body(self, queue: Path, cfg: Config) -> None:
@@ -50,6 +51,11 @@ class Background:
         if self.error is not None:
             raise self.error
         return False
+
+    def wait_for_pass(self) -> None:
+        """Wait for two further checks of this queue's stop file."""
+        target = getattr(self.thread, '_relay_polls', 0) + 2
+        until(lambda: getattr(self.thread, '_relay_polls', 0) >= target or not self.still_running())
 
     def finish(self, timeout: float = 15.0) -> int | None:
         self.thread.join(timeout)

@@ -37,8 +37,6 @@ M2 = "m2-rest-queue.md"
 DONE_LEAD = "stream-lead.jsonl"
 NO_STATUS_LEAD = "stream-error.jsonl"
 
-# Long enough for many `poll_seconds` (0.05 in `fake_cfg`) to pass.
-SETTLE = 0.5
 
 
 def _lines(name: str) -> list[str]:
@@ -323,7 +321,7 @@ def test_each_pass_re_parses_the_queue(
     apply = _between_passes(monkeypatch, replace_and_answer)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         apply(5.0)
         loop.finish()
@@ -379,7 +377,7 @@ def test_with_only_parked_sections_left_the_loop_waits_instead_of_stopping(
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         assert State.open(queue, cfg).section(parked).status == "parked"
         assert State.open(queue, cfg).section(parked).last_session is None
@@ -403,7 +401,7 @@ def test_a_stop_file_created_while_waiting_stops_with_stop_file(
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         touched = time.time()
         State.open(queue, cfg).stop_file.touch()
@@ -428,7 +426,7 @@ def test_an_answer_on_a_parked_section_while_waiting_starts_the_next_pass(
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).set_answer(parked, "Use port 8080.")
         assert loop.finish() == ExitCode.QUEUE_EMPTY
@@ -448,7 +446,7 @@ def test_the_loop_holds_the_lock_while_waiting(
     state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         with pytest.raises(LockedError):
             State.open(queue, cfg).lock()
@@ -465,9 +463,9 @@ def test_waiting_sends_no_ping(
     state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         assert _pings(tmp_path) == []
     finally:
@@ -475,52 +473,7 @@ def test_waiting_sends_no_ping(
         loop.thread.join(15)
 
 
-# Behaviors 7 to 11 (pass steps 6 and 7, and the lead's cwd) watch each lead through a
-# recording shim put in front of the fake `claude`. The shim reads the lead's prompt on stdin
-# and writes `{"cwd", "prompt", "appeared"}` to `<record dir>/run-<n>.json`, n counting from 0.
-# It then runs the fake on the scenario's first `split` lines, and, when `split` is above 0,
-# watches for up to WATCH seconds for a path the prompt names that did not exist when the lead
-# started (the retire flag), before running the fake on the rest. Every stream line it emits
-# is the fake's, from the scenario `RELAY_FAKE_SCENARIO` names. Given a fifth argument, the
-# shim first creates that path, before it records anything.
-_SHIM = r"""
-import json, os, re, subprocess, sys, time
-rec, fake, split, watch = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
-if len(sys.argv) > 5:
-    open(sys.argv[5], "a").close()
-prompt = sys.stdin.read()
-runs = [n for n in os.listdir(rec) if n.startswith("run-") and n.endswith(".json")]
-out = os.path.join(rec, "run-%d.json" % len(runs))
-def save(appeared):
-    with open(out + ".part", "w") as f:
-        json.dump({"cwd": os.getcwd(), "prompt": prompt, "appeared": appeared}, f)
-    os.replace(out + ".part", out)
-save([])
-paths = sorted({p.rstrip(".,;:)") for p in re.findall(r"/[^\s`'\"<>]+", prompt)})
-before = {p for p in paths if os.path.exists(p)}
-lines = open(os.environ["RELAY_FAKE_SCENARIO"]).read().splitlines()
-def emit(part, name):
-    path = os.path.join(rec, name)
-    with open(path, "w") as f:
-        f.write("".join(line + "\n" for line in part))
-    env = dict(os.environ, RELAY_FAKE_SCENARIO=path)
-    sys.stdout.flush()
-    subprocess.run([fake], stdin=subprocess.DEVNULL, env=env, check=True)
-if split > 0:
-    emit(lines[:split], "part-1.txt")
-    appeared = []
-    end = time.time() + watch
-    while not appeared and time.time() < end:
-        appeared = [p for p in paths if p not in before and os.path.exists(p)]
-        time.sleep(0.02)
-    save(appeared)
-    emit(lines[split:], "part-2.txt")
-else:
-    emit(lines, "part-1.txt")
-"""
-
-# Seconds the shim watches for the retire flag.
-WATCH = 1.0
+# Behaviors 7 to 11 use the in-process runner to record prompts and retire flags.
 
 # In DONE_LEAD, the first assistant message (line 1) leaves context_tokens at 3 + 1200 + 5000
 # and spend.tokens at 3 + 1200 + 5000 + 40; the second (line 3) leaves context_tokens at
@@ -537,10 +490,7 @@ def _shimmed(cfg: Config, tmp_path: Path, split: int = 0, touch: Path | None = N
     lead creates `touch` as it starts, when given."""
     rec = tmp_path / "records"
     rec.mkdir(exist_ok=True)
-    fake = cfg.lead_command[0]
-    lead = [sys.executable, "-c", _SHIM, str(rec), fake, str(split), str(WATCH)]
-    if touch is not None:
-        lead.append(str(touch))
+    lead = ["fake-record", str(rec), str(split), str(touch) if touch is not None else ""]
     return dataclasses.replace(cfg, lead_command=lead)
 
 
@@ -754,35 +704,7 @@ def test_the_lead_runs_in_the_git_top_level_of_the_queues_directory(
     assert Path(str(_record(tmp_path, 0)["cwd"])).resolve() == tmp_path.resolve()
 
 
-# Behaviors of pass step 8, the budget-triggered retire and the stops (s7.d3) script each
-# lead and recut run through a sequencing shim put in front of the fake `claude`. The shim
-# reads the prompt on stdin and writes `{"cwd", "prompt"}` to `<record dir>/run-<n>.json`,
-# n counting from 0. Run n takes the plan's step n (the last step once the plan runs out,
-# or step n modulo the plan's length when it cycles): it copies the step's `write` source
-# over its target when the step has one, runs the fake on the step's scenario file and exits
-# with the step's exit code. Every stream line it emits is the fake's, from `tests/fixtures/`.
-_SEQ = r"""
-import json, os, subprocess, sys
-rec, fake, plan = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-prompt = sys.stdin.read()
-n = len([p for p in os.listdir(rec) if p.startswith("run-") and p.endswith(".json")])
-out = os.path.join(rec, "run-%d.json" % n)
-with open(out + ".part", "w") as f:
-    json.dump({"cwd": os.getcwd(), "prompt": prompt}, f)
-os.replace(out + ".part", out)
-steps = plan["steps"]
-step = steps[n % len(steps)] if plan["cycle"] else steps[min(n, len(steps) - 1)]
-if step.get("write"):
-    src, dst = step["write"]
-    with open(src, "rb") as f:
-        data = f.read()
-    with open(dst, "wb") as f:
-        f.write(data)
-env = dict(os.environ, RELAY_FAKE_SCENARIO=step["scenario"])
-sys.stdout.flush()
-subprocess.run([fake], stdin=subprocess.DEVNULL, env=env, check=True)
-sys.exit(step["exit"])
-"""
+# Pass step 8 scripts successive leads and recuts through the shared fake runner.
 
 # Scripted leads of `tests/fixtures/`, each a session of its own, ending with the status line named.
 RETIRED_LEAD = "stream-retired.jsonl"  # "RETIRED", session "sess-lead-3"
@@ -828,7 +750,7 @@ def _step(name: str, exit: int = 0, write: tuple[Path, Path] | None = None) -> d
 def _plan(tmp_path: Path, fake: str, role: str, steps: list[dict[str, object]], cycle: bool) -> list[str]:
     rec = tmp_path / "plans" / role
     rec.mkdir(parents=True, exist_ok=True)
-    return [sys.executable, "-c", _SEQ, str(rec), fake, json.dumps({"steps": steps, "cycle": cycle})]
+    return ["fake-plan", str(rec), json.dumps({"steps": steps, "cycle": cycle})]
 
 
 def _sequenced(
@@ -1429,7 +1351,7 @@ def test_a_stop_file_while_waiting_sends_one_stopped_ping(
     state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -1463,7 +1385,7 @@ def _stopped_message(cfg: Config, base: Path, variant: str, scenario: Callable[[
         state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
         loop = _Background(queue, cfg)
         try:
-            time.sleep(SETTLE)
+            loop.wait_for_pass()
             assert loop.still_running()
             state.stop_file.touch()
             assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -1638,7 +1560,7 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
     loop = _Background(queue, cfg)
     try:
         _until(lambda: State.open(queue, cfg).section(c).status == "done")
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).set_answer(b, "Use port 8080.")
         assert loop.finish() == ExitCode.QUEUE_EMPTY
@@ -1801,7 +1723,7 @@ def test_a_stop_file_while_waiting_writes_ended_just_after_the_stopped_ping(
     state = _park_all_but_done(queue, cfg, _open_ids(queue)[0])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -2318,9 +2240,9 @@ def test_a_wait_that_goes_on_writes_one_waiting_line_naming_the_parked_section(
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -2350,7 +2272,7 @@ def test_a_wait_writes_one_waiting_line_naming_each_parked_section_exactly_once(
         state.park(sid, QUESTION)
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -2377,11 +2299,11 @@ def test_a_new_wait_on_a_changed_parked_set_writes_a_new_waiting_line(
     cfg = _sequenced(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).set_answer(a, "Use port 8080.")
         _until(lambda: State.open(queue, cfg).section(a).status == "done")
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
@@ -2407,11 +2329,11 @@ def test_a_new_wait_on_the_parked_set_last_printed_writes_no_waiting_line(
     cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD)])
     loop = _Background(queue, cfg)
     try:
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).set_answer(a, "Use port 8080.")
         _until(lambda: len(_pings(tmp_path)) == 1)
-        time.sleep(SETTLE)
+        loop.wait_for_pass()
         assert loop.still_running()
         State.open(queue, cfg).stop_file.touch()
         assert loop.finish(timeout=5.0) == ExitCode.STOP_FILE
