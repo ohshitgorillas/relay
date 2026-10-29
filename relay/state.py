@@ -173,19 +173,23 @@ class State:
             return self.check_log(Path(recorded))
         return self.run_dir / f"check-{sid}.check"
 
-    def park(self, sid: str, question: str, design_numbers: tuple[int, ...] | None = None) -> None:
-        """Park `sid` on `question`. `design_numbers` marks it as the open design decisions'
-        question (their numbers); any other park clears both design fields, so no design decision is
-        recorded as waiting and its answer is no design answer."""
+    def park(
+        self, sid: str, question: str, design: tuple[str, tuple[int, ...]] | None = None
+    ) -> None:
+        """Park `sid` on `question`. `design` is the design path and the open decision numbers when
+        the question is the open design decisions': both are written with the park, one record. Any
+        other park clears both, so no design decision is recorded as waiting and its answer is no
+        design answer."""
 
         def change(s: SectionState, _r: dict) -> None:
             s.status = "parked"
             s.question = question
-            if design_numbers is None:
+            if design is None:
                 s.design_open = None
                 s.design_numbers = None
             else:
-                s.design_numbers = list(design_numbers)
+                s.design_open = design[0]
+                s.design_numbers = list(design[1])
 
         self._update(sid, change)
 

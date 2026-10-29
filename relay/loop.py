@@ -110,10 +110,12 @@ def _run_section(
         return None
     if _over_cap(cfg, queue, state, ledger, section):
         return None
-    if current.design_open is not None and current.design_numbers is not None:
+    if current.design_open is not None:
         answer = state.take_answer(sid)
         if answer is not None:
-            _design_answer(queue, cfg, state, ledger, since, cwd, retire_flag, section, answer)
+            _design_answer(
+                queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer
+            )
             return None
     m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
     if spent:
@@ -353,11 +355,11 @@ def _park(
     state: State,
     sid: str,
     question: str,
-    design_numbers: tuple[int, ...] | None = None,
+    design: tuple[str, tuple[int, ...]] | None = None,
 ) -> None:
     """Park `sid` with `question`, ping the owner and show the question: the one park.
-    `design_numbers` marks the question as the open design decisions' (state.park)."""
-    state.park(sid, question, design_numbers)
+    `design` (path, numbers) marks the question as the open design decisions' (state.park)."""
+    state.park(sid, question, design)
     ping.needs_owner(cfg, queue, sid, question)
     progress.needs_answer(sid, question)
 
@@ -466,19 +468,21 @@ def _design_answer(
     cwd: Path,
     retire_flag: Path,
     section: Section,
+    design_open: str,
     answer: str,
 ) -> None:
     """Run the architect with the owner's `answer` to the open decisions, then act on its report."""
     sid = section.id
     current = state.section(sid)
-    design = Path(cast(str, current.design_open))
+    design = Path(design_open)
     if not current.last_log:
         # The recut needs the lead's log as evidence; none is recorded, so the design change cannot land.
         state.set_design_open(sid, None)
         what = "no lead log is recorded for the section"
         _park(cfg, queue, state, sid, ladder.failed_text(sid, design, what))
         return
-    numbers = tuple(cast(list[int], current.design_numbers))
+    # A record parked before the numbers were stored has none: the brief then numbers the answer "new".
+    numbers = tuple(current.design_numbers or ())
     brief = design_answer_brief(design, numbers, answer, cfg.design_approval)
     problem = f"the owner ruled on the open design decisions: {answer}"
     _architect(
@@ -553,9 +557,9 @@ def _design_outcome(
     elif report.rejected:
         what = "the architect rejected the brief as steering"
     elif report.decisions or report.unfiled:
-        state.set_design_open(sid, str(design))
         _park(
-            cfg, queue, state, sid, ladder.decisions_text(sid, design, report), ladder.decision_numbers(report)
+            cfg, queue, state, sid, ladder.decisions_text(sid, design, report),
+            (str(design), ladder.decision_numbers(report)),
         )
         return
     elif not report.approved:
