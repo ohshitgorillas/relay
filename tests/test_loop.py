@@ -1355,9 +1355,9 @@ def test_two_recuts_that_leave_the_queue_unchanged_stop_with_failed_twice(
 
 # A section a recut made that itself ends RECUT climbs to rung 2, a design change
 # (relay-ladder-design.md:58). With no design named by the queue, rung 2 is rung 3, parked for the
-# owner with "no design to amend: the queue names none" (relay-ladder-design.md:61, 243), and it
-# gets no second recut.
-NO_DESIGN = "no design to amend: the queue names none"
+# owner with "no design to amend: the queue names no design file under docs/superpowers/specs/"
+# (relay-ladder-design.md:61; relay-codex-architect-design.md:64-66), and it gets no second recut.
+NO_DESIGN = "no design to amend: the queue names no design file under docs/superpowers/specs/"
 
 
 def _queue_of(path: Path, *ids: str) -> Path:
@@ -1369,7 +1369,7 @@ def test_a_section_from_a_recut_that_ends_recut_with_no_design_is_parked_as_no_d
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: a recut section's RECUT under a queue naming no design runs the divvyer again,
-    # parks without "no design to amend: the queue names none", or counts a failure.
+    # parks without NO_DESIGN, or counts a failure.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`, `s1b`.
     recut = _queue_of(tmp_path / "recut.md", "s1a", "s1b", "s2")
@@ -1391,7 +1391,7 @@ def test_a_section_from_a_recut_that_ends_recut_with_no_design_pings_the_owner_w
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: the recut section parked for having no design to amend sends no needs-owner ping,
-    # pings without "no design to amend: the queue names none", or pings before it is parked.
+    # pings without NO_DESIGN, or pings before it is parked.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     # relay-check-design.md:297: a split makes flat siblings, `s1` giving `s1a`.
     recut = _queue_of(tmp_path / "recut.md", "s1a", "s2")
@@ -1433,7 +1433,7 @@ def test_a_recut_that_keeps_the_section_id_runs_it_on_under_that_id_and_parks_it
 ) -> None:
     # Breaks when: a section the recut rewrote in place under its own id is not taken as the recut's,
     # so its next RECUT, under a queue naming no design, runs the divvyer again instead of parking
-    # with "no design to amend: the queue names none" (relay-ladder-design.md:58, 61).
+    # with NO_DESIGN (relay-ladder-design.md:58, 61; relay-codex-architect-design.md:64-66).
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     widened = tmp_path / "widened.md"
     widened.write_text(
@@ -4321,7 +4321,7 @@ def test_rung_3_a_design_status_under_a_queue_naming_no_design_is_parked_as_no_d
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: DESIGN under a queue with no head design line runs the architect or the
-    # divvyer, records a failure, or parks without "no design to amend: the queue names none".
+    # divvyer, records a failure, or parks without NO_DESIGN (relay-codex-architect-design.md:64-66).
     queue = _queue_of(tmp_path / "queue.md", "s1")
     scenario(_lines(DONE_LEAD))
     leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
@@ -4339,7 +4339,7 @@ def test_rung_3_a_design_status_under_a_queue_naming_no_design_is_parked_as_no_d
 
 
 @pytest.mark.parametrize("report", [ARCHITECT_REJECTED, ARCHITECT_UNAPPROVED])
-def test_rung_3_a_rejected_or_unapproved_design_report_parks_the_section_as_a_design_change_that_did_not_land(
+def test_rung_3_a_rejected_or_unapproved_design_report_hands_the_section_back_to_its_lead_unparked(
     report: str,
     cfg: Config,
     tmp_path: Path,
@@ -4347,23 +4347,24 @@ def test_rung_3_a_rejected_or_unapproved_design_report_parks_the_section_as_a_de
     scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a rejected or unapproved report goes on to the divvyer, marks the section
-    # design_changed, records a failure, or parks without "the design change for <sid> in
-    # <design> did not land: <what>".
+    # design_changed, records a failure, parks the section, or the next lead gets no hand-back
+    # guidance naming what went wrong (relay-codex-architect-design.md:98-103).
     queue = _ladder(queue_file, cfg, tmp_path)
     scenario(_lines(DONE_LEAD))
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}")))]
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads)
     cfg = _with_architect(cfg, tmp_path, [_step(report)])
     cfg = _stop_on_ping(cfg, queue)
-    assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
     assert len(_runs(tmp_path, "design")) == 1
     assert _runs(tmp_path, "recut") == []
-    assert len(_runs(tmp_path, "lead")) == 1
+    leads_run = _runs(tmp_path, "lead")
+    assert len(leads_run) == 3
+    assert HANDBACK + _WHATS[report] + ")" in str(leads_run[1]["prompt"])
     section = State.open(queue, cfg).section("s1")
-    assert section.status == "parked"
-    assert section.question is not None
-    assert re.fullmatch(_failed_design("s1"), section.question), section.question
-    assert section.failures == 0
+    assert section.question is None
+    # The two failures that end the go are the scripted status-less leads after the hand-back.
+    assert section.failures == 2
     assert section.design_changed is False
     assert section.design_open is None
     assert _entries(queue, cfg, "recut") == []
@@ -4420,11 +4421,19 @@ def test_a_reportless_architect_is_rerun_with_its_message_then_the_section_goes_
     assert f"`git diff main...{commit}`" in lines[1]
     assert str(tree) not in brief
     s1 = next(sec for sec in parse_queue(queue) if sec.id == "s1")
-    assert s1.body.rstrip() in brief
-    retry = str(designs[1]["prompt"])
-    assert retry.startswith(brief.rstrip())
-    assert "Blocked: the cited Relay log is outside the repository." in retry
-    assert "no `BRIEF …` … `END DESIGN` block" in retry
+    # relay-codex-architect-design.md:36-39: the section text ends the `lead new:` line, through
+    # _ruling, each run of whitespace one space.
+    assert "Section text: " + " ".join(s1.body.split()) in lines[1]
+    # relay-codex-architect-design.md:41-45: the rerun's brief is the first with one `lead new:`
+    # line inserted before its `approve:` line.
+    retry = str(designs[1]["prompt"]).splitlines()
+    assert lines[-1].startswith("approve: ")
+    assert retry[-1] == lines[-1]
+    assert retry[:-2] == lines[:-1]
+    added = retry[-2]
+    assert added.startswith("lead new: ")
+    assert "Blocked: the cited Relay log is outside the repository." in added
+    assert "its final message had no BRIEF … END DESIGN block" in added
 
     # The one ping is the go's own stop; none asks the owner anything.
     assert [" ".join(p) for p in _pings(tmp_path)] == ["relay ladder-queue.md: stopped failed twice: section s1 failed twice"]
@@ -4480,6 +4489,327 @@ def test_a_lead_that_asks_for_design_after_design_against_a_reportless_architect
     section = State.open(queue, cfg).section("s1")
     assert section.status == "open"
     assert section.failures == 0
+
+
+# An architect run that crashes or files no report retries once, then hands the section back to
+# its lead with guidance: no park, no failure (relay-codex-architect-design.md, `relay/loop.py`,
+# `design_retry_brief`, `handback_text`, `design_retrying`, `design_handed_back`; Order 5).
+
+# The opening of `ladder.handback_text`, up to the `<what>` it carries in brackets.
+HANDBACK = "Relay's architect filed no design change for this section's last DESIGN or RECUT ("
+STOPPED_FAILED_TWICE = "relay ladder-queue.md: stopped failed twice: section s1 failed twice"
+
+
+def _architect_run(
+    tmp_path: Path, session: str, text: str, *, is_error: bool = False, context: int = 1206, result: bool = True
+) -> Path:
+    """A scripted architect run in session `session`: one assistant message at `context` context
+    tokens, then, when `result`, a result event carrying `text`, marked an error when `is_error`."""
+    streams = tmp_path / "streams"
+    streams.mkdir(exist_ok=True)
+    usage = {"input_tokens": 6, "cache_creation_input_tokens": 200, "cache_read_input_tokens": context - 206, "output_tokens": 30}
+    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
+    body = {"id": f"msg_{session}", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Reading."}], "usage": usage}
+    lines: list[dict[str, object]] = [init, {"type": "assistant", "message": body, "session_id": session}]
+    if result:
+        lines.append(
+            {
+                "type": "result",
+                "subtype": "error_during_execution" if is_error else "success",
+                "is_error": is_error,
+                "duration_ms": 800,
+                "num_turns": 1,
+                "result": text,
+                "session_id": session,
+                "total_cost_usd": 0.01,
+                "usage": usage,
+            }
+        )
+    path = streams / f"{session}.jsonl"
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    return path
+
+
+def _architect_goes_wrong(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], architects: list[dict[str, object]]
+) -> tuple[Path, Config]:
+    """The ladder queue whose lead on s1 asks for DESIGN, then ends with no status line every run
+    after; each architect run takes the next of `architects`; every ping is recorded and stops
+    the go. Return (queue, cfg)."""
+    queue = _ladder(queue_file, cfg, tmp_path)
+    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads)
+    cfg = _with_architect(cfg, tmp_path, architects)
+    return queue, _record_and_stop_on_ping(cfg, queue, tmp_path)
+
+
+def _retry_line(tmp_path: Path) -> str:
+    """The one line the architect's second brief adds to its first: the brief's lines, with one
+    line more just before the closing `approve:` line."""
+    designs = _runs(tmp_path, "design")
+    assert len(designs) == 2, designs
+    first = str(designs[0]["prompt"]).splitlines()
+    retry = str(designs[1]["prompt"]).splitlines()
+    assert first[-1].startswith("approve: "), first
+    assert retry[-1] == first[-1], retry
+    assert retry[:-2] == first[:-1], retry
+    added = retry[-2]
+    assert added.startswith("lead new: "), added
+    return added
+
+
+def _handed_back_unparked(queue: Path, cfg: Config, tmp_path: Path) -> str:
+    """Check the section went back to its lead, parked for no one and with no failure of the
+    architect's counted; return the prompt of the lead run straight after the hand-back."""
+    # The go ends on the two status-less leads after the hand-back: a counted architect failure
+    # would end it after one, and a park would ping and stop it.
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 3, leads
+    assert [" ".join(p) for p in _pings(tmp_path)] == [STOPPED_FAILED_TWICE]
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.question is None
+    assert section.design_open is None
+    assert section.design_changed is False
+    assert section.failures == 2
+    assert len(_entries(queue, cfg, "design")) == 2
+    return str(leads[1]["prompt"])
+
+
+@pytest.mark.parametrize("how", ["killed", "nonzero-exit", "backend-error"])
+def test_a_failed_architect_run_reruns_once_with_its_error_line_then_goes_back_to_the_lead_with_no_park_and_no_failure(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a killed, nonzero-exit or backend-error architect run parks the section with
+    # failed_text, pings the owner or counts a failure; it is not rerun, or rerun more than once;
+    # the rerun's brief lacks a `lead new:` line before `approve:` saying "it failed: <error
+    # line>"; the next lead gets no hand-back guidance naming the failure; or the retrying and
+    # handed-back progress lines are not written.
+    scenario(_lines(DONE_LEAD))
+    text = "Blocked: the cited Relay log is outside the repository."
+    if how == "killed":
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", text, context=cfg.hard_ceiling)))
+    elif how == "nonzero-exit":
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", text)), exit=1)
+    else:
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+
+    added = _retry_line(tmp_path)
+    assert re.search(r"it failed: \S", added), added
+    prompt = _handed_back_unparked(queue, cfg, tmp_path)
+    assert HANDBACK + "it failed: " in prompt, prompt
+    texts = _texts(capsys.readouterr().out)
+    retrying = [t for t in texts if t.startswith("design s1: it failed: ") and t.endswith("; running the architect again")]
+    assert len(retrying) == 1, texts
+    back = [t for t in texts if t.startswith("design s1: it failed: ") and t.endswith("; back to the lead with the architect's message")]
+    assert len(back) == 1, texts
+
+
+@pytest.mark.parametrize("how", ["no-report", "stopped-mid-turn"])
+def test_a_reportless_architect_run_reruns_once_then_goes_back_to_the_lead_with_no_park_and_no_failure(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: an architect run with no report, a clean one or one that stops mid-turn with no
+    # result, no stderr and no report, parks the section, pings the owner or counts a failure; it
+    # is not rerun, or rerun more than once; the rerun's brief lacks a `lead new:` line before
+    # `approve:` giving the reason and the run's final message; the next lead gets no hand-back
+    # guidance with the architect's message; or the progress lines are not written.
+    scenario(_lines(DONE_LEAD))
+    if how == "no-report":
+        architects = [
+            _step(str(_architect_run(tmp_path, "sess-arch", REPORTLESS))),
+            _step(str(_architect_run(tmp_path, "sess-arch-2", REPORTLESS_AGAIN))),
+        ]
+    else:
+        architects = [_step(str(_architect_run(tmp_path, "sess-arch", "", result=False)))]
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, architects)
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+
+    added = _retry_line(tmp_path)
+    no_block = "BRIEF" in added and "END DESIGN" in added and "it failed: " not in added
+    prompt = _handed_back_unparked(queue, cfg, tmp_path)
+    texts = _texts(capsys.readouterr().out)
+    if how == "no-report":
+        assert no_block, added
+        assert "Blocked: the cited Relay log is outside the repository." in added, added
+        assert HANDBACK + "it filed no report)" in prompt, prompt
+        assert REPORTLESS_AGAIN in prompt, prompt
+        whats = ["it filed no report"]
+    else:
+        # A run cut off mid-turn may be judged failed or reportless; either way it is rerun once
+        # and handed back.
+        assert no_block or re.search(r"it failed: \S", added), added
+        assert HANDBACK + "it filed no report)" in prompt or HANDBACK + "it failed: " in prompt, prompt
+        whats = ["it filed no report", "it failed: "]
+    retrying = [
+        t for t in texts
+        if any(t.startswith(f"design s1: {w}") for w in whats) and t.endswith("; running the architect again")
+    ]
+    assert len(retrying) == 1, texts
+    back = [
+        t for t in texts
+        if any(t.startswith(f"design s1: {w}") for w in whats) and t.endswith("; back to the lead with the architect's message")
+    ]
+    assert len(back) == 1, texts
+
+
+# A rejected or unapproved run is not rerun: it goes back to the lead with no park; decisions
+# still park, a rerun's included; and no rerun once the section cap or the budget is spent
+# (relay-codex-architect-design.md, `relay/loop.py` `_architect`, `_design_outcome`; Order 5).
+
+_WHATS = {ARCHITECT_REJECTED: "it rejected the brief as steering", ARCHITECT_UNAPPROVED: "it did not approve the design"}
+CAP_TEXT = re.compile(
+    r"section s1 spent \$\d+\.\d\d of its \$5\.00 cap; raise `cap:` in the queue or --section-dollar-cap to go on"
+)
+
+
+@pytest.mark.parametrize("report", [ARCHITECT_REJECTED, ARCHITECT_UNAPPROVED])
+def test_a_rejected_or_unapproved_architect_run_goes_back_to_the_lead_with_no_park_no_rerun_and_no_failure(
+    report: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a rejected or unapproved architect report parks the section with failed_text,
+    # pings the owner, counts a failure or leaves design_open set; it is rerun; it goes on to the
+    # divvyer; the next lead gets no hand-back guidance naming what went wrong; or the
+    # handed-back progress line is not written.
+    scenario(_lines(DONE_LEAD))
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [_step(report)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+
+    what = _WHATS[report]
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 3, leads
+    assert HANDBACK + what + ")" in str(leads[1]["prompt"]), leads[1]["prompt"]
+    assert [" ".join(p) for p in _pings(tmp_path)] == [STOPPED_FAILED_TWICE]
+    section = State.open(queue, cfg).section("s1")
+    assert section.question is None
+    assert section.design_open is None
+    assert section.design_changed is False
+    assert section.failures == 2
+    texts = _texts(capsys.readouterr().out)
+    assert f"design s1: {what}; back to the lead with the architect's message" in texts, texts
+    assert all(not t.endswith("; running the architect again") for t in texts), texts
+
+
+def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the_decisions(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: a report with decisions, filed on the rerun after a failed architect run, is
+    # handed back to the lead instead of parking the section for the owner with each decision
+    # line and design_open; or the failed first run parks with failed_text and is never rerun.
+    scenario(_lines(DONE_LEAD))
+    failed = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [failed, _step(ARCHITECT_DECISION)])
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+
+    assert len(_runs(tmp_path, "design")) == 2
+    assert _runs(tmp_path, "recut") == []
+    assert len(_runs(tmp_path, "lead")) == 1
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.design_open is not None
+    assert section.design_open.endswith(DESIGN_PATH)
+    assert section.question is not None
+    assert f"{DESIGN_PATH} needs a product choice:" in section.question
+    pings = _pings(tmp_path)
+    assert len(pings) == 1, pings
+    for line in (DECISION_1, DECISION_2):
+        assert line in section.question
+        assert line in pings[0][0]
+    assert section.failures == 0
+
+
+@pytest.mark.parametrize("how", ["nonzero-exit", "backend-error"])
+def test_an_architect_run_that_spends_the_section_cap_is_not_rerun_and_the_next_pass_parks_on_the_cap(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed architect run, nonzero exit or backend error, whose spend passes the
+    # section's `cap:` is rerun anyway; or it parks the section with failed_text, or counts a
+    # failure, instead of handing it back so that the next pass parks it on the cap text.
+    scenario(_lines(DONE_LEAD))
+    if how == "nonzero-exit":
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
+    else:
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)])
+    # s1's `cap: $5` is under its spend before the lead ($4.985) and after it ($4.995), and
+    # spent once the architect's $0.01 lands ($5.005).
+    _section_spent(queue, cfg, "s1", 4.985)
+    assert run(queue, cfg) == ExitCode.STOP_FILE
+
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.question is not None
+    assert CAP_TEXT.fullmatch(section.question)
+    assert section.design_open is None
+    assert section.failures == 0
+    texts = _texts(capsys.readouterr().out)
+    assert all(not t.endswith("; running the architect again") for t in texts), texts
+
+
+@pytest.mark.parametrize("how", ["nonzero-exit", "backend-error"])
+def test_an_architect_run_that_spends_the_budget_is_not_rerun_and_the_go_stops_on_the_budget_with_no_park(
+    how: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a failed architect run, nonzero exit or backend error, whose spend passes the
+    # go's dollar budget is rerun anyway; or it parks the section with failed_text, pings the
+    # owner about it or counts a failure, instead of handing it back and letting the budget end
+    # the go.
+    scenario(_lines(DONE_LEAD))
+    if how == "nonzero-exit":
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
+    else:
+        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
+    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)])
+    # The lead spends $0.01, under the budget; the architect's $0.01 more passes it.
+    cfg = dataclasses.replace(cfg, dollar_budget=0.015)
+    assert run(queue, cfg) == ExitCode.BUDGET
+
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "open"
+    assert section.question is None
+    assert section.design_open is None
+    assert section.failures == 0
+    texts = _texts(capsys.readouterr().out)
+    assert all(not t.endswith("; running the architect again") for t in texts), texts
 
 
 def test_rung_3_a_design_decision_parks_with_its_recommendation_and_relay_answer_resumes_the_architect(
