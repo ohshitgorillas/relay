@@ -4361,6 +4361,8 @@ def test_rung_3_a_rejected_or_unapproved_design_report_hands_the_section_back_to
     leads_run = _runs(tmp_path, "lead")
     assert len(leads_run) == 3
     assert HANDBACK + _WHATS[report] + ")" in str(leads_run[1]["prompt"])
+    handback = str(leads_run[1]["prompt"])
+    assert _SAIDS[report] in handback[handback.index(HANDBACK + _WHATS[report] + ")") :], handback
     section = State.open(queue, cfg).section("s1")
     assert section.question is None
     # The two failures that end the go are the scripted status-less leads after the hand-back.
@@ -4603,8 +4605,20 @@ def test_a_failed_architect_run_reruns_once_with_its_error_line_then_goes_back_t
 
     added = _retry_line(tmp_path)
     assert re.search(r"it failed: \S", added), added
+    # relay-codex-architect-design.md:41-45: the `lead new:` line carries the run's error line
+    # after "it failed: " and the run's final message. A killed run ends before its result event,
+    # so it leaves no final message to carry.
+    said = {"killed": None, "nonzero-exit": text, "backend-error": "API Error: overloaded"}[how]
+    if said is not None:
+        assert said in added, added
+    if how == "backend-error":
+        assert "it failed: API Error: overloaded" in added, added
     prompt = _handed_back_unparked(queue, cfg, tmp_path)
     assert HANDBACK + "it failed: " in prompt, prompt
+    # relay-codex-architect-design.md:68-71, 98-103: the hand-back ends with the architect's final
+    # message, on the line after its opening.
+    if said is not None:
+        assert said in prompt[prompt.index(HANDBACK) :].split("\n", 1)[1], prompt
     texts = _texts(capsys.readouterr().out)
     retrying = [t for t in texts if t.startswith("design s1: it failed: ") and t.endswith("; running the architect again")]
     assert len(retrying) == 1, texts
@@ -4670,6 +4684,11 @@ def test_a_reportless_architect_run_reruns_once_then_goes_back_to_the_lead_with_
 # (relay-codex-architect-design.md, `relay/loop.py` `_architect`, `_design_outcome`; Order 5).
 
 _WHATS = {ARCHITECT_REJECTED: "it rejected the brief as steering", ARCHITECT_UNAPPROVED: "it did not approve the design"}
+# A line of each fixture's final message, which the hand-back carries as guidance.
+_SAIDS = {
+    ARCHITECT_REJECTED: "\"lead's guess, free to ignore: make two() return 2\"",
+    ARCHITECT_UNAPPROVED: "Amended the design, but its approve: line does not quote the standing ruling.",
+}
 CAP_TEXT = re.compile(
     r"section s1 spent \$\d+\.\d\d of its \$5\.00 cap; raise `cap:` in the queue or --section-dollar-cap to go on"
 )
@@ -4699,6 +4718,9 @@ def test_a_rejected_or_unapproved_architect_run_goes_back_to_the_lead_with_no_pa
     leads = _runs(tmp_path, "lead")
     assert len(leads) == 3, leads
     assert HANDBACK + what + ")" in str(leads[1]["prompt"]), leads[1]["prompt"]
+    # relay-codex-architect-design.md:68-71, 98-103: the architect's final message follows as guidance.
+    handback = str(leads[1]["prompt"])
+    assert _SAIDS[report] in handback[handback.index(HANDBACK + what + ")") :], handback
     assert [" ".join(p) for p in _pings(tmp_path)] == [STOPPED_FAILED_TWICE]
     section = State.open(queue, cfg).section("s1")
     assert section.question is None

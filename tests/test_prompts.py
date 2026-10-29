@@ -574,6 +574,10 @@ def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
     assert "filed no design change" in given
     assert guidance in given
     assert given.count("filed no design change") == 1
+    # The guidance paragraph is `guidance` alone: no words of lead_prompt's before or after it
+    # inside that paragraph (design §Homes: no guidance worded in `prompts.py`).
+    paragraphs = [part.strip("\n") for part in re.split(r"\n[ \t]*\n", given)]
+    assert guidance.strip("\n") in paragraphs
     plain = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
     assert "filed no design change" not in plain
 
