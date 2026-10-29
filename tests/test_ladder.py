@@ -30,6 +30,7 @@ from relay.queue import Section
 from relay.state import SectionState
 
 DESIGN = Path("/repo/docs/superpowers/specs/thing-design.md")
+SID = "s3"
 
 
 def _section(*, from_recut: bool, design_changed: bool) -> SectionState:
@@ -50,7 +51,7 @@ def _section(*, from_recut: bool, design_changed: bool) -> SectionState:
 @pytest.mark.parametrize("design", [DESIGN, None], ids=["design", "no-design"])
 def test_climb_recut_on_a_fresh_section_takes_rung_1(design: Path | None) -> None:
     # breaks when: a plain RECUT goes to the architect or to the owner instead of the divvyer's recut.
-    climb_ = climb("RECUT", _section(from_recut=False, design_changed=False), design)
+    climb_ = climb("RECUT", _section(from_recut=False, design_changed=False), design, SID)
     assert climb_.rung == 1
 
 
@@ -66,7 +67,7 @@ def test_climb_takes_rung_2_with_a_design_and_no_design_change(
     kind: str, from_recut: bool
 ) -> None:
     # breaks when: a recut section's second RECUT, or a DESIGN, parks for the owner or recuts again.
-    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), DESIGN)  # type: ignore[arg-type]
+    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), DESIGN, SID)  # type: ignore[arg-type]
     assert climb_.rung == 2
 
 
@@ -80,10 +81,10 @@ def test_climb_takes_rung_2_with_a_design_and_no_design_change(
 )
 def test_climb_takes_rung_3_after_a_design_change(kind: str, from_recut: bool) -> None:
     # breaks when: design_changed is not checked first, so a lineage gets a second design change or recut.
-    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=True), DESIGN)  # type: ignore[arg-type]
+    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=True), DESIGN, SID)  # type: ignore[arg-type]
     assert climb_.rung == 3
-    assert climb_.why.startswith("the ladder ran out: section ")
-    assert climb_.why.endswith(" already had its design change")
+    # docs/superpowers/specs/relay-ladder-design.md:59-60: the text names the `sid` argument.
+    assert climb_.why == f"the ladder ran out: section {SID} already had its design change"
 
 
 # climb: rung 3 when rung 2 has no design to amend
@@ -98,7 +99,7 @@ def test_climb_without_a_design_at_rung_2_takes_rung_3(
     kind: str, from_recut: bool
 ) -> None:
     # breaks when: rung 2 runs the architect with no design path.
-    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), None)  # type: ignore[arg-type]
+    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), None, SID)  # type: ignore[arg-type]
     assert climb_.rung == 3
     assert climb_.why == "no design to amend: the queue names none"
 
@@ -323,7 +324,7 @@ REPORT_TEXT = (
 
 # Each call into relay/ladder.py, given the fake config.
 _LADDER_CALLS: list[tuple[str, Callable[[Config], Any]]] = [
-    ("climb", lambda cfg: climb("DESIGN", _section(from_recut=False, design_changed=False), DESIGN)),
+    ("climb", lambda cfg: climb("DESIGN", _section(from_recut=False, design_changed=False), DESIGN, SID)),
     ("split_reason", lambda cfg: split_reason(f"the problem{GUESS}the fix")),
     ("parse_report", lambda cfg: parse_report(REPORT_TEXT)),
     ("decision_numbers", lambda cfg: decision_numbers(_report(DECISION_1, DECISION_2))),
