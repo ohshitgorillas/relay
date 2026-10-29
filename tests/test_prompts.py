@@ -266,10 +266,11 @@ MAP_BLOCK = (
     "map s4 at 0123456789abcdef0123456789abcdef01234567\n"
     + _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len("END MAP")]
 )
-MAP_SENTENCE = (
-    "Relay's researcher mapped this section's code. "
-    "Put the block below verbatim in every brief you send for this section, the architect's included."
-)
+# Codex architect design, Modules `relay/prompts.py` `lead_prompt`: the map paragraph says put
+# the block verbatim in every brief for this section except an architect's, whose brief
+# carries only its ruling lines.
+MAP_RULE = "verbatim in every brief you send for this section except an architect's"
+MAP_RULING_ONLY = "an architect brief carries only its ruling lines"
 MAP_ROUTE = (
     f'When an agent reports it needs more, run `relay ask {QUEUE} s4 "<question>"` '
     "with a 600000 ms timeout or in the background, and pass on its answer; "
@@ -313,17 +314,19 @@ def _with_map(map_block: str | None = MAP_BLOCK) -> str:
     )
 
 
-def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_with_timeout_and_fallback() -> None:
+def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_and_keeps_the_map_out_of_architect_briefs() -> None:
     # Breaks when: the lead is not told to run `relay ask` with a 600000 ms timeout or in the
-    # background, or the non-zero-exit fallback (the agent reads for itself) is left out, or
-    # the command names another queue or section, or keeps the `<queue> <sid>` placeholders,
-    # or the routing sentence leaves its place between the map sentence and the block.
-    assert MAP_ROUTE in _with_map()
+    # background, or the non-zero-exit fallback is left out, or the lead is still told to put
+    # the map in the architect's brief, or is not told to put it in every other brief for the
+    # section, or the routing sentence leaves its place between the map rule and the block.
     prompt = _with_map()
-    sentence = prompt.find(MAP_SENTENCE)
+    assert MAP_ROUTE in prompt
+    assert "the architect's included" not in prompt
+    rule = prompt.find(MAP_RULE)
     route = prompt.find(MAP_ROUTE)
-    assert sentence != -1
-    assert sentence + len(MAP_SENTENCE) <= route
+    assert rule != -1
+    assert prompt.find(MAP_RULING_ONLY, rule + len(MAP_RULE)) != -1
+    assert rule + len(MAP_RULE) <= route
     assert prompt.find(MAP_BLOCK, route + len(MAP_ROUTE)) != -1
 
 
@@ -332,22 +335,27 @@ def test_lead_prompt_carries_the_map_block_verbatim() -> None:
     assert MAP_BLOCK in _with_map()
 
 
-def test_lead_prompt_puts_the_map_block_after_its_wording() -> None:
-    # Breaks when: the block comes before the sentence that introduces it.
+def test_lead_prompt_puts_the_map_block_after_its_architect_excepting_wording() -> None:
+    # Breaks when: the block comes before the map rule that introduces it, or that rule still
+    # takes in the architect's brief.
     prompt = _with_map()
-    start = prompt.find(MAP_SENTENCE)
+    start = prompt.find(MAP_RULE)
     assert start != -1
-    assert prompt.find(MAP_BLOCK, start + len(MAP_SENTENCE)) != -1
+    ruling_only = prompt.find(MAP_RULING_ONLY, start)
+    assert ruling_only != -1
+    assert prompt.find(MAP_BLOCK, ruling_only + len(MAP_RULING_ONLY)) != -1
 
 
-def test_lead_prompt_without_a_map_leaves_the_map_wording_out() -> None:
+def test_lead_prompt_without_a_map_leaves_the_architect_excepting_map_wording_out() -> None:
     # Breaks when: the map wording is written though map_block is None or left at its
     # default, or is never written at all.
-    assert MAP_SENTENCE in _with_map()
-    assert MAP_SENTENCE not in _with_map(None)
-    assert "relay ask" not in _with_map(None)
-    assert MAP_SENTENCE not in _lead()
-    assert "relay ask" not in _lead()
+    assert MAP_RULE in _with_map()
+    assert MAP_RULING_ONLY in _with_map()
+    for prompt in (_with_map(None), _lead()):
+        assert MAP_RULE not in prompt
+        assert MAP_RULING_ONLY not in prompt
+        assert "except an architect's" not in prompt
+        assert "relay ask" not in prompt
 
 
 def test_lead_prompt_with_a_map_keeps_everything_else() -> None:
@@ -563,13 +571,18 @@ def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
     assert "filed no design change" not in plain
 
 
-def test_design_brief_with_no_steps_says_steps_unnamed() -> None:
-    # Breaks when: an empty `steps:` gives an empty Order or is worded other than "steps unnamed".
+def test_design_brief_with_no_steps_says_steps_unnamed_on_a_lead_new_line_with_the_section_text() -> None:
+    # Breaks when: an empty `steps:` gives an empty Order or is worded other than "steps unnamed",
+    # or the section's text is left off that `lead new:` line (appended as free lines instead),
+    # or is not its last part, written `Section text: <body>` with each whitespace run one space.
     brief = design_brief(DESIGN, QUEUE, _stepped(steps=()), PROBLEM, EVIDENCE[:1], APPROVAL)
-    assert brief.splitlines()[1] == (
+    lines = brief.splitlines()
+    assert lines[1].startswith(
         f"lead new: Section s4 of the queue at {QUEUE}, under this design's Order steps unnamed, "
         f"cannot go on: {PROBLEM} Evidence: {EVIDENCE[0]}."
     )
+    assert lines[1].endswith(f"Section text: {' '.join(BODY.split())}")
+    assert lines[2:] == [f"approve: {APPROVAL}"]
 
 
 def test_design_brief_carries_the_given_design_queue_and_approval() -> None:

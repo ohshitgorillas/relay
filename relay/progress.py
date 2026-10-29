@@ -48,9 +48,7 @@ def _spend(result: RunResult) -> str:
 
 
 def started(queue: Path, cfg: Config) -> None:
-    tokens = (
-        "no token budget" if cfg.token_budget is None else f"budget {cfg.token_budget} tokens"
-    )
+    tokens = "no token budget" if cfg.token_budget is None else f"budget {cfg.token_budget} tokens"
     dollars = "no dollar budget" if cfg.dollar_budget is None else f"${cfg.dollar_budget:.2f}"
     _write(f"relay go {queue.name}: started; {tokens}, {dollars}")
 
@@ -75,9 +73,7 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
     _write(f"lead {sid}: finished {outcome} {_spend(result)}")
 
 
-def retiring(
-    sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead"
-) -> None:
+def retiring(sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead") -> None:
     if why == "context":
         _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
     elif why == "cap":
@@ -94,9 +90,7 @@ def recut_started(sid: str, reason: str) -> None:
     _write(f"recut {sid}: started: {_cut(reason)}")
 
 
-def recut_finished(
-    sid: str, result: RunResult, changed: bool, rejected: str | None = None
-) -> None:
+def recut_finished(sid: str, result: RunResult, changed: bool, rejected: str | None = None) -> None:
     if result.killed:
         outcome = "killed"
     elif result.exit_code != 0:
@@ -119,7 +113,8 @@ def agent_event(who: Kind, sid: str, event: Event) -> None:
         what = f"agent {agent.name} {agent.status or 'finished'} {took}, context {agent.context}"
     plural = "" if event.live == 1 else "s"
     _write_for(
-        who, f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})"
+        who,
+        f"{who} {sid}: {what}: {_cut(agent.description)} ({who} + {event.live} agent{plural})",
     )
 
 
@@ -164,7 +159,8 @@ def check_failed(sid: str, failures: int) -> None:
 
 def retired_idle(sid: str, tokens: int, who: Kind = "lead") -> None:
     _write_for(
-        who, f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag"
+        who,
+        f"{who} {sid}: retired at {tokens} context tokens, no commit since the retire flag",
     )
 
 
@@ -175,17 +171,14 @@ def research_started(sid: str, cwd: Path) -> None:
 def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
     if run_failed(result):
         _write(
-            f"research {sid}: failed: {error_line(result)} {_spend(result)}; "
-            "the lead starts without a map"
+            f"research {sid}: failed: {error_line(result)} {_spend(result)}; the lead starts without a map"
         )
         return
     if m is None:
         _write(f"research {sid}: no usable map {_spend(result)}; the lead starts without one")
         return
     lines = len(m.body.splitlines())
-    _write(
-        f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}"
-    )
+    _write(f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}")
 
 
 def map_reused(sid: str, m: Map) -> None:
@@ -205,10 +198,8 @@ def design_no_report(sid: str, again: bool) -> None:
 
 
 def design_finished(sid: str, result: RunResult, report: DesignReport | None) -> None:
-    if result.killed:
-        outcome = "killed"
-    elif result.exit_code != 0:
-        outcome = f"exit {result.exit_code}"
+    if run_failed(result):
+        outcome = f"failed: {error_line(result)}"
     elif report is None:
         outcome = "with no report"
     elif report.rejected:
@@ -232,8 +223,8 @@ def woken(sid: str, blocker: str) -> None:
 
 
 def design_retrying(sid: str, what: str) -> None:
-    raise NotImplementedError
+    _write(f"design {sid}: {what}; running the architect again")
 
 
 def design_handed_back(sid: str, what: str) -> None:
-    raise NotImplementedError
+    _write(f"design {sid}: {what}; back to the lead with the architect's message")

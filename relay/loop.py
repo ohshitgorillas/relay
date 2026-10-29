@@ -635,7 +635,7 @@ def _architect(
             return
         if ledger.over(cfg, Spend(0, 0.0), since) is None:
             progress.design_no_report(sid, again=True)
-            retry = design_retry_brief(brief, ladder.said(result.stream.result_text))
+            retry = design_retry_brief(brief, ladder.said(result.stream.result_text), None)
             result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
     _design_outcome(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report

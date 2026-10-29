@@ -98,13 +98,17 @@ def test_climb_changes_the_design_again_after_a_design_change(from_recut: bool) 
     [("RECUT", True), ("DESIGN", False), ("DESIGN", True)],
     ids=["recut-from-recut", "design-fresh", "design-from-recut"],
 )
-def test_climb_without_a_design_at_rung_2_takes_rung_3(
+def test_climb_without_a_design_file_at_rung_2_takes_rung_3_and_names_specs(
     kind: str, from_recut: bool
 ) -> None:
-    # breaks when: rung 2 runs the architect with no design path.
+    # docs/superpowers/specs/relay-codex-architect-design.md:64-66.
+    # breaks when: rung 2 runs the architect with no design path, or rung 3 still says only
+    # "the queue names none" instead of naming docs/superpowers/specs/.
     climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), None, SID)  # type: ignore[arg-type]
     assert climb_.rung == 3
-    assert climb_.why == "no design to amend: the queue names none"
+    assert climb_.why == (
+        "no design to amend: the queue names no design file under docs/superpowers/specs/"
+    )
 
 
 # split_reason
