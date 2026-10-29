@@ -170,7 +170,7 @@ def test_codex_role_overrides_and_fresh_launch(
     assert "resume" not in argv
     overrides = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-c"]
     parsed = tomllib.loads("\n".join(overrides))
-    assert parsed["developer_instructions"] == 'Keep "quoted" instructions.\nSecond line.'
+    assert argv[-1] == 'Keep "quoted" instructions.\nSecond line.'
     assert parsed["model"] == "synthetic-model"
     assert parsed["model_reasoning_effort"] == "high"
     assert parsed["features"]["multi_agent"] is True
@@ -183,6 +183,28 @@ def test_codex_role_overrides_and_fresh_launch(
     assert {"features": {"multi_agent": True}} in override_keys
     assert {"features": {"web_search_request": True}} in override_keys
     assert {"features": True} not in override_keys
+
+
+@pytest.mark.parametrize("role,filename", [
+    ("lead", "lead"), ("recut", "divvyer"), ("research", "researcher"), ("design", "architect"),
+])
+def test_codex_role_instructions_stay_out_of_config_sub_agents_inherit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str, filename: str,
+) -> None:
+    # Breaks when role instructions ride a config override: Codex hands every
+    # session override to a spawned built-in agent such as `worker`, which then
+    # takes the lead's role as its own and refuses its brief.
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    instructions = f"You are the {filename}; you write no code."
+    (agents / f"{filename}.toml").write_text(f"developer_instructions = {json.dumps(instructions)}\n")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    argv = CodexBackend().argv(role, _config(tmp_path), tmp_path, tmp_path / "out")
+    overrides = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-c"]
+    assert not any(instructions in arg for arg in overrides)
+    assert "developer_instructions" not in tomllib.loads("\n".join(overrides))
+    # The instructions open the root thread's own prompt; stdin follows as the brief.
+    assert argv[-1] == instructions
 
 
 @pytest.mark.parametrize("content", [None, "not valid = [", "developer_instructions = 42"])

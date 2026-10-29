@@ -41,8 +41,11 @@ class CodexBackend:
         instructions = data.get("developer_instructions")
         if not isinstance(instructions, str) or not instructions.strip():
             raise ConfigError(f"Codex role {path} requires developer_instructions")
+        # The instructions open the prompt rather than ride `-c developer_instructions`:
+        # a spawned built-in agent such as `worker` inherits every session override,
+        # so it would take this role's instructions as its own.
         overrides = []
-        for key in ("developer_instructions", "model", "model_reasoning_effort"):
+        for key in ("model", "model_reasoning_effort"):
             if key in data:
                 if not isinstance(data[key], str) or not data[key].strip():
                     raise ConfigError(f"invalid Codex role setting {key!r} in {path}")
@@ -64,8 +67,9 @@ class CodexBackend:
             return ["codex", "exec", "resume", "--json",
                     "--dangerously-bypass-approvals-and-sandbox",
                     "-o", str(output), *overrides, command[-1], "-"]
+        # With a prompt argument, Codex appends piped stdin, the brief, as a `<stdin>` block.
         return ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox",
-                "-C", str(cwd), "-o", str(output), *overrides, "-"]
+                "-C", str(cwd), "-o", str(output), *overrides, instructions]
 
     def parse(self, state: StreamState, line: str) -> StreamState:
         try:
