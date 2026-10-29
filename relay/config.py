@@ -21,6 +21,7 @@ class Config:
     recut_command: list[str]
     ping_command: list[str]
     state_root: Path
+    backend: str = "claude"
 
 
 _KEYS = frozenset(
