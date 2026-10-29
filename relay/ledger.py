@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from relay.config import Config
 
 if TYPE_CHECKING:
+    from relay.backends.base import Capabilities
     from relay.agents import Agent
     from relay.check import CheckResult
 
@@ -156,12 +157,23 @@ class Ledger:
         return self._sum(self._entries(since))
 
     def over(
-        self, cfg: Config, live: Spend, since: float | None
+        self,
+        cfg: Config,
+        live: Spend,
+        since: float | None,
+        *,
+        capabilities: Capabilities | None = None,
     ) -> Literal["tokens", "dollars"] | None:
+        if capabilities is None:
+            from relay.backends import get_backend
+
+            capabilities = get_backend(cfg.backend).capabilities
         past = self.total(since)
-        if cfg.token_budget is not None and past.tokens + live.tokens > cfg.token_budget:
+        if (capabilities.tokens and cfg.token_budget is not None
+                and past.tokens + live.tokens > cfg.token_budget):
             return "tokens"
-        if cfg.dollar_budget is not None and past.dollars + live.dollars > cfg.dollar_budget:
+        if (capabilities.dollars and cfg.dollar_budget is not None
+                and past.dollars + live.dollars > cfg.dollar_budget):
             return "dollars"
         return None
 

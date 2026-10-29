@@ -6,15 +6,14 @@ import contextlib
 import fcntl
 import hashlib
 import json
-import os
 import re
-import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import IO, Callable, Iterator, Literal, TypeVar
 
 from relay.config import Config
 from relay.errors import LockedError
+from relay.files import atomic_write
 
 FAILURE_LIMIT = 2
 CHECK_LIMIT = 3
@@ -45,20 +44,13 @@ class SectionState:
     design_numbers: list[int] | None = None
     waits_on: str | None = None  # the section id a waiting section waits for
     last_report: str | None = None
+    last_backend: str = "claude"
+    research_backend: str = "claude"
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Write `text` to `path` by fsynced temp file in its directory and os.replace."""
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    """Publish UTF-8 text through the shared atomic byte writer."""
+    atomic_write(path, text.encode("utf-8"))
 
 
 def _fresh() -> SectionState:
@@ -262,10 +254,12 @@ class State:
 
         return self._update(sid, change)
 
-    def set_last_session(self, sid: str, session: str) -> None:
+    def set_last_session(self, sid: str, session: str, backend: str = "claude") -> None:
         def change(s: SectionState, r: dict) -> None:
             s.last_session = session
+            s.last_backend = backend
             r["last_any"] = session
+            r["last_any_backend"] = backend
 
         self._update(sid, change)
 
@@ -278,6 +272,10 @@ class State:
     @property
     def last_session_any(self) -> str | None:
         return self._load()["last_any"]
+
+    @property
+    def last_backend_any(self) -> str:
+        return self._load().get("last_any_backend", "claude")
 
     @property
     def stop_file(self) -> Path:
@@ -299,9 +297,10 @@ class State:
         """run_dir / "research-<sid>": the research runs' retire flag."""
         return self.run_dir / f"research-{sid}"
 
-    def set_research_session(self, sid: str, session: str | None) -> None:
+    def set_research_session(self, sid: str, session: str | None, backend: str = "claude") -> None:
         def change(s: SectionState, _r: dict) -> None:
             s.research_session = session
+            s.research_backend = backend
 
         self._update(sid, change)
 

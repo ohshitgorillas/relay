@@ -19,6 +19,9 @@ import pytest
 import relay.ping
 import relay.queue
 import relay.runner
+import relay.backends
+from relay.backends.base import Capabilities
+from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
@@ -879,6 +882,281 @@ def _only_first_open(queue: Path, cfg: Config) -> str:
         if sid != ids[0]:
             state.mark_done(sid)
     return ids[0]
+
+
+def test_generic_loop_ignores_budgets_and_accepts_plain_stdout(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path]
+) -> None:
+    # Breaks when the loop uses Claude parsing or budget capabilities for generic.
+    queue = queue_file(WORKBOARD)
+    _only_first_open(queue, cfg)
+    command = [sys.executable, "-c", "import sys; sys.stdin.read(); print('DONE')"]
+    generic = dataclasses.replace(cfg, backend="generic", lead_command=command,
+                                  recut_command=command, token_budget=1,
+                                  dollar_budget=0.01)
+    _ledger_line(State.open(queue, cfg), time.time() + 3600, 900, 5.0)
+    assert run(queue, generic) == ExitCode.QUEUE_EMPTY
+
+
+def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when rotation omits the backend hint/report or resumes the retired process.
+    queue = queue_file(WORKBOARD)
+    _only_first_open(queue, cfg)
+    prompts: list[Path] = []
+    roles: list[str] = []
+    report = "Committed rotation checkpoint.\nRETIRED"
+
+    class RotatingBackend:
+        capabilities = Capabilities(True, True, False, False)
+
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            roles.append(role)
+            prompt = tmp_path / f"prompt-{len(prompts)}"
+            prompts.append(prompt)
+            answer = report if len(prompts) == 1 else "DONE"
+            script = (
+                "import pathlib,sys; "
+                "pathlib.Path(sys.argv[1]).write_text(sys.stdin.read()); "
+                "print(sys.argv[2])"
+            )
+            return [sys.executable, "-c", script, str(prompt), answer]
+
+        def parse(self, state: StreamState, line: str) -> StreamState:
+            return dataclasses.replace(
+                state, session_id=f"thread-{len(prompts)}",
+                result_text=(state.result_text or "") + line,
+            )
+
+        def poll(self, state: StreamState) -> StreamState:
+            return state
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            return state
+
+        def resume_hint(self, session_id: str) -> str:
+            return f"Prior thread: {session_id}; native history: codex exec resume {session_id}"
+
+    monkeypatch.setattr(relay.backends, "get_backend", lambda name: RotatingBackend())
+    assert run(queue, dataclasses.replace(cfg, backend="codex")) == ExitCode.QUEUE_EMPTY
+    assert roles == ["lead", "lead"]
+    assert report not in prompts[0].read_text()
+    assert report in prompts[1].read_text()
+    assert "native history: codex exec resume thread-1" in prompts[1].read_text()
+
+
+@pytest.mark.parametrize("failed_role", ["lead", "recut"])
+def test_backend_finalization_error_overrides_successful_child_report(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failed_role: str,
+) -> None:
+    # Breaks when runner loses finish's error or loop accepts a DONE report or
+    # changed recut queue despite that error (backend design, Modules).
+    queue = queue_file(WORKBOARD)
+    first = _only_first_open(queue, cfg)
+    roles: list[str] = []
+    finalized: list[tuple[str, bool]] = []
+
+    class FinalizationBackend:
+        capabilities = Capabilities(True, True, False, False)
+
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            self.role = role
+            roles.append(role)
+            answer = "RECUT: split the remaining work" if failed_role == "recut" and len(roles) == 1 else "DONE"
+            script = "import pathlib,sys; sys.stdin.read(); print(sys.argv[1]); "
+            if role == "recut":
+                script += "p=pathlib.Path(sys.argv[2]); p.write_text(p.read_text() + '\\n<!-- recut -->\\n')"
+            return [sys.executable, "-c", script, answer, str(queue)]
+
+        def parse(self, state: StreamState, line: str) -> StreamState:
+            return dataclasses.replace(state, result_text=(state.result_text or "") + line)
+
+        def poll(self, state: StreamState) -> StreamState:
+            return state
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            failed = self.role == failed_role
+            finalized.append((self.role, failed))
+            return dataclasses.replace(state, is_error=failed)
+
+        def resume_hint(self, session_id: str) -> str:
+            return ""
+
+    monkeypatch.setattr(relay.backends, "get_backend", lambda name: FinalizationBackend())
+    result = run(queue, dataclasses.replace(cfg, backend="codex"))
+    section = State.open(queue, cfg).section(first)
+    assert section.failures == (2 if failed_role == "lead" else 1)
+    assert result == (ExitCode.FAILED_TWICE if failed_role == "lead" else ExitCode.QUEUE_EMPTY)
+    assert section.status == ("open" if failed_role == "lead" else "done")
+    assert finalized == ([("lead", True), ("lead", True)] if failed_role == "lead" else
+                         [("lead", False), ("recut", True), ("lead", False)])
+
+
+def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when a finalized recut error leaves its queue changes eligible for
+    # acceptance on the next loop pass (backend design, Modules).
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    State.open(queue, cfg).mark_done("s2")
+    roles: list[str] = []
+
+    class FailedRecutBackend:
+        capabilities = Capabilities(True, True, False, False)
+
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            self.role = role
+            roles.append(role)
+            answer = "RECUT: split the remaining work" if len(roles) == 1 else "No successful report"
+            script = "import pathlib,sys; sys.stdin.read(); print(sys.argv[1]); "
+            if role == "recut":
+                script += "pathlib.Path(sys.argv[2]).write_text('section s2 | lead | steps: 1\\n  s2 work\\n')"
+            return [sys.executable, "-c", script, answer, str(queue)]
+
+        def parse(self, state: StreamState, line: str) -> StreamState:
+            return dataclasses.replace(state, result_text=(state.result_text or "") + line)
+
+        def poll(self, state: StreamState) -> StreamState:
+            return state
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            return dataclasses.replace(state, is_error=self.role == "recut")
+
+        def resume_hint(self, session_id: str) -> str:
+            return ""
+
+    monkeypatch.setattr(relay.backends, "get_backend", lambda name: FailedRecutBackend())
+    result = run(queue, dataclasses.replace(cfg, backend="codex"))
+    assert result != ExitCode.QUEUE_EMPTY, "failed recut changes completed the queue"
+
+
+@pytest.mark.parametrize(("failure", "damage"), [
+    (failure, damage)
+    for failure in ["exit", "backend", "exception", "success", "killed", "restore-error"]
+    for damage in ["valid", "malformed", "empty", "missing", "unchanged"]
+    if (failure, damage) != ("success", "valid")
+])
+def test_recut_transaction_restores_bytes_mode_and_retries(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    damage: str, failure: str,
+) -> None:
+    # Breaks when failed or invalid recuts escape rollback or skip the retry;
+    # unchanged sections must restore even edits outside the parsed sections.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    original = queue.read_bytes() + b"\n<!-- retained exactly -->\r\n"
+    queue.write_bytes(original)
+    queue.chmod(0o640)
+    State.open(queue, cfg).mark_done("s2")
+    roles: list[str] = []
+    damaged = False
+    original_parse = relay.queue.parse_queue
+
+    def observed_parse(path: Path):
+        if damaged and failure in ("exit", "backend", "killed", "restore-error"):
+            assert queue.exists(), "failed output parsed before rollback"
+            assert queue.read_bytes() == original, "failed output parsed before rollback"
+            assert queue.stat().st_mode & 0o777 == 0o640, "mode not restored before parse"
+        return original_parse(path)
+
+    monkeypatch.setattr(relay.loop, "parse_queue", observed_parse)
+
+    class RecoveryBackend:
+        capabilities = Capabilities(True, True, False, False)
+
+        def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            self.role = role
+            roles.append(role)
+            if len(roles) > 2:
+                assert queue.read_bytes() == original, "retry observed failed recut bytes"
+                assert queue.stat().st_mode & 0o777 == 0o640, "retry observed changed mode"
+            answer = "RECUT: split remaining work" if len(roles) == 1 else "No successful report"
+            return [sys.executable, "-c", "import sys; sys.stdin.read(); print(sys.argv[1])", answer]
+
+        def parse(self, state: StreamState, line: str) -> StreamState:
+            return dataclasses.replace(
+                state, result_text=(state.result_text or "") + line,
+                context_tokens=cfg.hard_ceiling if failure == "killed" and self.role == "recut" else 0,
+            )
+
+        def poll(self, state: StreamState) -> StreamState:
+            return state
+
+        def finish(self, state: StreamState, output: Path) -> StreamState:
+            nonlocal damaged
+            if self.role != "recut":
+                return state
+            damaged = True
+            if damage == "missing":
+                queue.unlink()
+            else:
+                content = {"valid": b"section s2 | lead | steps: 1\n  s2 work\n",
+                           "malformed": b"section malformed\n",
+                           "empty": b"", "unchanged": b"<!-- changed -->\n" + original}[damage]
+                queue.write_bytes(content)
+                queue.chmod(0o600)
+            if failure == "exception":
+                raise RuntimeError("recut invocation failed")
+            return dataclasses.replace(state, is_error=failure in ("backend", "restore-error"))
+
+        def resume_hint(self, session_id: str) -> str:
+            return ""
+
+    if failure == "exit":
+        original_argv = RecoveryBackend.argv
+
+        def failing_argv(self: RecoveryBackend, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+            command = original_argv(self, role, cfg, cwd, output)
+            if role == "recut":
+                command[2] += "; sys.exit(1)"
+            return command
+
+        monkeypatch.setattr(RecoveryBackend, "argv", failing_argv)
+    monkeypatch.setattr(relay.backends, "get_backend", lambda name: RecoveryBackend())
+    if failure == "restore-error":
+        replace = os.replace
+        restorations: list[bytes] = []
+
+        def broken_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            if Path(dst) == queue:
+                restorations.append(Path(src).read_bytes())
+                raise OSError("queue restoration failed")
+            replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", broken_replace)
+        caught = None
+        try:
+            run(queue, cfg)
+        except Exception as exc:
+            caught = exc
+        assert isinstance(caught, OSError), "restoration error must propagate"
+        assert str(caught) == "queue restoration failed"
+        assert restorations == [original]
+        assert roles == ["lead", "recut"]
+        return
+    if failure == "exception":
+        with pytest.raises(RuntimeError, match="recut invocation failed"):
+            run(queue, cfg)
+        assert roles == ["lead", "recut"]
+    else:
+        try:
+            result = run(queue, cfg)
+        except Exception:
+            assert False, "failed recut must recover and retry without raising"
+        assert result == ExitCode.FAILED_TWICE
+        assert roles == ["lead", "recut", "lead"]
+        section = State.open(queue, cfg).section("s1")
+        assert section.failures == 2
+        assert section.status == "open"
+        assert not section.from_recut
+    assert queue.exists(), "recut deleted original queue"
+    assert queue.read_bytes() == original
+    assert queue.stat().st_mode & 0o777 == 0o640
 
 
 def _body(queue: Path, sid: str) -> str:

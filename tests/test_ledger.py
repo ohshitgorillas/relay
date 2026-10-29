@@ -13,6 +13,31 @@ from relay import agents
 from relay.check import CheckResult
 from relay.config import Config
 from relay.ledger import Ledger, Spend
+from relay.backends.base import Capabilities
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["historical", "live"])
+@pytest.mark.parametrize(
+    "capabilities,spend,expected",
+    [
+        (Capabilities(False, False, False, False), Spend(900, 9.0), None),
+        (Capabilities(True, True, False, True), Spend(0, 9.0), None),
+        (Capabilities(True, True, False, True), Spend(900, 9.0), "tokens"),
+        (Capabilities(True, True, True, True), Spend(0, 9.0), "dollars"),
+    ],
+    ids=["generic", "codex-dollars", "codex-tokens", "claude-dollars"],
+)
+def test_budget_capabilities_gate_historical_and_live_spend(
+    tmp_path: Path, fake_cfg: Config, live: bool,
+    capabilities: Capabilities, spend: Spend, expected: str | None,
+) -> None:
+    # Breaks when unsupported budget kinds stop a backend or supported kinds are ignored.
+    cfg = dataclasses.replace(fake_cfg, token_budget=100, dollar_budget=1.0)
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    current = spend if live else Spend(0, 0.0)
+    if not live:
+        ledger.append("lead", "s1", "old-thread", spend)
+    assert ledger.over(cfg, current, None, capabilities=capabilities) == expected
 
 
 def _stamps(entry: dict, lo: float, hi: float) -> list[float]:

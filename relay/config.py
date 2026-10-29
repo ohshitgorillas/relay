@@ -39,12 +39,12 @@ class Config:
     hard_ceiling: int
     poll_seconds: float
     lead_command: list[str]
+    recut_command: list[str]
     ping_command: list[str]
     state_root: Path
     idle_ceiling: int = 0  # 0 asks for the default, 13/10 of context_limit
     check_timeout: float = 1800
     check_outside: list[str] = field(default_factory=lambda: list(_DEFAULT_CHECK_OUTSIDE))
-    recut_command: list[str] = field(default_factory=list)  # empty asks for the default
     research_command: list[str] = field(default_factory=list)  # empty asks for the default
     map_max_lines: int = 150
     map_max_chars: int = 12_000
@@ -52,21 +52,29 @@ class Config:
     section_dollar_cap: float | None = None  # positive; None is no cap
     design_approval: str = _STANDING_APPROVAL  # quoted on the architect's approve: line
 
+    backend: str = "claude"
+
     def __post_init__(self) -> None:
         if not self.design_command:
-            object.__setattr__(self, "design_command", [*self.lead_command, "--agent", "architect"])
+            object.__setattr__(self, "design_command", self._role_command("architect"))
         if self.idle_ceiling == 0:
             object.__setattr__(
                 self, "idle_ceiling", _default_idle_ceiling(self.context_limit, self.hard_ceiling)
             )
         if not self.recut_command:
-            object.__setattr__(self, "recut_command", [*self.lead_command, "--agent", "divvyer"])
+            object.__setattr__(self, "recut_command", self._role_command("divvyer"))
         if not self.research_command:
             object.__setattr__(
                 self,
                 "research_command",
-                [*self.lead_command, "--agent", "researcher", "--model", "opus[1m]"],
+                self._role_command("researcher", "--model", "opus[1m]"),
             )
+
+
+    def _role_command(self, role: str, *extra: str) -> list[str]:
+        if self.backend == "claude":
+            return [*self.lead_command, "--agent", role, *extra]
+        return list(self.lead_command)
 
 
 _KEYS = frozenset(
@@ -80,6 +88,7 @@ _KEYS = frozenset(
         "recut_command",
         "ping_command",
         "state_root",
+        "backend",
         "idle_ceiling",
         "check_timeout",
         "check_outside",
@@ -162,6 +171,11 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
             raise ConfigError(f"unknown config key {key!r}")
     merged = {**data, **{k: v for k, v in overrides.items() if v is not None}}
     home = Path.home()
+    backend = merged.get("backend", "claude")
+    if not isinstance(backend, str) or backend not in {"claude", "codex", "generic"}:
+        raise ConfigError(f"unknown backend {backend!r}")
+    if backend == "generic" and "lead_command" not in merged:
+        raise ConfigError("generic backend requires an explicit lead_command")
 
     context_limit = _int(merged, "context_limit", 100_000)
     assert context_limit is not None
@@ -176,7 +190,11 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     assert check_timeout is not None
     poll_seconds = _number(merged, "poll_seconds", 30)
     assert poll_seconds is not None
-    lead_command = _command(merged, "lead_command", list(_DEFAULT_LEAD))
+    lead_default = _DEFAULT_LEAD if backend == "claude" else ["codex"]
+    lead_command = _command(merged, "lead_command", lead_default)
+    recut_default = (
+        [*lead_command, "--agent", "divvyer"] if backend == "claude" else lead_command
+    )
 
     state_value = _string(merged, "state_root", None)
     state_root = (
@@ -197,13 +215,12 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         hard_ceiling=hard_ceiling,
         poll_seconds=poll_seconds,
         lead_command=lead_command,
-        recut_command=(
-            _command(merged, "recut_command", []) if "recut_command" in merged else []
-        ),
+        recut_command=_command(merged, "recut_command", recut_default),
         ping_command=_command(
             merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"]
         ),
         state_root=state_root,
+        backend=backend,
         idle_ceiling=idle_ceiling,
         check_timeout=check_timeout,
         check_outside=_patterns(merged, "check_outside", list(_DEFAULT_CHECK_OUTSIDE)),

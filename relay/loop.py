@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Literal, cast
 
-from relay import git, ladder, ping, progress, research
+from relay import backends, git, ladder, ping, progress, research
 from relay.check import owner_text, run_checks
 from relay.config import Config
-from relay.errors import ExitCode, ResearchError
+from relay.errors import ExitCode, QueueFormatError, ResearchError
+from relay.files import atomic_write
 from relay.ledger import Kind, Ledger, Spend
 from relay.prompts import (
     ask_brief,
@@ -123,6 +125,8 @@ def _run_section(
     if spent:
         return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
     resume = current.last_session or state.last_session_any
+    previous_backend = current.last_backend if current.last_session else state.last_backend_any
+    backend = backends.get_backend(previous_backend)
     answer = state.take_answer(sid)
     feedback = state.take_check_feedback(sid)
     prompt = lead_prompt(
@@ -134,6 +138,8 @@ def _run_section(
         retire_flag,
         feedback,
         research.block(m) if m is not None else None,
+        handoff_hint=backend.resume_hint(resume) if resume is not None else None,
+        backend=cfg.backend,
     )
 
     retire_flag.unlink(missing_ok=True)
@@ -155,13 +161,13 @@ def _run_section(
     session = result.stream.session_id
     state.set_last_log(sid, result.log)
     if session is not None:
-        state.set_last_session(sid, session)
+        state.set_last_session(sid, session, cfg.backend)
         state.set_last_report(sid, result.stream.result_text or None)
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
-    failed = result.killed or result.exit_code != 0 or status is None
-    if watch.idle_retired:
+    failed = result.killed or result.exit_code != 0 or result.stream.is_error or status is None
+    if watch.idle_retired and not result.stream.is_error:
         pass  # handled as RETIRED: no failure recorded
     elif failed:
         second, count = _fail(state, sid)
@@ -269,7 +275,12 @@ def _run(
 ) -> tuple[RunResult, _Watch]:
     """The one agent run: watch it, run it, ledger it. Returns the result and its watch."""
     watch = _watcher(cfg, ledger, since, kind, sid, cwd, cap)
-    result = run_agent(argv, text, cwd, state.run_dir, watch.on_event, flag)
+    backend = backends.get_backend(cfg.backend)
+    invocation = replace(cfg, research_command=argv) if kind == "ask" else cfg
+    result = run_agent(
+        argv, text, cwd, state.run_dir, watch.on_event, flag,
+        backend=backend, cfg=invocation, role=kind,
+    )
     ledger.append(
         kind,
         sid,
@@ -321,8 +332,8 @@ def _research(
             where,
             flag,
         )
-        state.set_research_session(sid, result.stream.session_id)
-        failed = result.killed or result.exit_code != 0
+        state.set_research_session(sid, result.stream.session_id, cfg.backend)
+        failed = result.killed or result.exit_code != 0 or result.stream.is_error
         m = None if failed else research.parse_map(sid, commit, result.stream.result_text, cfg)
         if m is not None:
             research.save(m, state.map_path(sid))
@@ -334,9 +345,16 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
     """Put `question` to the section's researcher and return its answer; ResearchError without one."""
     state = State.open(queue, cfg)
     with state.research_lock(sid):
-        session = state.section(sid).research_session
+        current = state.section(sid)
+        session = current.research_session
         if session is None:
             raise ResearchError(f"section {sid} has no researcher to ask")
+        if not backends.get_backend(cfg.backend).capabilities.resume:
+            raise ResearchError(f"backend {cfg.backend} cannot resume a researcher")
+        if current.research_backend != cfg.backend:
+            raise ResearchError(
+                f"section {sid} researcher used {current.research_backend}; selected backend is {cfg.backend}"
+            )
         state.run_dir.mkdir(parents=True, exist_ok=True)
         cwd = _git_top(queue.parent)
         flag = state.research_flag(sid)
@@ -353,7 +371,7 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
             _section_cwd(cwd, sid),
             flag,
         )
-        if result.killed or result.exit_code != 0:
+        if result.killed or result.exit_code != 0 or result.stream.is_error:
             raise ResearchError(f"the researcher for section {sid} failed")
         answer = research.parse_answer(result.stream.result_text, cfg)
         if answer is None:
@@ -375,6 +393,7 @@ def _watcher(
     """The run_agent callback: `budget_hit` on a spent budget, `idle_retired` for an idle lead."""
     retiring = [False]
     shown = [0]  # agent events already printed
+    capabilities = backends.get_backend(cfg.backend).capabilities
     snapshot: list[dict[str, str]] = []  # branch heads when the retire flag first went up
 
     def on_event(stream: StreamState) -> Literal["go", "retire", "kill"]:
@@ -382,16 +401,16 @@ def _watcher(
         for event in events[shown[0] :]:
             progress.agent_event(who, sid, event)
         shown[0] = len(events)
-        if stream.context_tokens >= cfg.hard_ceiling:
+        if capabilities.context and stream.context_tokens >= cfg.hard_ceiling:
             progress.killing(sid, stream.context_tokens, who)
             return "kill"
-        why: Literal["context", "budget"] | None = None
-        if since is not None and ledger.over(cfg, stream.spend, since) is not None:
+        why: Literal["context", "budget", "cap"] | None = None
+        if since is not None and ledger.over(cfg, stream.spend, since, capabilities=capabilities) is not None:
             watch.budget_hit = True
             why = "budget"
-        elif cap is not None and ledger.section_spend(sid).dollars + stream.spend.dollars > cap:
+        elif capabilities.dollars and cap is not None and ledger.section_spend(sid).dollars + stream.spend.dollars > cap:
             why = "cap"
-        elif stream.context_tokens >= cfg.context_limit:
+        elif capabilities.context and stream.context_tokens >= cfg.context_limit:
             why = "context"
         if why is None:
             return "go"
@@ -401,7 +420,7 @@ def _watcher(
         if who not in ("recut", "design"):  # these edit files and need not commit: no commit-based idle kill
             if not snapshot:
                 snapshot.append(git.heads(repo))
-            elif stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
+            elif capabilities.context and stream.context_tokens >= cfg.idle_ceiling and snapshot[0]:
                 # `git.heads` is {} when git fails: an empty read proves no commit either way.
                 now = git.heads(repo)
                 if now and now == snapshot[0]:
@@ -560,7 +579,7 @@ def _design_answer(
 def _over_cap(cfg: Config, queue: Path, state: State, ledger: Ledger, section: Section) -> bool:
     """Park `section` and return True when its spend is over its dollar cap."""
     cap = ladder.section_cap(cfg, section)
-    if cap is None:
+    if cap is None or not backends.get_backend(cfg.backend).capabilities.dollars:
         return False
     spent = ledger.section_spend(section.id).dollars
     if spent <= cap:
@@ -618,6 +637,8 @@ def _design_outcome(
         what = "the architect was killed"
     elif result.exit_code != 0:
         what = f"the architect exited {result.exit_code}"
+    elif result.stream.is_error:
+        what = "the architect backend reported an error"
     elif report is None:
         what = "the architect filed no report"
     elif report.rejected:
@@ -655,26 +676,45 @@ def _recut(
     design: Path | None = None,
     rung: Literal[1, 2] = 1,
 ) -> bool:
-    """Run the divvyer's recut; True when it failed. The caller records the failure or parks."""
+    """Run a transactional recut; True when failed, with failure policy owned by the caller."""
     brief = recut_brief(queue, section, reason, lead_log, design)
+    original_queue = queue.read_bytes()
+    original_mode = stat.S_IMODE(queue.stat().st_mode)
     before = parse_queue(queue)
     progress.recut_started(section.id, reason)
-    result, _ = _run(
-        cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief, cwd, retire_flag, None, rung
-    )
-    after = parse_queue(queue)
+    changed = False
+    after = before
+    known = {s.id for s in before}
+    try:
+        result, _ = _run(
+            cfg, state, ledger, since, "recut", section.id, cfg.recut_command, brief,
+            cwd, retire_flag, None, rung,
+        )
+        failed = result.killed or result.exit_code != 0 or result.stream.is_error
+        if not failed:
+            try:
+                after = parse_queue(queue)
+            except QueueFormatError:
+                failed = True
+            else:
+                changed = after != before
+                nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
+                failed = not changed or nested
+    except BaseException:
+        atomic_write(queue, original_queue, mode=original_mode)
+        raise
+    if failed:
+        # A failed restoration must propagate without attempting it again.
+        atomic_write(queue, original_queue, mode=original_mode)
+        changed = False
+    progress.recut_finished(section.id, result, changed)
+    if failed:
+        return True
     if section.id not in {s.id for s in after}:
         state.drop_map(section.id)
-    changed = after != before
-    progress.recut_finished(section.id, result, changed)
-    known = {s.id for s in before}
-    nested = any(s.id not in known and s.id.startswith(f"{section.id}.") for s in after)
-    # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
-    # Whatever the recut wrote stays on disk, even when it failed or was rejected: mark it all.
-    if changed:
-        for made in after:
-            if made.id not in known or made.id == section.id:
-                state.mark_from_recut(made.id)
-                if design is not None:
-                    state.mark_design_changed(made.id)
-    return bool(result.killed or result.exit_code != 0 or not changed or nested)
+    for made in after:
+        if made.id not in known or made.id == section.id:
+            state.mark_from_recut(made.id)
+            if design is not None:
+                state.mark_design_changed(made.id)
+    return False

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
+import json
 import os
+import selectors
 import signal
 import subprocess
 import threading
@@ -10,12 +13,17 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+from relay.stream import StreamState
 from relay.ledger import Spend
-from relay.stream import StreamState, feed
+from relay.files import atomic_write
+
+if TYPE_CHECKING:
+    from relay.backends.base import Backend
+    from relay.config import Config
 
 _GRACE_SECONDS = 2.0
 
@@ -180,66 +188,130 @@ def run_agent(
     run_dir: Path,
     on_event: Callable[[StreamState], Literal["go", "retire", "kill"]],
     retire_flag: Path,
+    *,
+    backend: Backend | None = None,
+    cfg: Config | None = None,
+    role: str = "lead",
 ) -> RunResult:
+    from relay.backends import get_backend
+
+    backend = backend if backend is not None else get_backend(cfg.backend if cfg else "claude")
+    run_dir.mkdir(parents=True, exist_ok=True)
     number = _next_number(run_dir)
     log_path = run_dir / f"{number}.jsonl"
-    pid_path = run_dir / f"{number}.pid"
-    stderr_path = run_dir / f"{number}.stderr"
+    output = run_dir / f"{number}.final.txt"
+    telemetry = log_path.with_suffix(".telemetry.json")
+    if cfg is not None:
+        argv = backend.argv(role, cfg, cwd, output)
+    atomic_write(
+        log_path.with_suffix(".backend.json"),
+        (json.dumps({"backend": cfg.backend if cfg else "claude"}) + "\n").encode(),
+    )
     state = StreamState(None, 0, Spend(0, 0.0), None, False)
     killed = False
     retired = False
-
     live: list[subprocess.Popen] = []
+
+    def snapshot() -> None:
+        payload = json.dumps(asdict(state), default=list) + "\n"
+        atomic_write(telemetry, payload.encode("utf-8"))
+
+    def observe() -> None:
+        nonlocal state, killed, retired
+        state = backend.poll(state)
+        snapshot()
+        verdict = on_event(state)
+        if verdict == "kill":
+            killed = True
+        elif verdict == "retire" and not retired:
+            retired = True
+            retire_flag.touch()
 
     # Handlers go in before the child starts.
     with _group_guard(live):
-        stderr_file = None
-        try:
-            stderr_file = stderr_path.open("wb")
+        with log_path.with_suffix(".stderr").open("wb") as stderr_file:
             proc = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=stderr_file,
-                text=True,
-                start_new_session=True,
+                argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=stderr_file, start_new_session=True,
             )
             live.append(proc)
             try:
-                pid_path.write_text(f"{proc.pid}\n")
-                try:
-                    assert proc.stdin is not None
-                    proc.stdin.write(stdin_text)
-                    proc.stdin.close()
-                except BrokenPipeError:
-                    pass
-                assert proc.stdout is not None
-                with log_path.open("w") as log:
-                    for raw in proc.stdout:
-                        line = raw.rstrip("\n")
-                        log.write(line + "\n")
-                        log.flush()
-                        state = feed(state, line)
-                        verdict = on_event(state)
-                        if verdict == "kill":
-                            killed = True
+                log_path.with_suffix(".pid").write_text(f"{proc.pid}\n")
+                assert proc.stdin is not None and proc.stdout is not None
+                # Multiplex prompt writes too: a child may write stdout before it reads stdin.
+                pending = memoryview(stdin_text.encode())
+                decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                buffered = ""
+                stdout_open = True
+                group_cleaned = False
+                with selectors.DefaultSelector() as selector, log_path.open("wb") as log:
+                    os.set_blocking(proc.stdout.fileno(), False)
+                    os.set_blocking(proc.stdin.fileno(), False)
+                    selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+                    if pending:
+                        selector.register(proc.stdin, selectors.EVENT_WRITE, "stdin")
+                    else:
+                        proc.stdin.close()
+                    while stdout_open or proc.poll() is None:
+                        if proc.poll() is not None and not group_cleaned:
+                            # Descendants can retain stdout after the child exits.
+                            # Clean them up before draining the remaining pipe data.
+                            _kill_live(live)
+                            group_cleaned = True
+                        ready = selector.select(0.1)
+                        if not ready:
+                            observe()
+                        for key, _events in ready:
+                            if key.data == "stdin":
+                                try:
+                                    written = os.write(key.fd, pending[:65536])
+                                    pending = pending[written:]
+                                except BrokenPipeError:
+                                    pending = pending[:0]
+                                if not pending:
+                                    selector.unregister(proc.stdin)
+                                    proc.stdin.close()
+                                continue
+                            chunk = os.read(key.fd, 65536)
+                            if chunk:
+                                log.write(chunk)
+                                log.flush()
+                                buffered += decoder.decode(chunk)
+                            else:
+                                selector.unregister(proc.stdout)
+                                stdout_open = False
+                                buffered += decoder.decode(b"", final=True)
+                            while "\n" in buffered:
+                                line, buffered = buffered.split("\n", 1)
+                                state = backend.parse(state, line + "\n")
+                                observe()
+                                if killed:
+                                    break
+                            if not stdout_open and buffered and not killed:
+                                state = backend.parse(state, buffered)
+                                buffered = ""
+                                observe()
+                            if killed:
+                                break
+                        if killed:
                             break
-                        if verdict == "retire" and not retired:
-                            retired = True
-                            retire_flag.touch()
                 if killed:
                     _kill_live(live)
                     exit_code = None
                 else:
                     exit_code = proc.wait()
-                    _kill_live(live)  # sweep stragglers in the group
+                    if not group_cleaned:
+                        _kill_live(live)
+                state = backend.finish(state, output)
+                snapshot()
+            except BaseException:
+                _kill_live(live)
+                raise
             finally:
+                if proc.stdin is not None:
+                    proc.stdin.close()
                 if proc.stdout is not None:
                     proc.stdout.close()
-        finally:
-            if stderr_file is not None:
-                stderr_file.close()
     return RunResult(exit_code=exit_code, killed=killed, stream=state, log=log_path)
 
 

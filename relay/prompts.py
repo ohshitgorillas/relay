@@ -24,13 +24,18 @@ def lead_prompt(
     retire_flag: Path,
     check_feedback: str | None = None,
     map_block: str | None = None,
+    *,
+    handoff_hint: str | None = None,
+    backend: str = "claude",
 ) -> str:
     parts = [
         "You are a lead. Carry the queue section below through development until it is done.",
         f"Queue: {queue}\nSection: {section.id}",
         f"Section body:\n{section.body}",
     ]
-    if resume is not None:
+    if handoff_hint is not None:
+        parts.append(handoff_hint)
+    elif resume is not None:
         parts.append(f"resume {resume}")
     if report is not None:
         parts.append(
@@ -45,10 +50,11 @@ def lead_prompt(
             "Fix the section and end with DONE again:\n" + check_feedback
         )
     if map_block is not None:
+        ask_command = "relay ask" if backend == "claude" else f"relay ask --backend {backend}"
         parts.append(
             "Relay's researcher mapped this section's code. "
             "Put the block below verbatim in every brief you send for this section, the architect's included. "
-            f'When an agent reports it needs more, run `relay ask {queue} {section.id} "<question>"` '
+            f'When an agent reports it needs more, run `{ask_command} {queue} {section.id} "<question>"` '
             "with a 600000 ms timeout or in the background, "
             "and pass on its answer; on a non-zero exit the agent reads for itself.\n\n" + map_block
         )

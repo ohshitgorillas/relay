@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import threading
 from pathlib import Path
@@ -11,11 +12,42 @@ from typing import Callable
 import pytest
 
 import relay.state as state_module
+import relay.files as publication
 from relay.config import Config
 from relay.errors import LockedError
 from relay.state import SectionState, State
 
 QUEUE = "workboard-queue.md"
+
+
+def test_state_serializes_through_shared_publisher_while_retaining_lock(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when state bypasses the shared publisher, loses its data, or drops its lock.
+    state = State.open(queue, fake_cfg)
+    state.lock()
+    calls = []
+    original = publication.atomic_write
+
+    def publish(path, data, *, mode=None):
+        calls.append((path, data))
+        json.loads(data)
+        path.write_bytes(data)
+
+    for name, value in list(vars(state_module).items()):
+        if value is original:
+            monkeypatch.setattr(state_module, name, publish)
+    monkeypatch.setattr(publication, "atomic_write", publish)
+    for write in WRITES.values():
+        before = len(calls)
+        write(state)
+        assert len(calls) > before, "state bypassed shared atomic publication"
+    state.set_last_report("s1", "exact report λ\nDONE")
+    assert State.open(queue, fake_cfg).section("s1").last_report == "exact report λ\nDONE"
+    assert calls
+    assert all(path.parent == _dir(state) and isinstance(data, bytes) for path, data in calls)
+    with pytest.raises(LockedError):
+        State.open(queue, fake_cfg).lock()
 
 
 def _patch_replace(monkeypatch: pytest.MonkeyPatch, fake: Callable[..., None]) -> None:
