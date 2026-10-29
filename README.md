@@ -45,7 +45,7 @@ A section's body can carry check lines, `check: <command>` (or `done-check: <com
 `RECUT` and `DESIGN` move a section up three rungs:
 
 1. **Recut.** The first `RECUT` runs the `divvyer`, which rewrites the section in place or splits it into new sections. A recut that changes nothing, or fails, counts as a failure.
-2. **Design change.** A second `RECUT` on a section that came out of a recut, or any `DESIGN`, runs the `architect` on the design named on the queue's `design` line, then has the divvyer re-cut the section from the amended design. If the architect needs a product choice, the section is parked with its decisions. The owner's `relay answer` goes back to the architect, and the climb carries on from there.
+2. **Design change.** A second `RECUT` on a section that came out of a recut, or any `DESIGN`, runs the `architect` on the design named on the queue's `design` line, then has the divvyer re-cut the section from the amended design. If the architect needs a product choice, the section is parked with its decisions. The owner's `relay answer` goes back to the architect, and the climb carries on from there. An architect run that fails (killed, nonzero exit or backend error) or ends with no report is rerun once, with the error line in its brief; if it fails again, or its outcome is rejected or unapproved, the section goes back to its lead with guidance instead of parking, and nothing counts as a failure. No rerun happens when the cap or budget is spent.
 3. **Owner.** A section that has already had its design change, or a queue with no `design` line, parks the section for the owner.
 
 Relay never commits or cleans the work tree. Leads and the divvyer own queue authorship; Relay's sole queue-write exception is restoring the exact pre-invocation bytes and permission mode after a failed recut. Leads and the divvyer run from the git top level of the queue's directory and keep git and the queue as the record of what is finished.
@@ -147,7 +147,7 @@ Header lines inside code fences are ignored. The header's fields:
 
 Every other field is kept as the section's title. In the body, each `check: <command>` line outside a code fence is a [check](#checks).
 
-An optional first line, `design <path>`, names the design the queue was cut from, relative to the repository top. The ladder's design change needs it.
+An optional first line, `design <path>`, names the design the queue was cut from, relative to the repository top. It must name a file under `docs/superpowers/specs/`, and the ladder's design change needs it; the architect amends only that file.
 
 ## Config
 
