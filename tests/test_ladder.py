@@ -71,20 +71,21 @@ def test_climb_takes_rung_2_with_a_design_and_no_design_change(
     assert climb_.rung == 2
 
 
-# climb: rung 3 once the lineage had its design change
+# climb: after a design change, a RECUT is recut again and a DESIGN gets another design change
 
 
-@pytest.mark.parametrize(
-    ("kind", "from_recut"),
-    [("RECUT", False), ("RECUT", True), ("DESIGN", False), ("DESIGN", True)],
-    ids=["recut-fresh", "recut-from-recut", "design-fresh", "design-from-recut"],
-)
-def test_climb_takes_rung_3_after_a_design_change(kind: str, from_recut: bool) -> None:
-    # breaks when: design_changed is not checked first, so a lineage gets a second design change or recut.
-    climb_ = climb(kind, _section(from_recut=from_recut, design_changed=True), DESIGN, SID)  # type: ignore[arg-type]
-    assert climb_.rung == 3
-    # docs/superpowers/specs/relay-ladder-design.md:59-60: the text names the `sid` argument.
-    assert climb_.why == f"the ladder ran out: section {SID} already had its design change"
+@pytest.mark.parametrize("from_recut", [False, True], ids=["fresh", "from-recut"])
+def test_climb_recuts_after_a_design_change(from_recut: bool) -> None:
+    # breaks when: a section that had its design change is parked for the owner instead of recut.
+    climb_ = climb("RECUT", _section(from_recut=from_recut, design_changed=True), DESIGN, SID)
+    assert climb_.rung == 1
+
+
+@pytest.mark.parametrize("from_recut", [False, True], ids=["fresh", "from-recut"])
+def test_climb_changes_the_design_again_after_a_design_change(from_recut: bool) -> None:
+    # breaks when: a second DESIGN on a section is parked for the owner instead of sent to the architect.
+    climb_ = climb("DESIGN", _section(from_recut=from_recut, design_changed=True), DESIGN, SID)
+    assert climb_.rung == 2
 
 
 # climb: rung 3 when rung 2 has no design to amend

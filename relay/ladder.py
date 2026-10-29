@@ -22,13 +22,11 @@ class Climb:
 
 
 def climb(kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None, sid: str) -> Climb:
-    """RECUT on a section that is neither from_recut nor design_changed: rung 1.
-    RECUT on a from_recut section, or DESIGN, when not design_changed and design is not None: rung 2.
-    design_changed: rung 3, "the ladder ran out: section <sid> already had its design change".
-    design None at rung 2: rung 3, "no design to amend: the queue names none"."""
-    if s.design_changed:
-        return Climb(3, f"the ladder ran out: section {sid} already had its design change")
-    if kind == "RECUT" and not s.from_recut:
+    """RECUT on a section that is not from_recut, or on a design_changed one: rung 1.
+    Any other RECUT, or DESIGN, when design is not None: rung 2.
+    design None at rung 2: rung 3, "no design to amend: the queue names none".
+    A design change never sends a section to the owner (owner's ruling, 28 Oct); the budget bounds it."""
+    if kind == "RECUT" and (s.design_changed or not s.from_recut):
         return Climb(1, "recut")
     if design is None:
         return Climb(3, "no design to amend: the queue names none")

@@ -4317,41 +4317,6 @@ def _section_spent(queue: Path, cfg: Config, sid: str, dollars: float) -> None:
     _ledger(queue, cfg).append("lead", sid, "sess-earlier", Spend(tokens=10, dollars=dollars))
 
 
-@pytest.mark.parametrize("again", ["RECUT", "DESIGN"])
-def test_rung_3_a_section_a_design_change_recut_made_that_asks_again_is_parked_as_the_ladder_ran_out(
-    again: str,
-    cfg: Config,
-    tmp_path: Path,
-    queue_file: Callable[[str], Path],
-    scenario: Callable[[list[str]], Path],
-) -> None:
-    # Breaks when: a section made by a design-change recut is not marked design_changed, so its
-    # second ask runs the architect or the divvyer again instead of parking with "the ladder ran
-    # out: section <sid> already had its design change".
-    queue = _ladder(queue_file, cfg, tmp_path)
-    scenario(_lines(DONE_LEAD))
-    after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
-    leads = [
-        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
-        _step(str(_status_lead(tmp_path, "sess-again", f"{again}: {PROBLEM}"))),
-    ]
-    cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
-    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
-    cfg = _stop_on_ping(cfg, queue)
-    assert run(queue, cfg) == ExitCode.STOP_FILE
-    assert len(_runs(tmp_path, "design")) == 1
-    assert len(_runs(tmp_path, "recut")) == 1
-    assert len(_runs(tmp_path, "lead")) == 2
-    state = State.open(queue, cfg)
-    parked = state.section("s1b")
-    assert parked.design_changed is True
-    assert parked.status == "parked"
-    assert parked.question == "the ladder ran out: section s1b already had its design change"
-    assert parked.failures == 0
-    assert len(_entries(queue, cfg, "design")) == 1
-    assert len(_entries(queue, cfg, "recut")) == 1
-
-
 def test_rung_3_a_design_status_under_a_queue_naming_no_design_is_parked_as_no_design_to_amend(
     cfg: Config, tmp_path: Path, scenario: Callable[[list[str]], Path]
 ) -> None:
