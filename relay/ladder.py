@@ -12,6 +12,7 @@ from relay.queue import Section
 from relay.state import SectionState
 
 GUESS = " | guess: "
+SPECS = Path("docs/superpowers/specs")
 Rung = Literal[1, 2, 3]
 
 
@@ -146,3 +147,8 @@ def decisions_text(sid: str, design: Path, report: DesignReport) -> str:
 def failed_text(sid: str, design: Path, what: str) -> str:
     """"the design change for <sid> in <design> did not land: <what>"."""
     return f"the design change for {sid} in {design} did not land: {what}"
+
+
+def handback_text(what: str, said: str) -> str:
+    """The guidance a lead gets when the architect filed no design change."""
+    raise NotImplementedError

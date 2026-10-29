@@ -139,16 +139,15 @@ def design_brief(
     )
 
 
-def design_retry_brief(brief: str, said: str) -> str:
-    """`brief`, then the previous architect run's final message and why it was no report."""
-    return (
-        f"{brief.rstrip()}\n\n"
-        "Your previous run on this brief filed no report: its final message had no "
-        "`BRIEF …` … `END DESIGN` block. Its final message:\n"
-        f"{said}\n\n"
-        "Either make the design change, or end with a BRIEF … END DESIGN block explaining why "
-        "none is needed.\n"
-    )
+def _ruling(marker: str, words: str) -> str:
+    """`<marker> <words>` on one line: each run of whitespace in words becomes one space."""
+    raise NotImplementedError
+
+
+def design_retry_brief(brief: str, said: str, error: str | None) -> str:
+    """`brief` with one `lead new:` line before its `approve:` line saying why the previous run
+    filed no design change."""
+    raise NotImplementedError
 
 
 def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, approval: str) -> str:

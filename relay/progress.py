@@ -229,3 +229,11 @@ def section_waiting(sid: str, blocker: str) -> None:
 
 def woken(sid: str, blocker: str) -> None:
     _write(f"section {sid}: woken, {blocker} landed")
+
+
+def design_retrying(sid: str, what: str) -> None:
+    raise NotImplementedError
+
+
+def design_handed_back(sid: str, what: str) -> None:
+    raise NotImplementedError
