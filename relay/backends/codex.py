@@ -95,8 +95,6 @@ class CodexBackend:
                 text = item.get("text")
                 if isinstance(text, str):
                     return replace(state, result_text=text)
-            if item.get("type") == "error":
-                return replace(state, is_error=True)
             if item.get("type") == "collab_tool_call":
                 return replace(state, activity=self._activity(state.activity, item))
         return state

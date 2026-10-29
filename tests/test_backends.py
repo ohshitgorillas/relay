@@ -2,6 +2,7 @@
 
 import json
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,8 @@ from relay.backends.generic import GenericBackend
 from relay.config import Config
 from relay.errors import ConfigError
 from relay.ledger import Spend
+from relay.research import parse_map
+from relay.runner import RunResult, run_failed
 from relay.stream import StreamState
 
 
@@ -64,6 +67,23 @@ def test_codex_error_events_mark_failure(event: dict) -> None:
     # Breaks when failed runs are returned as successful reports.
     state = CodexBackend().parse(_state(), json.dumps(event))
     assert state.is_error is True
+
+
+def test_codex_warning_items_leave_a_real_research_map_standing(fake_cfg: Config, tmp_path: Path) -> None:
+    # Breaks when Codex's non-fatal warning items (ignored config keys, a clamped hook timeout)
+    # mark the run failed, so a good research map is thrown away as "research failed".
+    fixtures = Path(__file__).parent / "fixtures/codex-warnings"
+    backend = CodexBackend()
+    state = StreamState(None, 0, Spend(0, 0.0), None, False)
+    for line in (fixtures / "research-stdout.jsonl").read_text().splitlines():
+        state = backend.parse(state, line)
+    assert state.is_error is False
+    log = tmp_path / "20.jsonl"
+    result = RunResult(0, False, replace(state, result_text=(fixtures / "research-final.txt").read_text()), log)
+    assert run_failed(result) is False
+    m = parse_map("s2", "abc123", result.stream.result_text, fake_cfg)
+    assert m is not None
+    assert m.files == ("docs/superpowers/specs/m2-launcher-kinds-design.md",)
 
 
 def test_codex_captured_turn_usage_counts_cache_once_and_replay_is_idempotent() -> None:

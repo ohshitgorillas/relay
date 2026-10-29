@@ -1,0 +1,9 @@
+DONE
+READERS 0 | SPLIT 0
+IGNORED none
+CHOSEN none
+MAP
+docs/superpowers/specs/m2-launcher-kinds-design.md:494-508 | ImagePreparation and ImageBuilder interface declarations; implementation and test paths do not yet exist.
+docs/superpowers/specs/m2-launcher-kinds-design.md:511-513 | Image assembly, refresh, acquisition, confirmed identity and failure contracts.
+LINKS
+END MAP
