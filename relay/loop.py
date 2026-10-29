@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import stat
 import time
 from pathlib import Path
 from typing import Callable, Literal
 
 from relay import backends, ping, progress
 from relay.config import Config
-from relay.errors import ExitCode
+from relay.errors import ExitCode, QueueFormatError
+from relay.files import atomic_write
 from relay.ledger import Ledger, Spend
 from relay.prompts import lead_prompt, recut_brief
 from relay.queue import Section, blocked_by, parse_queue
@@ -116,7 +118,7 @@ def _run_section(
 
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
-    failed = result.killed or result.exit_code != 0 or status is None
+    failed = result.killed or result.exit_code != 0 or result.stream.is_error or status is None
     if failed:
         second, count = _fail(state, sid)
         progress.failed(sid, count)
@@ -201,21 +203,40 @@ def _recut(
 ) -> bool:
     """Run the divvyer's recut; True when it failed and that was the section's second failure."""
     brief = recut_brief(queue, section, reason, lead.log)
+    original_queue = queue.read_bytes()
+    original_mode = stat.S_IMODE(queue.stat().st_mode)
     before = parse_queue(queue)
     on_event, _hit = _watcher(cfg, ledger, since, "recut", section.id)
     progress.recut_started(section.id, reason)
-    result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag,
-                       backend=backends.get_backend(cfg.backend), cfg=cfg, role="recut")
+    changed = False
+    after = before
+    try:
+        result = run_agent(cfg.recut_command, brief, cwd, state.run_dir, on_event, retire_flag,
+                           backend=backends.get_backend(cfg.backend), cfg=cfg, role="recut")
+        failed = result.killed or result.exit_code != 0 or result.stream.is_error
+        if not failed:
+            try:
+                after = parse_queue(queue)
+            except QueueFormatError:
+                failed = True
+            else:
+                changed = after != before
+        failed = failed or not changed
+    except BaseException:
+        atomic_write(queue, original_queue, mode=original_mode)
+        raise
+    if failed:
+        # Known-failed output must never reach the parser or the next loop pass.
+        atomic_write(queue, original_queue, mode=original_mode)
     ledger.append("recut", section.id, result.stream.session_id, result.stream.spend)
-    changed = parse_queue(queue) != before
     progress.recut_finished(section.id, result, changed)
-    if result.killed or result.exit_code != 0 or not changed:
+    if failed:
         second, count = _fail(state, section.id)
         progress.failed(section.id, count)
         return second
     # A recut that keeps the section's id rewrote it in place; it is the recut's as much as a new id.
     known = {s.id for s in before}
-    for made in parse_queue(queue):
+    for made in after:
         if made.id not in known or made.id == section.id:
             state.mark_from_recut(made.id)
     return False

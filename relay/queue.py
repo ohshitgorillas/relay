@@ -1,4 +1,8 @@
-"""Parses the divvyer's .md queue into sections. Relay never writes the queue."""
+"""Parse the divvyer's .md queue; queue authorship belongs to leads and the divvyer.
+
+Relay's sole write exception is restoring exact pre-invocation queue bytes and
+permissions after a failed recut, through the transaction in relay.loop.
+"""
 
 import re
 from dataclasses import dataclass
