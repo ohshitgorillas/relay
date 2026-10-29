@@ -18,7 +18,7 @@ from relay.errors import (
 from tests.conftest import DEFAULT_CHECK_OUTSIDE, STANDING_APPROVAL
 
 DEFAULT_LEAD = [
-    "claude", "-p", "--output-format", "stream-json", "--verbose",
+    "claude", "-p", "--output-format", "stream-json", "--verbose", "--agent", "lead",
     "--permission-mode", "bypassPermissions",
 ]
 

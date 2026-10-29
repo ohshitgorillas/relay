@@ -8,7 +8,7 @@ from pathlib import Path
 from relay.errors import ConfigError
 
 _DEFAULT_LEAD = [
-    "claude", "-p", "--output-format", "stream-json", "--verbose",
+    "claude", "-p", "--output-format", "stream-json", "--verbose", "--agent", "lead",
     "--permission-mode", "bypassPermissions",
 ]
 _DEFAULT_CHECK_OUTSIDE = [
