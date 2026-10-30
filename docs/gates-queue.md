@@ -103,60 +103,43 @@ section s2 | lead | steps: 4, 5, 6 | size: lead: tokens: 1395004.9 seconds: 743.
     paths: Makefile
     check: make check
 section s3 | lead | steps: 7 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s3.d1 | builder | steps: 7 | writes: relay/__init__.py, relay/errors.py, relay/files.py, relay/git.py, relay/agents.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d1
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/__init__.py, relay/errors.py, relay/files.py, relay/git.py, relay/agents.py
-    check: uv run ruff check relay/__init__.py relay/errors.py relay/files.py relay/git.py relay/agents.py && uv run pytest
-  s3.d2 | builder | steps: 7 | writes: relay/ping.py, relay/runner.py, relay/stream.py, gates/__init__.py, gates/exemptions.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d2
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/ping.py, relay/runner.py, relay/stream.py, gates/__init__.py, gates/exemptions.py
-    check: uv run ruff check relay/ping.py relay/runner.py relay/stream.py gates/__init__.py gates/exemptions.py && uv run pytest
-  s3.d3 | builder | steps: 7 | writes: relay/check.py, relay/queue.py, relay/prompts.py, relay/progress.py, relay/status.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d3
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/check.py, relay/queue.py, relay/prompts.py, relay/progress.py, relay/status.py
-    check: uv run ruff check relay/check.py relay/queue.py relay/prompts.py relay/progress.py relay/status.py && uv run pytest
-  s3.d4 | builder | steps: 7 | writes: relay/backends/__init__.py, relay/backends/base.py, relay/backends/claude.py, relay/backends/generic.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d4
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/backends/__init__.py, relay/backends/base.py, relay/backends/claude.py, relay/backends/generic.py
-    check: uv run ruff check relay/backends/__init__.py relay/backends/base.py relay/backends/claude.py relay/backends/generic.py && uv run pytest
-  s3.d5 | builder | steps: 7 | writes: relay/backends/codex.py, relay/backends/codex_session.py, relay/research.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d5
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/backends/codex.py, relay/backends/codex_session.py, relay/research.py
-    check: uv run ruff check relay/backends/codex.py relay/backends/codex_session.py relay/research.py && uv run pytest
   s3.d6 | builder | steps: 7 | writes: relay/config.py, relay/ledger.py, relay/ladder.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/gates-queue.md s3.d6
+    resume 01a18a72-6049-7961-aa94-a26000bc8a5f
     design: docs/superpowers/specs/relay-gates-design.md
     step: 7
     paths: relay/config.py, relay/ledger.py, relay/ladder.py
-    check: uv run ruff check relay/config.py relay/ledger.py relay/ladder.py && uv run pytest
-  s3.d7 | builder | steps: 7 | writes: relay/state.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d7
+    check: uv run ruff check relay/config.py relay/ledger.py relay/ladder.py && make check
+  s3.d7a | test-writer | steps: 7 | writes: tests/test_state.py, tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0 | from: s3.d7
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d7a
+    port
+    design: docs/superpowers/specs/relay-gates-design.md, Order step 7
+    files: tests/test_state.py, tests/test_loop.py
+    view: stubgen .pyi of relay/state.py
+    view: stubgen .pyi of relay/loop.py
+    view: stubgen .pyi of relay/config.py
+    view: stubgen .pyi of relay/queue.py
+    view: stubgen .pyi of relay/runner.py
+    view: stubgen .pyi of relay/agents.py
+    view: stubgen .pyi of relay/ledger.py
+    view: stubgen .pyi of relay/ladder.py
+    view: stubgen .pyi of relay/research.py
+    view: stubgen .pyi of relay/check.py
+    view: stubgen .pyi of relay/status.py
+    view: stubgen .pyi of relay/progress.py
+    check: make check
+  s3.d7b | builder | steps: 7 | writes: relay/state.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0 | from: s3.d7
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d7b
     design: docs/superpowers/specs/relay-gates-design.md
     step: 7
     paths: relay/state.py
-    check: uv run ruff check relay/state.py && uv run pytest
-  s3.d8 | builder | steps: 7 | writes: relay/loop.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d8
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/loop.py
-    check: uv run ruff check relay/loop.py && uv run pytest
+    check: uv run ruff check relay/state.py && make check
   s3.d9 | builder | steps: 7 | writes: relay/cli.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/gates-queue.md s3.d9
     design: docs/superpowers/specs/relay-gates-design.md
     step: 7
     paths: relay/cli.py
-    check: uv run ruff check relay/cli.py && uv run pytest
+    check: uv run ruff check relay gates && make check
 section s4 | lead | steps: 8, 9 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
   s4.d1 | test-writer | steps: 8 | writes: tests/conftest.py, tests/harness.py, tests/fakes/fake_claude.py, tests/fakes/fake_runner.py, tests/test_helpers.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay/docs/gates-queue.md s4.d1
