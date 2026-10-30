@@ -1199,3 +1199,86 @@ def test_lead_prompt_map_paragraph_holds_only_the_rule_route_and_block_text() ->
     assert sentences[last_rule + 1 :] == []
     outside = rule_text.replace(MAP_RULE, " ").replace(MAP_RULING_ONLY, " ")
     assert not re.search(r"\b(?:open|skip|search|read|grep)(?:s|es|ing)?\b", outside, re.I)
+# Run-overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/prompts.py` `WORKER_RULE`; Order 6): the worker-reply contract stands in
+# lead_prompt after the retire contract.
+
+
+def _worker_rule_text() -> str:
+    prompt = _lead()
+    return prompt[prompt.index(str(RETIRE_FLAG)) + len(str(RETIRE_FLAG)) :]
+
+
+def _sentence(text: str, *parts: str) -> bool:
+    # True when one sentence of text (no full stop between) holds every part, in order.
+    pattern = r"[^.]*".join(parts)
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+# Behavior 1: A worker that replies OVERLOADED, or stops heavy with work left: end this
+# session with RECUT: <that worker's report>.
+
+
+def test_lead_prompt_ends_with_recut_and_the_report_on_an_overloaded_worker() -> None:
+    # Breaks when: the lead is not told to end with RECUT: and the worker's report when a
+    # worker replies OVERLOADED, or the rule stands before the retire contract.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bOVERLOADED\b", r"\bend\b", r"\bsession\b", r"RECUT: ", r"\breport\b")
+
+
+def test_lead_prompt_ends_with_recut_and_the_report_on_a_worker_stopped_heavy_with_work_left() -> None:
+    # Breaks when: a worker that stops heavy with work left is not routed to RECUT: with its report.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bheavy\b", r"\bwork left\b", r"\bend\b", r"RECUT: ", r"\breport\b")
+
+
+# Behavior 2: Never cut or resend the step yourself.
+
+
+def test_lead_prompt_forbids_the_lead_cutting_or_resending_the_step_itself() -> None:
+    # Breaks when: the lead is not told never to cut or resend the step itself.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bnever\b", r"\bcut\b", r"\bresend\b", r"\bstep\b", r"\byourself\b")
+
+
+# Behavior 3: A worker that replies REJECTED: STEERING: resend the same brief once, with
+# the quoted lines struck and nothing added.
+
+
+def test_lead_prompt_resends_the_same_brief_once_on_a_steering_rejection() -> None:
+    # Breaks when: a REJECTED: STEERING reply is not met by resending the same brief once.
+    text = _worker_rule_text()
+    assert _sentence(text, r"REJECTED: STEERING", r"\bresend\b", r"\bsame brief\b", r"\bonce\b")
+
+
+def test_lead_prompt_resends_with_the_quoted_lines_struck_and_nothing_added() -> None:
+    # Breaks when: the resend keeps the quoted lines or lets the lead add to the brief.
+    text = _worker_rule_text()
+    assert _sentence(text, r"REJECTED: STEERING", r"\bquoted lines\b", r"\bstruck\b", r"\bnothing added\b")
+
+
+# Behavior 4: No assayer runs on a rejection.
+
+
+def test_lead_prompt_runs_no_assayer_on_a_rejection() -> None:
+    # Breaks when: the lead is not told that no assayer runs on a rejection.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bno assayer\b", r"\brejection\b")
+
+
+# Behavior 5: A second rejection of the same step ends the session with RECUT: <both rejections>.
+
+
+def test_lead_prompt_ends_with_recut_and_both_rejections_on_a_second_rejection_of_the_same_step() -> None:
+    # Breaks when: a second rejection of the same step is not routed to RECUT: carrying both
+    # rejections (left out, met by another resend, or carrying only the latest rejection).
+    text = _worker_rule_text()
+    assert _sentence(
+        text,
+        r"\bsecond rejection\b",
+        r"\bsame step\b",
+        r"\bends?\b",
+        r"\bsession\b",
+        r"RECUT: ",
+        r"\bboth rejections\b",
+    )

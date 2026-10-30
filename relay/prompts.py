@@ -12,6 +12,15 @@ from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN
 from relay.status import KINDS, Kind, TEXT_NAMES
 
 
+WORKER_RULE = (
+    "Worker reply rule: when a worker replies OVERLOADED, or stops heavy with work left, "
+    "end this session with RECUT: <that worker's report>, and never cut or resend the step yourself. "
+    "When a worker replies REJECTED: STEERING, resend the same brief once, "
+    "with the quoted lines struck and nothing added; no assayer runs on a rejection. "
+    "A second rejection of the same step ends this session with RECUT: <both rejections>."
+)
+
+
 def _status_form(kind: Kind) -> str:
     return f"{kind}: <{TEXT_NAMES[kind]}>" if kind in TEXT_NAMES else kind
 
@@ -81,6 +90,7 @@ def lead_prompt(
         "on the same section, which resumes from this session. RECUT is only for a "
         "section whose cut is wrong or too big."
     )
+    parts.append(WORKER_RULE)
     parts.append(
         "Status rule: the text after RECUT: or DESIGN: is the problem: what fails, its evidence, "
         f"and the design step it is under. A fix you have in mind follows only after `{GUESS}`. "
