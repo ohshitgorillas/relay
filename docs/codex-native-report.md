@@ -471,3 +471,108 @@ checks, not hygiene; byte caps are also independent.
 No native `HookSurface`, `PROVEN` entry, background equivalent, or F1-F9
 runtime result is claimed by s1.d1a. No hook/configuration source was changed
 and no policy source script or model probe was run for this policy inventory.
+
+### Status-command grounding completion: s1.d1b
+
+**Provenance.** This section supersedes the earlier unverified `cc-status`
+entries for the payloads exercised below. Installed-binary static evidence
+was supplied by the coordinator, read directly on 2026-10-29. The explicit
+`codex`-argument observations and their cleanup were supplied in predecessor
+session `01a18a96-0e59-7c03-beaf-aa42813a04db`'s handoff. This builder ran
+the fresh no-argument probe below on the same date. No owner configuration,
+hook source, adapter, or real-model run was executed or changed by this
+dispatch; only an isolated executable copy and fake dependency were run.
+
+**Binary resolution and static evidence.** The configured path
+`~/.config/iterm2/cc-status` is a symlink to
+`/Applications/iTerm.app/Contents/Resources/utilities/cc-status`, a universal
+Mach-O arm64/x86_64 executable. The coordinator's `nm -arch arm64` located
+`resolveIt2` at `0x1000013e4`. Supplied `otool -arch arm64 -tvV` evidence
+shows `CommandLine.arguments[0]` converted through `URL(fileURLWithPath)`,
+`resolvingSymlinksInPath` at `0x1000014f0`,
+`deletingLastPathComponent` at `0x10000150c`, and
+`appendingPathComponent("it2")` at `0x100001524`, followed by
+`isExecutableFileAtPath` at `0x100001558`. An executable sibling wins;
+otherwise it uses `/usr/bin/env` and fallback arguments. A PATH-only fake
+beside the original binary would therefore miss its bundled sibling.
+
+Supplied strings include `UserPromptSubmit`, `PermissionRequest`,
+`notification_type`, `permission_prompt`, `last_assistant_message`, agent
+names `claude`/`codex`, `get-status`, `set-status`, `get-background-tasks`,
+`--json`, `--quiet-if-unresolved`, `--background-tasks-delta`,
+`--then-dot-color`, `--then-text-color`, `--if-background-tasks`,
+`--background-tasks`, and statuses idle/working/done/waiting/error. Strings
+establish vocabulary only, not control flow or exhaustive behavior.
+
+**Predecessor observations.** An exact regular-file copy beside a fake
+executable `it2`, invoked with argument `codex`, used a minimal environment
+with `TERM_SESSION_ID=w0:probe-session`, a scratch `IT2_SOCK` path, and
+scratch HOME/TMPDIR. SessionStart/SessionEnd requested idle with
+background-tasks=0; UserPromptSubmit/PreToolUse/PostToolUse requested working;
+PermissionRequest and permission-prompt Notification requested waiting;
+Stop requested done with `last_assistant_message`; SubagentStop made no
+call. Handled events called only fake `it2 set-status
+--session=probe-session`; working/waiting included progress-end to idle
+transitions. All exited 0 with empty stdout/stderr. Initial no-argument
+attempts lacking the colon-address/socket environment made no calls, so
+they did not establish the configured no-argument behavior.
+
+**Fresh configured no-argument probe.** Authorized diagnostic scratch
+`/private/tmp/relay-cc-status-1kp9nhdg` held a regular-file copy verified
+byte-for-byte equal to the installed executable, SHA-256
+`3c4448beebc4cdbd20dc1a17478e0cf0121996b57c0dd3d9bcc796c8b0773ac9`.
+The executable's sole sibling `it2` was a fake that recorded PID and argv
+as JSON lines and always returned
+`{"status":"idle","background_tasks":0,"session_id":"probe-session"}`.
+No query operation was actually requested in these cases, so this fixed
+response does not prove compatibility with real query results.
+
+The copied command received no arguments. Its entire supplied environment
+was PATH pointing to the scratch, scratch HOME and TMPDIR directories,
+`TERM_SESSION_ID=w0:probe-session`, and IT2_SOCK pointing to the nonexistent
+scratch `fake.socket`. Every JSON input included `hook_event_name`,
+`session_id=probe-session`, scratch cwd, `tool_name=Bash`,
+`tool_input.command=true`, and `last_assistant_message=probe-complete`.
+Notification additionally had `notification_type=permission_prompt`.
+Each invocation had a separate process group and a ten-second timeout;
+none timed out. All nine exited 0 with empty stdout and stderr.
+
+| Input event | Captured fake `it2` request |
+|---|---|
+| SessionStart, SessionEnd | One `set-status --session=probe-session --status=idle`, empty detail, `--background-tasks=0`; green dot `#00d75f`, gray text `#888888`. |
+| UserPromptSubmit, PreToolUse, PostToolUse | One `set-status --session=probe-session --quiet-if-unresolved --status=working`, empty detail; orange dot/text `#ff9500`. |
+| PermissionRequest | One `set-status --session=probe-session --quiet-if-unresolved --status=waiting --detail=Allow Bash: true?`; blue dot/text `#5f87ff`. |
+| Notification, permission_prompt | One `set-status --session=probe-session --quiet-if-unresolved --status=waiting`; blue dot/text `#5f87ff`. This event was an extra classification probe beyond the configured inventory. |
+| Stop | One `set-status --session=probe-session --quiet-if-unresolved --status=done --detail=probe-complete`; green dot/text `#00d75f`. |
+| SubagentStop | No fake invocation. |
+
+Working/waiting calls also carried `--expires-on=progress-end`,
+`--then-status=idle`, `--then-dot-color=#00d75f`,
+`--then-text-color=#888888`, and empty `--then-detail`. The requested
+transitions were recorded; no real terminal applied them. No real iTerm
+service or other service was contacted by the isolated command: all eight
+observed child calls reached the fake executable, whose body only recorded
+arguments and printed the fixed JSON.
+
+**Bounded conclusion and design fit.** The exercised configured invocation
+requests terminal status, presentation, detail, and background-task reset;
+it neither denied the sample tool nor emitted policy context. These
+observations support the design's dropped bookkeeping/notification outcome
+for those payloads. They do not establish behavior for other payloads,
+malformed input, helper identities, query branches, dependency failures,
+or every binary path. No `cc-status` design mismatch was found in this
+sample; no claim of exhaustive policy absence or native-hook equivalence
+is made. The policy-interface mismatches in s1.d1a remain unresolved.
+F1-F9, rollout/resume evidence, and any `PROVEN` entry remain outside this
+dispatch; completing this subsection does not complete all of Grounding.
+
+**Cleanup proof.** Fresh probe PIDs (command and fake children) were
+54169, 54250, 54277, 54279, 54291, 54292, 54304, 54306, 54316,
+54317, 54333, 54335, 54360, 54362, 54371, 54373, 54374. All command
+children were reaped; a single `ps -p` over all recorded PIDs exited 1
+with empty stdout/stderr. Scratch removal completed and its absence was
+verified. The predecessor separately supplied absence proof for its PIDs
+27976, 28019, 28021, 31231, 31251, 31258, 31260, 31264, 31266,
+31268, 31270, 31271, 31232, 31253, 31259, 31261, 31265, 31267,
+31269, 31272: `ps -p` exited 1 with empty output, and its scratch was
+removed with absence verified. This dispatch created no persistent process.
