@@ -22,7 +22,8 @@ import pytest
 
 from relay.config import Config
 from relay.runner import CommandResult, RunResult, capture, run_agent, run_command
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
+from relay.backends.claude import ClaudeBackend
 from relay.stream import StreamState
 from relay.ledger import Spend
 from dataclasses import replace
@@ -522,6 +523,9 @@ class PollingBackend:
     def resume_hint(self, session_id: str) -> str:
         return f"previous thread {session_id}"
 
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+        return Launch()
+
 
 def test_backend_poll_reaches_callback_while_stdout_is_quiet(
     fake_cfg: Config, tmp_path: Path, run_dir: Path
@@ -596,6 +600,104 @@ def test_backend_finish_and_unique_output_are_used_for_every_run(
     assert all(result.stream.result_text == "final answer" for result in results)
     assert all(result.stream.spend == Spend(654, 0.0) for result in results)
     assert finished_texts == ["output for run 1", "output for run 2"]
+
+
+# relay-run-overhead-design.md, Modules `relay/backends/base.py` and Homes: one launch
+# description per backend child, `Backend.launch`, applied once in `runner.run_agent`.
+# The child is the fake `claude`, which records its argv and env in `RELAY_FAKE_LAUNCH`.
+
+
+class LaunchingBackend(PollingBackend):
+    """A backend whose every child gets `described`, recording each `launch` call."""
+
+    def __init__(self, command: list[str], described: Launch) -> None:
+        super().__init__(command)
+        self.described = described
+        self.launches: list[tuple[str, Path, Path]] = []
+
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+        self.launches.append((role, retire_flag, run_dir))
+        return self.described
+
+
+def _launched(path: Path) -> list[dict[str, Any]]:
+    """Each run the fake `claude` recorded: its argv and env."""
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_run_agent_gives_the_child_the_launch_env_merged_over_relays_environment(
+    fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when run_agent ignores Launch.env, replaces os.environ with it instead of
+    # merging over it, or sets it in Relay's own environment.
+    record = tmp_path / "launch.jsonl"
+    monkeypatch.setenv("RELAY_FAKE_LAUNCH", str(record))
+    monkeypatch.setenv("RELAY_LAUNCH_INHERITED", "from relay 3a9f")
+    monkeypatch.setenv("RELAY_LAUNCH_OVERRIDDEN", "from relay")
+    monkeypatch.delenv("RELAY_LAUNCH_ADDED", raising=False)
+    described = Launch(env={"RELAY_LAUNCH_OVERRIDDEN": "from launch",
+                            "RELAY_LAUNCH_ADDED": "added 51c0"})
+    backend = LaunchingBackend(fake, described)
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
+              backend=backend, cfg=fake_cfg)
+    [seen] = _launched(record)
+    assert seen["env"].get("RELAY_LAUNCH_ADDED") == "added 51c0"
+    assert seen["env"].get("RELAY_LAUNCH_OVERRIDDEN") == "from launch"
+    assert seen["env"].get("RELAY_LAUNCH_INHERITED") == "from relay 3a9f"
+    assert seen["env"].get("PATH") == os.environ["PATH"]
+    assert os.environ["RELAY_LAUNCH_OVERRIDDEN"] == "from relay"
+    assert "RELAY_LAUNCH_ADDED" not in os.environ
+
+
+def test_run_agent_adds_the_launch_extra_argv_to_the_childs_argv(
+    fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when run_agent drops Launch.extra_argv, splits it, or reorders it.
+    record = tmp_path / "launch.jsonl"
+    monkeypatch.setenv("RELAY_FAKE_LAUNCH", str(record))
+    extra = ("--launch-flag", "value 8e2d", "--second")
+    backend = LaunchingBackend(fake, Launch(extra_argv=extra))
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
+              backend=backend, cfg=fake_cfg)
+    [seen] = _launched(record)
+    argv = seen["argv"]
+    runs = [tuple(argv[i:i + len(extra)]) for i in range(len(argv) - len(extra) + 1)]
+    assert extra in runs
+
+
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_run_agent_asks_the_backend_for_one_launch_per_child(
+    role: str, fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+) -> None:
+    # Breaks when run_agent skips Backend.launch, calls it more than once for a child, or
+    # passes it another role, retire flag or run directory.
+    retire = tmp_path / "retire"
+    backend = LaunchingBackend(fake, Launch())
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire,
+              backend=backend, cfg=fake_cfg, role=role)
+    assert backend.launches == [(role, retire, run_dir)]
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire,
+              backend=backend, cfg=fake_cfg, role=role)
+    assert backend.launches == [(role, retire, run_dir), (role, retire, run_dir)]
+
+
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_a_claude_child_runs_with_the_print_background_wait_ceiling_off(
+    role: str, fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when the Claude child of any role starts without CHILD_ENV, so the CLI stops a
+    # print-mode session's background agents 10 minutes after its last turn.
+    record = tmp_path / "launch.jsonl"
+    monkeypatch.setenv("RELAY_FAKE_LAUNCH", str(record))
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
+              backend=ClaudeBackend(), cfg=fake_cfg, role=role)
+    [seen] = _launched(record)
+    assert seen["env"].get("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS") == "0"
+    assert "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" not in os.environ
 
 
 def test_replay_restores_runner_telemetry_beside_legacy_claude_logs(

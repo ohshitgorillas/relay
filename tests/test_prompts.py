@@ -1087,3 +1087,198 @@ def test_lead_prompt_renders_the_assignment_without_selecting_names(
     )
     assert calls == []
     assert f"BRANCH {binding.branch} {binding.path}" in prompt
+
+
+# Run overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/prompts.py` ENTRY_RULE, READ_RULE and lead_prompt; Order 4).
+
+
+def _flat_lower(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def _run_overhead_brief(cfg: Config, which: str) -> str:
+    if which == "research":
+        return research_brief(QUEUE, _section(), RESEARCH_FLAG, cfg)
+    return refresh_brief(
+        QUEUE, _section(), _kept_map(), ("relay/prompts.py",), RESEARCH_FLAG, cfg
+    )
+
+
+# ENTRY_RULE, appended by _map_form: each entry names what lies at its lines (a symbol, table,
+# section or call) in nouns. An entry never says what the code proves, lacks, allows or
+# justifies, and never tells a reader what to open, skip or search.
+
+
+@pytest.mark.parametrize("which", ["research", "refresh"])
+def test_map_form_says_an_entry_never_says_what_the_code_proves_lacks_allows_or_justifies(
+    fake_cfg: Config, which: str
+) -> None:
+    # Breaks when the brief's map form leaves out any clause of the entry rule: that an entry
+    # names what lies at its lines in nouns, any of the four verbs it never says the code does,
+    # or that it never tells a reader what to open, skip or search.
+    brief = _flat_lower(_run_overhead_brief(fake_cfg, which))
+    assert re.search(
+        r"an entry never says what the code proves, lacks, allows,? or justifies", brief
+    )
+    assert re.search(
+        r"each entry names what lies at its lines \(a symbol, table, section,? or call\) "
+        r"in nouns",
+        brief,
+    )
+    assert re.search(
+        r"an entry never says what the code proves, lacks, allows,? or justifies,? and never "
+        r"tells a reader what to open, skip,? or search",
+        brief,
+    )
+
+
+# READ_RULE, in research_brief and refresh_brief: read the section's files yourself, and send a
+# reader only for a file too large to read whole within the map caps.
+
+
+@pytest.mark.parametrize("which", ["research", "refresh"])
+def test_brief_says_read_the_sections_files_yourself_and_send_a_reader_only_for_a_large_file(
+    fake_cfg: Config, which: str
+) -> None:
+    # Breaks when the brief leaves the choice to send readers to the researcher, or drops the
+    # limit that a reader goes only for a file too large to read whole within the map caps.
+    brief = _flat_lower(_run_overhead_brief(fake_cfg, which))
+    assert "read the section's files yourself" in brief
+    assert "send a reader only for a file too large to read whole within the map caps" in brief
+
+
+# lead_prompt: the map paragraph keeps its paste-verbatim and relay-ask lines and holds only
+# block()'s text.
+
+
+def test_lead_prompt_map_paragraph_holds_only_the_rule_route_and_block_text() -> None:
+    # Breaks when the map paragraph carries an instruction line beyond the paste-verbatim and
+    # relay-ask lines and block()'s header and body, or drops either of those two lines.
+    kept = _kept_map()
+    expected_block = f"map {kept.sid} at {kept.commit}\n{kept.body}\n"
+    with_map = _with_map(block(kept))
+    without = set(_with_map(None).splitlines())
+    assert MAP_RULE in with_map
+    assert MAP_RULING_ONLY in with_map
+    assert MAP_ROUTE in with_map
+    assert expected_block in with_map
+    block_lines = set(expected_block.splitlines())
+    added = [line for line in with_map.splitlines() if line not in without]
+    for line in added:
+        assert (
+            not line.strip()
+            or line in block_lines
+            or MAP_RULE in line
+            or MAP_RULING_ONLY in line
+            or MAP_ROUTE in line
+        ), line
+    # The paragraph runs from the start of the rule's line through block()'s text, and the
+    # prompt with it taken out is the no-map prompt, so nothing else rides along with the map.
+    start = with_map.rfind("\n", 0, with_map.find(MAP_RULE)) + 1
+    block_at = with_map.find(expected_block, start)
+    assert block_at != -1
+    paragraph = with_map[start : block_at + len(expected_block)]
+    rest = with_map.replace(paragraph, "", 1)
+    assert [line for line in rest.splitlines() if line.strip()] == [
+        line for line in _with_map(None).splitlines() if line.strip()
+    ]
+    # Before the block, the paragraph holds the route sentence once and otherwise only the
+    # paste-verbatim rule's lines; no sentence follows the rule's last one, and nothing in them
+    # tells an agent what to open, skip, search or read.
+    lead_in = paragraph[: len(paragraph) - len(expected_block)]
+    assert lead_in.count(MAP_ROUTE) == 1
+    rule_text = lead_in.replace(MAP_ROUTE, "\n")
+    for line in rule_text.splitlines():
+        if line.strip():
+            assert MAP_RULE in line or MAP_RULING_ONLY in line, line
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", rule_text.strip()) if s.strip()]
+    last_rule = max(
+        i for i, s in enumerate(sentences) if MAP_RULE in s or MAP_RULING_ONLY in s
+    )
+    assert sentences[last_rule + 1 :] == []
+    outside = rule_text.replace(MAP_RULE, " ").replace(MAP_RULING_ONLY, " ")
+    assert not re.search(r"\b(?:open|skip|search|read|grep)(?:s|es|ing)?\b", outside, re.I)
+# Run-overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/prompts.py` `WORKER_RULE`; Order 6): the worker-reply contract stands in
+# lead_prompt after the retire contract.
+
+
+def _worker_rule_text() -> str:
+    prompt = _lead()
+    return prompt[prompt.index(str(RETIRE_FLAG)) + len(str(RETIRE_FLAG)) :]
+
+
+def _sentence(text: str, *parts: str) -> bool:
+    # True when one sentence of text (no full stop between) holds every part, in order.
+    pattern = r"[^.]*".join(parts)
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
+# Behavior 1: A worker that replies OVERLOADED, or stops heavy with work left: end this
+# session with RECUT: <that worker's report>.
+
+
+def test_lead_prompt_ends_with_recut_and_the_report_on_an_overloaded_worker() -> None:
+    # Breaks when: the lead is not told to end with RECUT: and the worker's report when a
+    # worker replies OVERLOADED, or the rule stands before the retire contract.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bOVERLOADED\b", r"\bend\b", r"\bsession\b", r"RECUT: ", r"\breport\b")
+
+
+def test_lead_prompt_ends_with_recut_and_the_report_on_a_worker_stopped_heavy_with_work_left() -> None:
+    # Breaks when: a worker that stops heavy with work left is not routed to RECUT: with its report.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bheavy\b", r"\bwork left\b", r"\bend\b", r"RECUT: ", r"\breport\b")
+
+
+# Behavior 2: Never cut or resend the step yourself.
+
+
+def test_lead_prompt_forbids_the_lead_cutting_or_resending_the_step_itself() -> None:
+    # Breaks when: the lead is not told never to cut or resend the step itself.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bnever\b", r"\bcut\b", r"\bresend\b", r"\bstep\b", r"\byourself\b")
+
+
+# Behavior 3: A worker that replies REJECTED: STEERING: resend the same brief once, with
+# the quoted lines struck and nothing added.
+
+
+def test_lead_prompt_resends_the_same_brief_once_on_a_steering_rejection() -> None:
+    # Breaks when: a REJECTED: STEERING reply is not met by resending the same brief once.
+    text = _worker_rule_text()
+    assert _sentence(text, r"REJECTED: STEERING", r"\bresend\b", r"\bsame brief\b", r"\bonce\b")
+
+
+def test_lead_prompt_resends_with_the_quoted_lines_struck_and_nothing_added() -> None:
+    # Breaks when: the resend keeps the quoted lines or lets the lead add to the brief.
+    text = _worker_rule_text()
+    assert _sentence(text, r"REJECTED: STEERING", r"\bquoted lines\b", r"\bstruck\b", r"\bnothing added\b")
+
+
+# Behavior 4: No assayer runs on a rejection.
+
+
+def test_lead_prompt_runs_no_assayer_on_a_rejection() -> None:
+    # Breaks when: the lead is not told that no assayer runs on a rejection.
+    text = _worker_rule_text()
+    assert _sentence(text, r"\bno assayer\b", r"\brejection\b")
+
+
+# Behavior 5: A second rejection of the same step ends the session with RECUT: <both rejections>.
+
+
+def test_lead_prompt_ends_with_recut_and_both_rejections_on_a_second_rejection_of_the_same_step() -> None:
+    # Breaks when: a second rejection of the same step is not routed to RECUT: carrying both
+    # rejections (left out, met by another resend, or carrying only the latest rejection).
+    text = _worker_rule_text()
+    assert _sentence(
+        text,
+        r"\bsecond rejection\b",
+        r"\bsame step\b",
+        r"\bends?\b",
+        r"\bsession\b",
+        r"RECUT: ",
+        r"\bboth rejections\b",
+    )

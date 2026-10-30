@@ -22,7 +22,7 @@ import relay.ping
 import relay.queue
 import relay.runner
 import relay.backends
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
 from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
@@ -731,6 +731,7 @@ FIRST_SPEND = 3 + 1200 + 5000 + 40
 DONE_SPEND = Spend(tokens=(3 + 1200 + 5000 + 40) + (7 + 100 + 900 + 25), dollars=0.4321)
 # In NO_STATUS_LEAD, one assistant message and a result without total_cost_usd.
 NO_STATUS_SPEND = Spend(tokens=5 + 0 + 2000 + 10, dollars=0.0)
+NO_STATUS_CONTEXT = 5 + 0 + 2000
 
 
 def _shimmed(cfg: Config, tmp_path: Path, split: int = 0, touch: Path | None = None) -> Config:
@@ -1007,6 +1008,9 @@ RETIRED_CONTEXT = 4 + 300 + 1500
 RETIRED_SPEND = Spend(tokens=4 + 300 + 1500 + 20, dollars=0.1111)
 RECUT_SPEND = Spend(tokens=6 + 200 + 1000 + 30, dollars=0.2222)
 DIVVYER_SPEND = Spend(tokens=8 + 400 + 2000 + 50, dollars=0.0444)
+# Each run's one assistant message is its peak context: input + cache_creation + cache_read.
+RECUT_CONTEXT = 6 + 200 + 1000
+DIVVYER_CONTEXT = 8 + 400 + 2000
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -1181,6 +1185,9 @@ def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
         def resume_hint(self, session_id: str) -> str:
             return f"Prior thread: {session_id}; native history: codex exec resume {session_id}"
 
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
+
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: RotatingBackend())
     assert run(queue, dataclasses.replace(cfg, backend="codex")) == ExitCode.QUEUE_EMPTY
     assert roles == ["lead", "lead"]
@@ -1230,6 +1237,9 @@ def test_backend_finalization_error_overrides_successful_child_report(
         def resume_hint(self, session_id: str) -> str:
             return ""
 
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
+
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: FinalizationBackend())
     result = run(queue, dataclasses.replace(cfg, backend="codex"))
     section = State.open(queue, cfg).section(first)
@@ -1272,6 +1282,9 @@ def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
 
         def resume_hint(self, session_id: str) -> str:
             return ""
+
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
 
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: FailedRecutBackend())
     result = run(queue, dataclasses.replace(cfg, backend="codex"))
@@ -1348,6 +1361,9 @@ def test_recut_transaction_restores_bytes_mode_and_retries(
 
         def resume_hint(self, session_id: str) -> str:
             return ""
+
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
 
     if failure == "exit":
         original_argv = RecoveryBackend.argv
@@ -2087,14 +2103,14 @@ _STARTED = r"relay go .+: started; .+"
 _PROGRESS = [
     re.compile(_STARTED),
     re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
-    re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"lead \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"),
     # relay-cache-cost-design.md:156: empty inventories report their observation limit.
     re.compile(r".*no subagents observed.*"),
     re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
     re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
     re.compile(r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"),
     re.compile(r"recut \S+: started: .+"),
-    re.compile(r"recut \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    re.compile(r"recut \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"),
     re.compile(r"section \S+: needs an answer: .+"),
     re.compile(r"section \S+: failed \(\d+ of 2\)"),
     re.compile(r"waiting for answers on .+"),
@@ -2174,6 +2190,7 @@ def _mark_run_agent(monkeypatch: pytest.MonkeyPatch, marker: str) -> list[inspec
 
 # In NEEDS_OWNER_LEAD, one assistant message and a result of 0.0333 dollars.
 NEEDS_OWNER_SPEND = Spend(tokens=2 + 100 + 800 + 15, dollars=0.0333)
+NEEDS_OWNER_CONTEXT = 2 + 100 + 800
 
 
 def _running(sid: str, count: int, cwd: Path, literal: bool) -> str:
@@ -2184,10 +2201,11 @@ def _running(sid: str, count: int, cwd: Path, literal: bool) -> str:
     return f"check {sid}: running {count} {noun} in {cwd}"
 
 
-def _finished(spend: Spend) -> str:
-    """The `(<tokens> tokens, $<dollars>)` tail of a finished line, for the spends used here,
-    whose dollars each round to two places without a tie."""
-    return f"({spend.tokens} tokens, ${spend.dollars:.2f})"
+def _finished(spend: Spend, peak: int) -> str:
+    """The `(peak context <peak>, <tokens> tokens summed over turns, $<dollars>)` tail of a
+    finished line (relay-run-overhead-design.md:116,120), `peak` the largest main-thread context
+    of the run, for the spends used here, whose dollars each round to two places without a tie."""
+    return f"(peak context {peak}, {spend.tokens} tokens summed over turns, ${spend.dollars:.2f})"
 
 
 def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_with_its_outcome(
@@ -2256,32 +2274,32 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
         return [
             f"relay go {name}: started; no token budget, no dollar budget",
             f"lead {a}: started fresh",
-            f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+            f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND, NO_STATUS_CONTEXT)}",
             "no subagents observed",
             f"section {a}: failed (1 of 2)",
             f"lead {a}: started, resuming sess-lead-2",
-            f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+            f"lead {a}: finished DONE {_finished(DONE_SPEND, FIRST_CONTEXT)}",
             "no subagents observed",
             _running(a, 1, top, literal),
             f"check {a}: passed",
             f"lead {b}: started, resuming sess-lead-1",
-            f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+            f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND, RECUT_CONTEXT)}",
             "no subagents observed",
             f"recut {b}: started: {RECUT_REASON}",
-            f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
+            f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND, DIVVYER_CONTEXT)}",
             f"section {b}: failed (1 of 2)",
             f"lead {b}: started, resuming sess-lead-4",
-            f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+            f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND, NEEDS_OWNER_CONTEXT)}",
             "no subagents observed",
             f"section {b}: needs an answer: {QUESTION}",
             f"lead {c}: started, resuming sess-lead-5",
-            f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+            f"lead {c}: finished DONE {_finished(DONE_SPEND, FIRST_CONTEXT)}",
             "no subagents observed",
             _running(c, 3, top, literal),
             f"check {c}: passed",
             f"waiting for answers on {b}",
             f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
-            f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+            f"lead {b}: finished DONE {_finished(DONE_SPEND, FIRST_CONTEXT)}",
             "no subagents observed",
         ]
 
@@ -2897,7 +2915,11 @@ def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it_h
     at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
     assert len(at) == len(runs) >= 3, texts
     started = f"recut {first}: started: {RECUT_REASON}"
-    finished = f"recut {first}: finished {outcome} ({DIVVYER_SPEND.tokens} tokens, $0.04)"
+    # The spend tail per relay-run-overhead-design.md:116,120.
+    finished = (
+        f"recut {first}: finished {outcome}"
+        f" (peak context {DIVVYER_CONTEXT}, {DIVVYER_SPEND.tokens} tokens summed over turns, $0.04)"
+    )
     assert [t for t in texts if t.startswith("recut ")] == [started, finished], texts
     assert at[0] < texts.index(started) < at[1] < texts.index(finished) < at[2], texts
 
@@ -6308,7 +6330,12 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     finished = [t for t in texts if t.startswith("research s1: ") and not t.startswith("research s1: mapping in ")]
     reported = [t for t in finished if "fail" in t]
     assert len(reported) == 1, texts
-    form = rf"research s1: failed: {re.escape(error)} \(\d+ tokens, \$\d+\.\d\d\); the lead starts without a map"
+    # The spend tail reads "(peak context <n>, <n> tokens summed over turns, $<d>)"
+    # (relay-run-overhead-design.md:116,120).
+    form = (
+        rf"research s1: failed: {re.escape(error)} \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d\d\);"
+        r" the lead starts without a map"
+    )
     assert re.fullmatch(form, reported[0]), texts
     assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
     pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
@@ -7215,3 +7242,60 @@ def test_drain_during_new_ladder_preparation_saves_the_followup(
     assert section.pending["kind"] == ("design-recut" if dispatch == "design-recut" else "climb")
     assert section.failures == 0
     assert section.design_failures == 0
+
+
+# Run overhead (design: docs/superpowers/specs/relay-run-overhead-design.md, Homes, lead
+# context measurement; Order 1). `loop._watcher` reads only `context_tokens`, which subagent
+# events never set. In SUBAGENT_LEAD (session "sess-sub-1", result "DONE") the main thread's
+# assistant messages (lines 1 and 3) reach contexts 2 + 500 + 1500 and 4 + 100 + 2400; the
+# subagent's (lines 2 and 4) reach 50 + 20000 + 80000 and 6 + 0 + 90000.
+SUBAGENT_LEAD = "stream-subagent-context.jsonl"
+SUBAGENT_MAIN_PEAK = 4 + 100 + 2400
+SUBAGENT_SMALLER_CONTEXT = 6 + 0 + 90000
+
+
+# Behavior: `loop._watcher` (`relay/loop.py:557-582`) reads only `context_tokens`.
+
+
+def test_a_subagents_context_past_context_limit_creates_no_retire_flag(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the watcher weighs a subagent event's context against context_limit.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    cfg = dataclasses.replace(cfg, context_limit=SUBAGENT_MAIN_PEAK + 1)
+    assert run(queue, _shimmed(cfg, tmp_path, split=5)) == ExitCode.QUEUE_EMPTY
+    assert _record(tmp_path, 0)["appeared"] == []
+
+
+def test_a_subagents_context_past_the_hard_ceiling_does_not_kill_the_lead(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the watcher kills the lead on a subagent event's context.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    cfg = dataclasses.replace(
+        cfg, context_limit=SUBAGENT_MAIN_PEAK + 1, hard_ceiling=SUBAGENT_SMALLER_CONTEXT
+    )
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    state = State.open(queue, cfg)
+    assert all(state.section(sid).status == "done" for sid in _open_ids(queue))
+
+
+def test_the_retire_line_names_the_main_threads_context_not_a_subagents(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher retires the lead at a subagent event, so the first retire comes
+    # before the main thread reaches context_limit and names the subagent's context.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=SUBAGENT_MAIN_PEAK)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: asked to retire at {SUBAGENT_MAIN_PEAK} context tokens"
+    assert [t for t in texts if ": asked to retire" in t] == [line], texts

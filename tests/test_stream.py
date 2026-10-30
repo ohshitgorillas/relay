@@ -250,3 +250,68 @@ def test_claude_progress_cost_is_not_a_final_cost_and_missing_settings_stay_unkn
     assert agent.context == 900
     assert agent.cost_dollars is None
     assert agent.cost_unavailable
+
+
+# Run overhead (design: docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/stream.py`; Order 1). tests/fixtures/stream-subagent-context.jsonl, by line:
+#   0 init, session "sess-sub-1"
+#   1 assistant msg_31, parent_tool_use_id null: input 2, cache_creation 500, cache_read 1500, output 30
+#   2 assistant msg_32, parent_tool_use_id "toolu_31": input 50, cache_creation 20000, cache_read 80000, output 100
+#   3 assistant msg_33, parent_tool_use_id null: input 4, cache_creation 100, cache_read 2400, output 15
+#   4 assistant msg_34, parent_tool_use_id "toolu_31": input 6, cache_creation 0, cache_read 90000, output 50
+#   5 result: success, "Step committed.\nDONE", total_cost_usd 0.9
+
+SUBAGENT = "stream-subagent-context.jsonl"
+MAIN_FIRST_CONTEXT = 2 + 500 + 1500
+MAIN_LAST_CONTEXT = 4 + 100 + 2400
+MAIN_FIRST_SPEND = 2 + 500 + 1500 + 30
+SUB_FIRST_SPEND = 50 + 20000 + 80000 + 100
+MAIN_LAST_SPEND = 4 + 100 + 2400 + 15
+SUB_LAST_SPEND = 6 + 0 + 90000 + 50
+
+
+# Behavior: measures the main thread's context only. Subagent usage still counts toward spend.
+
+
+def test_a_subagent_event_adds_its_usage_to_spend_without_setting_context_tokens() -> None:
+    # Breaks when: a subagent's usage is dropped from spend.tokens, or its context is taken
+    # as context_tokens.
+    state = _feed_all(_fresh(), _lines(SUBAGENT)[:3])
+    assert state.context_tokens == MAIN_FIRST_CONTEXT
+    assert state.spend.tokens == MAIN_FIRST_SPEND + SUB_FIRST_SPEND
+
+
+def test_a_subagent_message_is_seen_without_setting_context_tokens() -> None:
+    # Breaks when: a subagent event is left out of seen_messages, or sets context_tokens.
+    state = _feed_all(_fresh(), _lines(SUBAGENT)[:3])
+    assert state.context_tokens == MAIN_FIRST_CONTEXT
+    assert "msg_32" in state.seen_messages
+
+
+def test_a_whole_run_spends_every_message_and_measures_only_the_main_thread() -> None:
+    # Breaks when: the run's spend leaves out subagent turns, context_tokens ends at the
+    # last subagent event's context, or peak_context is never set or is taken from a subagent
+    # event (design: Modules `relay/stream.py`, peak_context is the largest context_tokens seen
+    # in the run; a subagent event leaves it unchanged).
+    state = _feed_all(_fresh(), _lines(SUBAGENT))
+    assert state.context_tokens == MAIN_LAST_CONTEXT
+    assert state.spend.tokens == MAIN_FIRST_SPEND + SUB_FIRST_SPEND + MAIN_LAST_SPEND + SUB_LAST_SPEND
+    assert state.spend.dollars == 0.9
+    assert state.peak_context == max(MAIN_FIRST_CONTEXT, MAIN_LAST_CONTEXT)
+
+
+# Behavior: the main thread's latest context; subagent events never set it
+
+
+def test_a_subagent_event_before_any_main_thread_event_leaves_context_tokens_at_zero() -> None:
+    # Breaks when: a subagent event sets context_tokens while the main thread has none yet.
+    lines = _lines(SUBAGENT)
+    state = _feed_all(_fresh(), [lines[0], lines[2]])
+    assert state.context_tokens == 0
+
+
+def test_a_subagent_event_after_the_main_threads_latest_leaves_context_tokens_unchanged() -> None:
+    # Breaks when: the last subagent event's context replaces the main thread's latest.
+    before = _feed_all(_fresh(), _lines(SUBAGENT)[:4])
+    after = feed(before, _lines(SUBAGENT)[4])
+    assert after.context_tokens == MAIN_LAST_CONTEXT

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -21,6 +22,12 @@ class Capabilities:
     resume: bool = False
 
 
+@dataclass(frozen=True)
+class Launch:
+    extra_argv: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)  # merged over os.environ
+
+
 class Backend(Protocol):
     capabilities: Capabilities
 
@@ -37,4 +44,7 @@ class Backend(Protocol):
         raise NotImplementedError
 
     def resume_hint(self, session_id: str) -> str:
+        raise NotImplementedError
+
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
         raise NotImplementedError

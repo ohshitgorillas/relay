@@ -5,11 +5,14 @@ Reads its prompt on stdin, then emits the scripted stream-json lines of the
 scenario file named by `RELAY_FAKE_SCENARIO`. When argv carries `--agent <name>`
 and `RELAY_FAKE_SCENARIO_<NAME>` is set (upper case, `-` as `_`), it emits that
 scenario instead. When `RELAY_FAKE_PROMPTS` is set, it appends each prompt it
-reads to the file that variable names.
+reads to the file that variable names. When `RELAY_FAKE_LAUNCH` is set, it appends
+one JSON line per run to the file that variable names: its `argv` (after the
+program name) and its whole `env`.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -41,6 +44,10 @@ def main() -> int:
     if prompts:
         with Path(prompts).open("a") as log:
             log.write(prompt)
+    launch = os.environ.get("RELAY_FAKE_LAUNCH")
+    if launch:
+        with Path(launch).open("a") as log:
+            log.write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ)}) + "\n")
     scenario = _scenario_path(sys.argv[1:])
     gate = os.environ.get("RELAY_FAKE_GATE")
     if gate:

@@ -1,6 +1,9 @@
 """Adapter behavior from relay-backends-design.md, Modules."""
 
 import json
+import shlex
+import subprocess
+import sys
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -9,13 +12,15 @@ import pytest
 
 from relay.backends import get_backend, replay
 from relay.backends import _snapshot
-from relay.backends.claude import ClaudeBackend
+from relay.backends.base import Launch
+from relay.backends.claude import CHILD_ENV, ClaudeBackend
 from relay.backends.codex import CodexBackend
 from relay.backends.generic import GenericBackend
 from relay.config import Config
 from relay.errors import ConfigError
 from relay.ledger import Spend
 from relay.research import parse_map
+from relay.retire_gate import REFUSAL
 from relay.runner import RunResult, run_failed
 from relay.stream import StreamState
 
@@ -532,3 +537,93 @@ def test_codex_partial_final_measurements_keep_inventory_with_reason(
     assert worker.cost_dollars is None
     assert worker.cost_unavailable
     assert worker.models == ("gpt-6.1-sol",)
+
+
+# relay-run-overhead-design.md, Modules `relay/backends/claude.py`, `relay/backends/codex.py`
+# and `relay/backends/generic.py`: each backend's launch description for its child.
+
+
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_claude_launch_gives_every_role_the_child_env(role: str, tmp_path: Path) -> None:
+    # Breaks when a Claude child of any role launches without
+    # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0, or with other variables beside it.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    launch = ClaudeBackend().launch(role, tmp_path / "retire", run_dir)
+    assert dict(launch.env) == {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
+    assert dict(launch.env) == dict(CHILD_ENV)
+
+
+@pytest.mark.parametrize("backend", [CodexBackend, GenericBackend], ids=["codex", "generic"])
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_codex_and_generic_launch_add_nothing(backend: type, role: str, tmp_path: Path) -> None:
+    # Breaks when a Codex or generic child is given extra argv or env, Claude's included.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    assert backend().launch(role, tmp_path / "retire", run_dir) == Launch()
+
+
+# relay-run-overhead-design.md, Modules `relay/backends/claude.py` and `relay/retire_gate.py`:
+# the retire gate `ClaudeBackend.launch` installs for a lead.
+
+_ROOT = Path(__file__).parent.parent
+_EVENT = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {}})
+
+
+def _agent_hook_commands(settings: Path) -> list[list[str]]:
+    hooks = json.loads(settings.read_text())["hooks"]["PreToolUse"]
+    return [
+        shlex.split(hook["command"])
+        for entry in hooks if entry["matcher"] == "Agent"
+        for hook in entry["hooks"] if hook["type"] == "command"
+    ]
+
+
+def test_claude_lead_launch_installs_the_retire_gate_settings(tmp_path: Path) -> None:
+    # Breaks when a lead launches without its settings file, or the file's Agent hook
+    # does not run relay.retire_gate on this run's retire flag.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    flag = tmp_path / "retire"
+    launch = ClaudeBackend().launch("lead", flag, run_dir)
+    settings = run_dir / "retire-gate.settings.json"
+    assert launch.extra_argv == ("--settings", str(settings))
+    assert dict(launch.env) == dict(CHILD_ENV)
+    assert _agent_hook_commands(settings) == [
+        [sys.executable, "-m", "relay.retire_gate", str(flag)]
+    ]
+
+
+def test_claude_retire_gate_is_for_the_lead_alone(tmp_path: Path) -> None:
+    # Breaks when the lead goes without the retire gate, or a role other than lead
+    # is given it or a settings file.
+    lead_dir, recut_dir = tmp_path / "lead-runs", tmp_path / "recut-runs"
+    lead_dir.mkdir()
+    recut_dir.mkdir()
+    lead = ClaudeBackend().launch("lead", tmp_path / "retire", lead_dir)
+    recut = ClaudeBackend().launch("recut", tmp_path / "retire", recut_dir)
+    assert lead.extra_argv == ("--settings", str(lead_dir / "retire-gate.settings.json"))
+    assert recut.extra_argv == ()
+    assert list(recut_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("raised,code", [(True, 2), (False, 0)], ids=["raised", "absent"])
+def test_installed_retire_gate_command_refuses_only_once_the_flag_is_up(
+    raised: bool, code: int, tmp_path: Path,
+) -> None:
+    # Breaks when the hook command the lead's settings name does not exit 2 with the
+    # refusal once the flag is up, or blocks a dispatch while the flag is down.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    flag = tmp_path / "retire"
+    ClaudeBackend().launch("lead", flag, run_dir)
+    if raised:
+        flag.write_text("")
+    settings = run_dir / "retire-gate.settings.json"
+    assert settings.is_file()
+    command, = _agent_hook_commands(settings)
+    done = subprocess.run(
+        command, cwd=_ROOT, input=_EVENT, capture_output=True, text=True, timeout=30,
+    )
+    assert done.returncode == code
+    assert done.stderr.rstrip("\n") == (REFUSAL if raised else "")

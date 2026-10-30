@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
 from relay.errors import ConfigError
 from relay.stream import StreamState
 
@@ -39,3 +39,6 @@ class GenericBackend:
 
     def resume_hint(self, session_id: str) -> str:
         return ""
+
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+        return Launch()

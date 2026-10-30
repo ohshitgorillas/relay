@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from relay import agents
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
 from relay.backends.codex_session import SessionReader, rollout_boundary
 from relay.config import Config
 from relay.errors import ConfigError
@@ -193,3 +193,6 @@ class CodexBackend:
         return (f"Prior Codex thread: {session_id}. Native history continuation uses "
                 f"`codex exec resume {session_id}`. This fresh thread uses the supplied "
                 "report as its handoff.")
+
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+        return Launch()

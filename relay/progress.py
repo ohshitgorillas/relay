@@ -44,7 +44,8 @@ def _cut(text: str) -> str:
 
 def _spend(result: RunResult) -> str:
     spend = result.stream.spend
-    return f"({spend.tokens} tokens, ${spend.dollars:.2f})"
+    peak = result.stream.peak_context
+    return f"(peak context {peak}, {spend.tokens} tokens summed over turns, ${spend.dollars:.2f})"
 
 
 def started(queue: Path, cfg: Config) -> None:

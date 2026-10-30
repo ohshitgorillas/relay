@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -775,9 +774,8 @@ def test_parse_refresh_checks_caps_on_the_merged_map(fake_cfg: Config, limit: st
     assert parse_refresh(kept, "new", frozenset({"changed.py"}), text, short) is None
 
 
-# Behavior 5: block is one paragraph telling the agent to start from the map, open a named
-# file only at the lines it gives, and, needing more, say what in its report rather than
-# search, since the lead asks the researcher; then `map <sid> at <commit>` and m.body.
+# Behavior 5: block is `map <sid> at <commit>` and m.body, with no instruction lines
+# (docs/superpowers/specs/relay-run-overhead-design.md:75, :132).
 
 
 def test_block_ends_with_the_header_line_and_the_body(fake_cfg: Config) -> None:
@@ -787,28 +785,6 @@ def test_block_ends_with_the_header_line_and_the_body(fake_cfg: Config) -> None:
     body = m.body.rstrip("\n").splitlines()
     assert lines[-len(body) :] == body
     assert lines[-len(body) - 1] == f"map {SID} at {COMMIT}"
-
-
-def test_block_opens_with_one_paragraph_of_usage_rule(fake_cfg: Config) -> None:
-    # Breaks when block carries no usage paragraph, or splits it into more than one.
-    m = _fixture_map(fake_cfg)
-    text = block(m)
-    rule = text[: text.index(f"map {SID} at {COMMIT}")].strip()
-    assert rule
-    assert "\n\n" not in rule
-    assert "MAP" not in rule.splitlines()
-
-
-def test_block_rule_says_start_from_the_map_and_report_rather_than_search(
-    fake_cfg: Config,
-) -> None:
-    # Breaks when the paragraph drops the map, its lines, the report, the no-search rule or the researcher.
-    m = _fixture_map(fake_cfg)
-    text = block(m)
-    rule = text[: text.index(f"map {SID} at {COMMIT}")].lower()
-    # Word stems, so `line`, `reports` or `searching` meet the rule as well as the exact words.
-    for stem in ("map", "line", "report", "search", "researcher"):
-        assert re.search(rf"\b{stem}", rule), stem
 
 
 def test_block_names_the_section_and_commit_of_its_map(fake_cfg: Config) -> None:
@@ -916,3 +892,22 @@ def test_refresh_retains_queue_provenance(fake_cfg: Config) -> None:
     assert merged.queue == kept.queue
     assert merged.sid == kept.sid
     assert merged.commit == "next-commit"
+
+
+# Run overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/research.py`; Order 4): `block()` is the map's header and body, with no instruction
+# lines: f"{_header(m.sid, m.commit)}\n{m.body}\n" and nothing else.
+
+
+def test_block_is_the_header_line_and_the_body_and_nothing_else(fake_cfg: Config) -> None:
+    # Breaks when block puts any instruction line before the header, or anything after the body.
+    m = _fixture_map(fake_cfg)
+    assert block(m) == f"map {SID} at {COMMIT}\n{m.body}\n"
+
+
+def test_block_is_only_header_and_body_for_another_section_and_commit(
+    fake_cfg: Config,
+) -> None:
+    # Breaks when block adds text for some maps, or fixes its header rather than taking the map's.
+    m = _fixture_map(fake_cfg, sid="s7", commit="2" * 40)
+    assert block(m) == f"map s7 at {'2' * 40}\n{m.body}\n"
