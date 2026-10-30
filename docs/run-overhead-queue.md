@@ -128,13 +128,22 @@ section s6 | lead | steps: 6, 7 | size: lead: tokens: 1387990.8 seconds: 738.9 o
     step: 6
     paths: relay/prompts.py
     check: uv run pytest tests/test_prompts.py
-  s6.d3 | test-writer | steps: 7 | writes: tests/test_progress.py | size: test-writer: tokens: 622740.5 seconds: 196.6 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6.d3
+  s6.d3a | test-writer | steps: 7 | writes: tests/test_progress.py | size: test-writer: tokens: 612848.7 seconds: 191.7 overruns: 0 refusals: 0 | from: s6.d3
+    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6.d3a
+    resume a0f83a5b8005f2223
     red
     design: docs/superpowers/specs/relay-run-overhead-design.md step 7
     behavior: the spend figure tells re-read context apart from real size.
     view: stubgen .pyi of relay/progress.py
     behavior: the largest context_tokens seen in the run
+    view: stubgen .pyi of relay/stream.py
+  s6.d3b | test-writer | steps: 7 | writes: tests/test_progress.py | size: test-writer: tokens: 612848.7 seconds: 191.7 overruns: 0 refusals: 0 | from: s6.d3
+    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6.d3b
+    moved
+    lines: docs/superpowers/specs/relay-run-overhead-design.md:116 | before: none (line added in 98a56b5) | after: "**`relay/progress.py`**: the spend figure tells re-read context apart from real size. Replaces `_spend` at `relay/progress.py:45-47`."
+    lines: docs/superpowers/specs/relay-run-overhead-design.md:120 | before: none (line added in 98a56b5) | after: "    """f"(peak context {peak_context}, {spend.tokens} tokens summed over turns, ${dollars:.2f})".""""
+    files: tests/test_progress.py
+    view: stubgen .pyi of relay/progress.py
     view: stubgen .pyi of relay/stream.py
   s6.d4 | builder | steps: 7 | writes: relay/progress.py | size: builder: tokens: 284907.3 seconds: 145.6 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6.d4
