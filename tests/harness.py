@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,6 +15,18 @@ from relay.loop import run
 from relay.state import State
 
 RECORD = "import sys, json; f = open(sys.argv[1], 'a'); f.write(json.dumps(sys.argv[2:]) + chr(10)); f.close()"
+
+
+def checked_queue(path: Path, record: Path, *sids: str) -> Path:
+    """Write sections whose checks record their actual working directory."""
+    script = "import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.open('a').write(str(pathlib.Path.cwd().resolve())+'\\n')"
+    command = shlex.join([sys.executable, "-c", script, str(record)])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(
+        f"section {sid} | lead | steps: 1\n  {sid} work\n  done-check: {command}\n"
+        for sid in sids
+    ))
+    return path
 
 
 def pings(tmp_path: Path) -> list[list[str]]:

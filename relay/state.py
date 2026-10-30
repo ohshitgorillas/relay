@@ -51,6 +51,19 @@ class SectionState:
     guidance: str | None = None  # a reportless architect's final message, for the next lead
     design_failures: int = 0
     design_failure: str | None = None
+    worktree_branch: str | None = None
+    worktree_path: str | None = None
+
+
+def queue_id(queue: Path) -> str:
+    """SHA-256 hex digest of the resolved queue path."""
+    return hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+
+
+def queue_key(queue: Path) -> str:
+    """The existing readable resolved-path suffix and 16-character hash suffix."""
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "-", str(queue.resolve())).strip("-")
+    return f"{readable[-80:]}-{queue_id(queue)[:16]}"
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -69,11 +82,7 @@ class State:
 
     @classmethod
     def open(cls, queue: Path, cfg: Config) -> "State":
-        absolute = queue.resolve()
-        readable = re.sub(r"[^A-Za-z0-9._-]+", "-", str(absolute)).strip("-")
-        digest = hashlib.sha256(str(absolute).encode()).hexdigest()[:16]
-        slug = f"{readable[-80:]}-{digest}"
-        directory = cfg.state_root / slug
+        directory = cfg.state_root / queue_key(queue)
         directory.mkdir(parents=True, exist_ok=True)
         return cls(directory)
 
@@ -119,6 +128,16 @@ class State:
     def section(self, sid: str) -> SectionState:
         data = self._load()["sections"].get(sid)
         return SectionState(**data) if data else _fresh()
+
+    def bind_worktree(self, sid: str, branch: str, path: Path) -> None:
+        """Atomically persist the validated branch and absolute worktree path together."""
+        absolute = str(path.resolve())
+
+        def change(s: SectionState, _r: dict) -> None:
+            s.worktree_branch = branch
+            s.worktree_path = absolute
+
+        self._update(sid, change)
 
     def mark_done(self, sid: str) -> None:
         def change(s: SectionState, _r: dict) -> None:

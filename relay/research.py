@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from relay.config import Config
-from relay.state import write_atomic
+from relay.state import queue_id, write_atomic
 
 MAP_OPEN = "MAP"
 LINKS = "LINKS"
@@ -30,6 +30,17 @@ class Map:
     files: tuple[str, ...]  # every path an entry or link names, sorted, no repeats
     body: str  # the lines from MAP to END MAP, both included
     digests: tuple[str, ...] = ()  # one per files entry; () means none recorded
+    queue: str | None = None
+
+
+def owned(m: Map, queue: Path) -> bool:
+    """Whether this map carries the queue's identity."""
+    return m.queue == queue_id(queue)
+
+
+def attribute(m: Map, queue: Path) -> Map:
+    """Return this map with the queue's identity, retaining its content and digests."""
+    return replace(m, queue=queue_id(queue))
 
 
 def digest(cwd: Path, path: str) -> str:
@@ -80,7 +91,10 @@ def split(m: Map, changed: frozenset[str]) -> Map | None:
         line for line in links if not changed.intersection(_LINK.fullmatch(line).groups())
     ]
     kept = _build(m.sid, m.commit, _lines(entries, links))
-    if kept is None or not m.digests:
+    if kept is None:
+        return kept
+    kept = replace(kept, queue=m.queue)
+    if not m.digests:
         return kept
     values = dict(zip(m.files, m.digests))
     return replace(kept, digests=tuple(values.get(path, UNKNOWN) for path in kept.files))
@@ -101,7 +115,8 @@ def parse_refresh(
     if any(_ENTRY.fullmatch(line)[1] in kept_paths for line in fresh_entries):
         return None
     body = "\n".join(_lines(entries + fresh_entries, links + fresh_links))
-    return parse_map(kept.sid, commit, body, cfg)
+    merged = parse_map(kept.sid, commit, body, cfg)
+    return None if merged is None else replace(merged, queue=kept.queue)
 
 
 def _last_block(text: str | None, opener: str, closer: str) -> list[str] | None:
@@ -179,7 +194,8 @@ def save(m: Map, path: Path) -> None:
         f"file {value} {name}\n"
         for name, value in zip(m.files, m.digests, strict=bool(m.digests))
     )
-    write_atomic(path, f"{_header(m.sid, m.commit)}\n{records}{m.body}\n")
+    provenance = f"queue {m.queue}\n" if m.queue is not None else ""
+    write_atomic(path, f"{_header(m.sid, m.commit)}\n{provenance}{records}{m.body}\n")
 
 
 def load(path: Path, sid: str) -> Map | None:
@@ -195,15 +211,25 @@ def load(path: Path, sid: str) -> Map | None:
         return None
     records: dict[str, str] = {}
     body_lines = rest.splitlines()
-    while body_lines and body_lines[0].startswith("file"):
+    queue = None
+    while body_lines and body_lines[0].startswith(("file", "queue")):
         record = body_lines.pop(0)
+        if record.startswith("queue"):
+            match = re.fullmatch(r"queue ([0-9a-f]{64})", record)
+            if match is None or queue is not None or records:
+                return None
+            queue = match[1]
+            continue
         match = re.fullmatch(r"file (-|[0-9a-f]{64}) ([^\s:|>]+)", record)
         if match is None or match[2] in records:
             return None
         records[match[2]] = match[1]
     lines = _last_block("\n".join(body_lines), MAP_OPEN, MAP_CLOSE)
     m = None if lines is None else _build(sid, commit, lines)
-    if m is None or not records:
+    if m is None:
+        return m
+    m = replace(m, queue=queue)
+    if not records:
         return m
     if records.keys() != set(m.files):
         return None

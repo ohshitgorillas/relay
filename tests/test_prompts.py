@@ -7,6 +7,9 @@ import inspect
 import re
 from pathlib import Path
 
+import pytest
+
+from relay import git
 from relay.check import CheckResult
 from relay.config import Config
 from relay.ladder import handback_text
@@ -997,3 +1000,90 @@ def test_lead_prompt_map_rule_excludes_architect_briefs() -> None:
     assert "the architect's included" not in prompt
     assert "except an architect's" in prompt
     assert "except an architect's" not in _with_map(None)
+
+
+# Queue-worktree design, Modules `relay/prompts.py`: Relay renders an assignment
+# chosen by the ownership resolver, including an existing legacy assignment.
+
+
+@pytest.mark.parametrize(
+    ("branch", "path", "resume"),
+    [
+        ("lead/" + "7" * 64 + "/s4", Path("/work/repo-wt/assigned/s4"), None),
+        ("custom/retained-work", Path("/work/old location/section-four"), "prior-lead"),
+    ],
+    ids=["new-qualified", "resumed-legacy"],
+)
+def test_lead_prompt_assigns_the_supplied_branch_and_exact_absolute_path(
+    branch: str, path: Path, resume: str | None,
+) -> None:
+    # Breaks when: rendering ignores the selected binding or rewrites a legacy name/location.
+    prompt = lead_prompt(
+        QUEUE, _section(), resume=resume, report=None, answer=None,
+        retire_flag=RETIRE_FLAG, worktree=git.SectionWorktree(branch, path),
+    )
+    assert branch in prompt
+    assert str(path) in prompt
+    assert re.search(r"\buse\b[^\n]*" + re.escape(branch), prompt, re.IGNORECASE)
+    assert re.search(r"\buse\b[^\n]*" + re.escape(str(path)), prompt, re.IGNORECASE)
+
+
+def test_lead_prompt_instructs_creation_when_absent_and_final_branch_report() -> None:
+    # Breaks when: a fresh lead is not told to create the assigned worktree or report its binding.
+    binding = git.SectionWorktree("custom/selected", Path("/work/exact-assignment"))
+    prompt = lead_prompt(
+        QUEUE, _section(), resume=None, report=None, answer=None,
+        retire_flag=RETIRE_FLAG, worktree=binding,
+    )
+    creation = r"\bcreat\w*\b"
+    absence = r"\b(?:absent|missing|not exist|doesn't exist)\b"
+    assert re.search(
+        rf"(?:{creation}[^.\n]*{absence}|{absence}[^.\n]*{creation})",
+        prompt, re.IGNORECASE,
+    )
+    assert f"BRANCH {binding.branch} {binding.path}" in prompt
+    assert re.search(r"\bfinal\s+report\b", prompt, re.IGNORECASE)
+
+
+def test_lead_prompt_assignment_takes_precedence_over_section_and_recalled_session() -> None:
+    # Breaks when: an explicit assignment lacks priority over older generic or recalled naming.
+    body = "Use generic branch lead/s4 at /work/generic-worktree.\n"
+    report = "BRANCH lead/old-name /work/recalled-worktree\nRETIRED"
+    binding = git.SectionWorktree("custom/current-assignment", Path("/work/current-assignment"))
+    prompt = lead_prompt(
+        QUEUE, _section(body=body), resume="old-session", report=report, answer=None,
+        retire_flag=RETIRE_FLAG, worktree=binding,
+    )
+    assert body in prompt
+    assert report in prompt
+    assert f"BRANCH {binding.branch} {binding.path}" in prompt
+    priority = re.search(
+        r"\b(?:this\s+)?(?:worktree\s+)?assignment\s+"
+        r"(?:takes\s+(?:precedence|priority)\s+over|has\s+priority\s+over|overrides?)\s+"
+        r"([^\n.]+)",
+        prompt, re.IGNORECASE,
+    )
+    assert priority is not None
+    assert re.search(r"\bsection\b", priority.group(1), re.IGNORECASE)
+    assert re.search(r"\b(recalled|prior|previous)\s+session\b", priority.group(1), re.IGNORECASE)
+
+
+def test_lead_prompt_renders_the_assignment_without_selecting_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the renderer selects branch/path names rather than rendering Relay's assignment.
+    calls: list[str] = []
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        calls.append("selection")
+        raise AssertionError("prompt rendering must not select a worktree")
+
+    monkeypatch.setattr(git, "section_branch", forbidden)
+    monkeypatch.setattr(git, "section_path", forbidden)
+    binding = git.SectionWorktree("custom/render-only", Path("/work/render-only"))
+    prompt = lead_prompt(
+        QUEUE, _section(), resume=None, report=None, answer=None,
+        retire_flag=RETIRE_FLAG, worktree=binding,
+    )
+    assert calls == []
+    assert f"BRANCH {binding.branch} {binding.path}" in prompt

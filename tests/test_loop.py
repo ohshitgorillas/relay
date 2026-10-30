@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import inspect
 import json
 import os
@@ -25,10 +26,12 @@ from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
-from relay.loop import run
+from relay.loop import ask, run
 from relay.queue import parse_queue
-from relay.research import Map, block, changed, digest, load, parse_map, save, stamp
+from relay.research import Map, attribute, block, changed, digest, load, owned, parse_map, save, stamp
 from relay.state import State
+from relay.git import section_branch
+from harness import checked_queue
 from harness import RECORD as _RECORD
 from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
 
@@ -43,6 +46,193 @@ M2 = "m2-rest-queue.md"
 DONE_LEAD = "stream-lead.jsonl"
 NO_STATUS_LEAD = "stream-error.jsonl"
 
+
+
+@pytest.mark.parametrize("ownership", [
+    "qualified", "reported-legacy", "reported-custom", "bound-custom",
+    "bound-before-report", "invalid-binding", "stale-report", "foreign-report",
+    "other-section-report", "previous-session", "bare-legacy",
+])
+def test_pending_checks_resolve_only_this_queue_sections_ownership(
+    ownership: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: pending checks trust a bare sid, foreign evidence, or a report over a binding.
+    record = tmp_path / "ownership-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1", "s2")
+    state = State.open(queue, cfg)
+    state.mark_done("s2")
+    state.set_check_pending("s1", True)
+    expected = git_repo.root.resolve()
+    branch = None
+    if ownership not in {"other-section-report", "previous-session", "bare-legacy"}:
+        expected = git_repo.worktree("s1", queue=queue)
+        branch = section_branch(queue, "s1")
+    legacy = git_repo.worktrees["s1"]
+    if ownership == "reported-legacy":
+        expected, branch = legacy, "lead/s1"
+        state.set_last_report("s1", f"BRANCH {branch} {expected}\nEND LEAD")
+    elif ownership in {"reported-custom", "bound-custom", "bound-before-report"}:
+        expected = git_repo.worktree("custom", branch="fix/owned-section")
+        branch = "fix/owned-section"
+        if ownership == "reported-custom":
+            state.set_last_report("s1", f"BRANCH {branch} {expected}\nEND LEAD")
+        else:
+            state.bind_worktree("s1", branch, expected)
+            state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD" if ownership == "bound-before-report" else None)
+    elif ownership == "invalid-binding":
+        state.bind_worktree("s1", "lead/s1", tmp_path / "missing")
+        state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD")
+    elif ownership == "stale-report":
+        state.set_last_report("s1", f"BRANCH lead/s1 {tmp_path / 'missing'}\nEND LEAD")
+    elif ownership == "foreign-report":
+        other = checked_queue(git_repo.root / "other.md", tmp_path / "other-checks", "s1")
+        foreign = git_repo.worktree("s1", queue=other)
+        state.set_last_report("s1", f"BRANCH {section_branch(other, 's1')} {foreign}\nEND LEAD")
+    elif ownership == "other-section-report":
+        state.set_last_report("s2", f"BRANCH lead/s1 {legacy}\nEND LEAD")
+    elif ownership == "previous-session":
+        state.set_last_session("s2", "other-sections-session")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected)]
+    saved = State.open(queue, cfg).section("s1")
+    assert saved.worktree_branch == branch
+    assert saved.worktree_path == (str(expected) if branch else None)
+
+
+@pytest.mark.parametrize("reported", [True, False], ids=["first-legacy-report", "qualified-no-branch"])
+def test_a_leads_new_worktree_is_bound_before_its_immediate_check(
+    reported: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: resolution waits until after DONE handling or requires every report to name BRANCH.
+    record = tmp_path / "immediate-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1")
+    scenario(_lines(DONE_LEAD))
+    branch = "fix/fresh-legacy" if reported else section_branch(queue, "s1")
+    expected = git_repo.root.parent / "created-by-lead"
+    create = [*_GIT, "worktree", "add", "-q", "-b", branch, str(expected)]
+    report = f"BRANCH {branch} {expected}\nEND LEAD\nDONE" if reported else "DONE"
+    stream = _status_lead(tmp_path, "fresh-worktree", report)
+    cfg = _sequenced(cfg, tmp_path, [_step(str(stream), then=create)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected.resolve())]
+    saved = State.open(queue, cfg).section("s1")
+    assert (saved.worktree_branch, saved.worktree_path) == (branch, str(expected.resolve()))
+
+
+def test_a_report_without_branch_keeps_the_bound_custom_worktree_on_restart(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: a later report erases the binding or a restarted pending check reconstructs lead/s1.
+    record = tmp_path / "restart-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1")
+    expected = git_repo.worktree("custom", branch="fix/persisted-owner")
+    state = State.open(queue, cfg)
+    state.bind_worktree("s1", "fix/persisted-owner", expected)
+    state.set_last_report("s1", "STOPPED\nEND LEAD")
+    state.set_check_pending("s1", True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected)]
+    assert State.open(queue, cfg).section("s1").worktree_branch == "fix/persisted-owner"
+
+
+def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: research or a follow-up resolves by queue basename or bare section id.
+    record = tmp_path / "queue-checks.txt"
+    queues = [checked_queue(git_repo.root / name / "queue.md", record, "s1") for name in ("one", "two")]
+    trees = [git_repo.worktree("s1", queue=queue) for queue in queues]
+    for tree in trees:
+        _mapped_worktree(git_repo, tree)
+    commits = [git_repo.commit(cwd=tree, message=queue.parent.name) for queue, tree in zip(queues, trees)]
+    assert len(set(commits)) == 2
+    records = []
+    for queue, tree in zip(queues, trees):
+        plans = tmp_path / queue.parent.name
+        edit = plans / "edited-git.py"
+        edit.parent.mkdir(parents=True, exist_ok=True)
+        edit.write_text("# edited in this queue's worktree\n")
+        current = _researched(cfg, plans, [
+            _step(RETIRED_LEAD, write=(edit, tree / "relay/git.py")), _stop_lead(queue, cfg),
+        ])
+        current = dataclasses.replace(current, research_command=_plan(
+            plans, cfg.lead_command[0], "research",
+            [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")], False,
+        ))
+        assert run(queue, current) == ExitCode.STOP_FILE
+        current = dataclasses.replace(current, research_command=_plan(
+            plans, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
+        ))
+        ask(queue, current, "s1", "Which files describe this section?")
+        records.append(_research_runs(plans))
+    assert [[Path(str(item["cwd"])).resolve() for item in runs] for runs in records] == [[tree] * 3 for tree in trees]
+    for queue, tree, commit in zip(queues, trees, commits):
+        state = State.open(queue, cfg)
+        assert state.section("s1").worktree_path == str(tree)
+        saved = load(state.map_path("s1"), "s1")
+        assert saved is not None
+        assert owned(saved, queue)
+        assert saved.commit == commit
+        entries = [entry for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"]
+        assert [entry["map"] for entry in entries] == [commit, commit]
+        state.stop_file.unlink()
+        state.set_check_pending("s1", True)
+        assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(tree) for tree in trees]
+
+
+def test_architect_evidence_rejects_a_report_path_from_another_repository(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the architect trusts the report's arbitrary path instead of the owned branch and HEAD.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    repo = GitRepo(tmp_path)
+    repo.commit(message="queue repository")
+    tree = repo.worktree("s1", queue=queue)
+    commit = repo.commit(cwd=tree, message="owned evidence")
+    foreign = git_repo.worktrees["s1"]
+    scenario(_lines(DONE_LEAD))
+    status = f"BRANCH lead/s1 {foreign}\nEND LEAD\nDESIGN: {PROBLEM}"
+    cfg = _sequenced(cfg, tmp_path, [
+        _step(str(_status_lead(tmp_path, "foreign-report", status))), _step(NO_STATUS_LEAD),
+    ])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_REJECTED)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    brief = str(_runs(tmp_path, "design")[0]["prompt"])
+    assert f"branch {section_branch(queue, 's1')} at {commit} in this repository" in brief
+    assert str(foreign) not in brief
+    assert State.open(queue, cfg).section("s1").worktree_path == str(tree)
+
+
+@pytest.mark.parametrize("recut", [False, True], ids=["direct", "recursive-recut"])
+def test_another_queues_dirty_legacy_blocker_does_not_hold_this_queue(
+    recut: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path], stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: blocker cleanliness adopts a bare legacy branch belonging to another queue.
+    queue = _repo_queue(git_repo)
+    foreign = git_repo.worktree("s2a" if recut else "s2")
+    (foreign / "uncommitted.txt").write_text("another queue's work\n")
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "waiting-on-owned-blocker", "s2")]
+    recuts = None
+    if recut:
+        siblings = tmp_path / "siblings.md"
+        siblings.write_text(
+            "section s1 | lead | steps: 1\n  s1 work\n"
+            "section s2a | lead | steps: 1 | from: s2\n  s2a work\n"
+            "section s2b | lead | steps: 1 | from: s2\n  s2b work\n"
+        )
+        leads += [_step(RECUT_LEAD), _step(DONE_LEAD)]
+        recuts = [_step(DIVVYER_RUN, write=(siblings, queue))]
+    leads += [_step(DONE_LEAD), _step(DONE_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert State.open(queue, cfg).section("s1").status == "done"
+    assert len(_runs(tmp_path, "lead")) == len(leads)
 
 
 def _lines(name: str) -> list[str]:
@@ -3767,6 +3957,9 @@ def _research_queue(repo: GitRepo) -> Path:
     """The check fixture queue (sections s1 and s2) in the repository's main checkout."""
     queue = repo.root / CHECK_QUEUE
     queue.write_bytes((FIXTURES / CHECK_QUEUE).read_bytes())
+    if "lead/s1" in repo.git("branch", "--list", "lead/s1"):
+        assert repo.cfg is not None
+        State.open(queue, repo.cfg).bind_worktree("s1", "lead/s1", repo.worktrees["s1"])
     return queue
 
 
@@ -3788,6 +3981,153 @@ def _run_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
     path = State.open(queue, cfg).stop_file.parent / "ledger.jsonl"
     entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     return [e for e in entries if e.get("kind") != "check"]
+
+
+@pytest.mark.parametrize("provenance", ["old", "foreign"])
+def test_matching_bytes_do_not_reuse_an_unowned_map_or_researcher(
+    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: matching digests let an old or foreign map bypass a full remap.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    if provenance == "foreign":
+        mapped = attribute(mapped, git_repo.root / "other-queue.md")
+    save(mapped, state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    seen = tmp_path / "replacement.map"
+    cfg = _researched(cfg, tmp_path, [
+        _step(RETIRED_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD),
+    ])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    records = _research_runs(tmp_path)
+    assert len(records) == 1
+    assert Path(str(records[0]["cwd"])).resolve() == git_repo.worktrees["s1"]
+    assert "unverified-researcher" not in json.dumps(records[0])
+    assert block(mapped) not in str(records[0]["prompt"])
+    replacement = load(seen, "s1")
+    assert replacement is not None
+    assert owned(replacement, queue)
+    assert replacement.commit == commit
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+
+
+def test_new_map_ownership_and_commit_are_saved_before_a_moving_research_head(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: new maps lack provenance or research/byte-identical reuse relabels their commit.
+    queue = _research_queue(git_repo)
+    tree = git_repo.worktrees["s1"]
+    commit = _mapped_worktree(git_repo)
+    state = State.open(queue, cfg)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    seen = tmp_path / "attributed.map"
+    cfg = _researched(cfg, tmp_path, [
+        _step(RETIRED_LEAD), _step(DONE_LEAD, write=(state.map_path("s1"), seen)),
+    ])
+    move_head = [*_GIT, "commit", "--allow-empty", "-q", "-m", "research moved HEAD"]
+    cfg = dataclasses.replace(cfg, research_command=_plan(
+        tmp_path, cfg.lead_command[0], "research", [_step(RESEARCH_RUN, then=move_head)], False,
+    ))
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert git_repo.git("rev-parse", "HEAD", cwd=tree).strip() != commit
+    assert len(_research_runs(tmp_path)) == 1
+    mapped = load(seen, "s1")
+    assert mapped is not None
+    assert owned(mapped, queue)
+    assert mapped.commit == commit
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+
+
+@pytest.mark.parametrize("provenance", ["old", "foreign"])
+def test_ask_drops_an_unowned_map_and_session_before_followup(
+    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: ask resumes a researcher attached to an unverified map.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    if provenance == "foreign":
+        mapped = attribute(mapped, git_repo.root / "other-queue.md")
+    save(mapped, state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    cfg = dataclasses.replace(cfg, research_command=_plan(
+        tmp_path, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
+    ))
+    with pytest.raises(relay.loop.ResearchError, match="(?i)refresh"):
+        ask(queue, cfg, "s1", "Which files describe this section?")
+    assert not state.map_path("s1").exists()
+    assert State.open(queue, cfg).section("s1").research_session is None
+    assert _research_runs(tmp_path) == []
+
+
+@pytest.mark.parametrize("operation", ["research", "ask"])
+@pytest.mark.parametrize("additional_read", [False, True])
+def test_unowned_map_storage_is_loaded_and_invalidated_under_the_research_lock(
+    operation: str, additional_read: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: map loading or invalidation escapes the existing research lock.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    save(stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()), state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    events: list[str] = []
+    original_load = load
+    original_drop = State.drop_map
+    original_save = save
+
+    def check_lock() -> None:
+        with (state.stop_file.parent / "research-s1.lock").open("a") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def observed_load(path: Path, sid: str) -> Map | None:
+        check_lock()
+        events.append("load")
+        if additional_read:
+            original_load(path, sid)
+            check_lock()
+            events.append("load")
+        return original_load(path, sid)
+
+    def observed_drop(current: State, sid: str) -> None:
+        check_lock()
+        events.append("drop")
+        original_drop(current, sid)
+
+    def observed_save(mapped: Map, path: Path) -> None:
+        check_lock()
+        assert owned(mapped, queue)
+        assert State.open(queue, cfg).section("s1").research_session != "unverified-researcher"
+        events.append("save")
+        original_save(mapped, path)
+
+    monkeypatch.setattr("relay.research.load", observed_load)
+    monkeypatch.setattr("relay.research.save", observed_save)
+    monkeypatch.setattr(State, "drop_map", observed_drop)
+    cfg = _researched(cfg, tmp_path, [_stop_lead(queue, cfg)])
+    if operation == "ask":
+        with pytest.raises(relay.loop.ResearchError, match="(?i)refresh"):
+            ask(queue, cfg, "s1", "Which files describe this section?")
+        assert "save" not in events
+    else:
+        assert run(queue, cfg) == ExitCode.STOP_FILE
+        assert "save" in events
+    assert events[0] == "load"
+    assert "drop" in events
+    assert all(
+        events.index("drop") < index
+        for index, event in enumerate(events)
+        if event == "save"
+    )
 
 
 # Research behavior 1: research before a lead, its map in the lead prompt, the lead's ledger
@@ -3957,7 +4297,7 @@ def test_a_map_drawn_in_main_is_reused_in_a_new_lead_worktree_with_matching_byte
     queue = _research_queue(git_repo)
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
-    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", "lead/s1", str(wt)]
+    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", section_branch(queue, "s1"), str(wt)]
     seen = tmp_path / "main-map-seen.map"
     state = State.open(queue, cfg)
     cfg = _researched(
@@ -3996,7 +4336,7 @@ def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_n
         os.utime(wt / path, ns=(checked_at - 100, checked_at - 100))
     mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
     assert mapped is not None
-    save(stamp(mapped, wt, checked_at), state.map_path("s1"))
+    save(attribute(stamp(mapped, wt, checked_at), queue), state.map_path("s1"))
     (wt / "relay/git.py").write_text("# changed before freshness checking\n")
     os.utime(wt / "relay/git.py", ns=(checked_at - 50, checked_at - 50))
     clock = [checked_at]
@@ -4008,6 +4348,7 @@ def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_n
         result = changed(mapped, cwd)
         if not edited:
             retained = cwd / "relay/research.py"
+            retained.parent.mkdir(parents=True, exist_ok=True)
             retained.write_text("# changed after freshness checking\n")
             os.utime(retained, ns=(checked_at + 1, checked_at + 1))
             clock[0] = checked_at + 2
@@ -4054,7 +4395,7 @@ def test_an_unsuccessful_refresh_keeps_the_saved_map_and_rechecks_it_on_the_next
     state = State.open(queue, cfg)
     mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
     assert mapped is not None
-    original = stamp(mapped, wt, time.time_ns())
+    original = attribute(stamp(mapped, wt, time.time_ns()), queue)
     save(original, state.map_path("s1"))
     (wt / "relay/git.py").write_text("# edited after the saved map\n")
     snapshots: list[Map | None] = []
@@ -4608,13 +4949,11 @@ def test_rung_3_a_rejected_or_unapproved_design_report_hands_the_section_back_to
 
 
 def _lead_tree(tmp_path: Path) -> tuple[Path, str]:
-    """A git repository standing in for the lead's worktree, one commit in; (tree, head commit)."""
-    tree = tmp_path / "lead-tree"
-    tree.mkdir()
-    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "step 21"]):
-        subprocess.run([*_GIT, *args], cwd=tree, check=True, capture_output=True)
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True).stdout.strip()
-    return tree, commit
+    """A registered custom-branch worktree of the queue repository and its HEAD."""
+    repo = GitRepo(tmp_path)
+    repo.commit(message="queue repository")
+    tree = repo.worktree("lead-tree", branch="lead/m2-images")
+    return tree, repo.rev("lead/m2-images")
 
 
 REPORTLESS = "Blocked: the cited Relay log is outside the repository.\n\nEND DESIGN"
@@ -5563,7 +5902,7 @@ def test_a_waiting_section_wakes_once_its_blocker_is_done_with_a_clean_worktree_
     # Breaks when: a blocker done in state with a clean `lead/<sid>` worktree does not wake its
     # waiter, the wake pings the owner, or no "woken" line is written.
     queue = _repo_queue(git_repo)
-    git_repo.worktree("s2")
+    git_repo.worktree("s2", queue=queue)
     scenario(_lines(DONE_LEAD))
     leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads)
@@ -5590,7 +5929,7 @@ def test_a_waiting_section_stays_held_while_its_done_blockers_worktree_is_dirty_
     # Breaks when: `_landed` takes a done blocker as landed though `git.clean` on its section
     # worktree is False, or never tests it again, so the waiter wakes early or never.
     queue = _repo_queue(git_repo)
-    stray = git_repo.worktree("s2") / "stray.txt"
+    stray = git_repo.worktree("s2", queue=queue) / "stray.txt"
     stray.write_text("uncommitted\n")
     scenario(_lines(DONE_LEAD))
     leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
