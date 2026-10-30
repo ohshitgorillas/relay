@@ -1,7 +1,8 @@
 design docs/superpowers/specs/relay-research-reuse-design.md | order docs/superpowers/specs/relay-research-reuse-design.md | main db259df
-section s1 | lead | steps: 1, 2, 3 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+section s1 | lead | steps: 1, 2, 3 | size: calibration: one dependent map-core piece; stub, red and build together; fresh lead after context retirement
   s1.d1 | builder | steps: 1 | writes: relay/research.py, relay/prompts.py, relay/progress.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/research-reuse-queue.md s1.d1
+    resume 01a18a60-28f5-7810-96af-d4ff27deffbf
     stub
     design: docs/superpowers/specs/relay-research-reuse-design.md
     step: 1
