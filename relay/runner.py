@@ -13,7 +13,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -294,6 +294,7 @@ def run_agent(
     if cfg is not None:
         argv = backend.argv(role, cfg, cwd, output)
     launch = backend.launch(role, retire_flag, run_dir)
+    launch = replace(launch, env={**launch.env, "RELAY_RUN": "1"})
     argv = [*argv, *launch.extra_argv]
     atomic_write(
         log_path.with_suffix(".backend.json"),

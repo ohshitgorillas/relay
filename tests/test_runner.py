@@ -192,6 +192,31 @@ def test_run_agent_gives_the_child_stdin_text_and_runs_it_in_cwd(
     assert result.log.read_text().splitlines() == LINES
 
 
+@pytest.mark.parametrize("parent_marker", [None, "0"])
+def test_run_agent_marks_child_and_inherits_environment(
+    tmp_path: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    parent_marker: str | None,
+) -> None:
+    # Breaks when agent launches omit the marker or replace the inherited environment.
+    if parent_marker is None:
+        monkeypatch.delenv("RELAY_RUN", raising=False)
+    else:
+        monkeypatch.setenv("RELAY_RUN", parent_marker)
+    monkeypatch.setenv("RELAY_TEST_INHERITED", "ordinary-value")
+    argv = [
+        sys.executable, "-c",
+        "import json, os; print(json.dumps({"
+        "'marker': os.environ.get('RELAY_RUN'), "
+        "'inherited': os.environ.get('RELAY_TEST_INHERITED')}))",
+    ]
+    result = run_agent(argv, "", tmp_path, run_dir, _go, tmp_path / "retire")
+    assert result.exit_code == 0
+    assert json.loads(result.log.read_text()) == {
+        "marker": "1", "inherited": "ordinary-value",
+    }
+    assert os.environ.get("RELAY_RUN") == parent_marker
+
+
 def test_run_agent_reports_the_exit_code_of_a_child_that_ends_on_its_own(
     fake: list[str], tmp_path: Path, run_dir: Path
 ) -> None:

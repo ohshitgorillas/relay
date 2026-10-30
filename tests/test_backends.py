@@ -315,6 +315,7 @@ def test_generic_uses_explicit_role_commands(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     assert backend.argv("lead", cfg, tmp_path, tmp_path / "out") == cfg.lead_command
     assert backend.argv("recut", cfg, tmp_path, tmp_path / "out") == cfg.recut_command
+    assert ClaudeBackend().argv("lead", cfg, tmp_path, tmp_path / "out") == cfg.lead_command
 
 
 def test_generic_has_no_telemetry() -> None:

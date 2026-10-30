@@ -10,6 +10,7 @@ from pathlib import Path
 from relay import agents
 from relay.backends.base import Capabilities, Launch
 from relay.backends.codex_session import SessionReader, rollout_boundary
+from relay.codex_launch import adapter_args
 from relay.config import Config
 from relay.errors import ConfigError
 from relay.ledger import Spend
@@ -44,7 +45,7 @@ class CodexBackend:
         # The instructions open the prompt rather than ride `-c developer_instructions`:
         # a spawned built-in agent such as `worker` inherits every session override,
         # so it would take this role's instructions as its own.
-        overrides = []
+        overrides = adapter_args(self.home)
         for key in ("model", "model_reasoning_effort"):
             if key in data:
                 if not isinstance(data[key], str) or not data[key].strip():
