@@ -53,6 +53,10 @@ def started(queue: Path, cfg: Config) -> None:
     _write(f"relay go {queue.name}: started; {tokens}, {dollars}")
 
 
+def draining() -> None:
+    _write("drain requested: finishing the running agent, starting nothing new")
+
+
 def lead_started(sid: str, resume: str | None, answered: bool) -> None:
     how = f"resuming {resume}" if resume else "fresh"
     tail = ", with the owner's answer" if answered else ""

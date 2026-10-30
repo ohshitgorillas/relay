@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -41,9 +42,20 @@ def main() -> int:
         with Path(prompts).open("a") as log:
             log.write(prompt)
     scenario = _scenario_path(sys.argv[1:])
+    gate = os.environ.get("RELAY_FAKE_GATE")
+    if gate:
+        gate_path = Path(gate)
+        (gate_path / "ready").write_text(str(os.getpid()))
+        end = time.monotonic() + 15.0
+        while not (gate_path / "release").exists():
+            if time.monotonic() >= end:
+                raise TimeoutError("fake child was not released")
+            time.sleep(0.02)
     for line in scenario.read_text().splitlines():
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
+    if gate:
+        (Path(gate) / "finished").touch()
     return 0
 
 

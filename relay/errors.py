@@ -28,4 +28,5 @@ class ExitCode:
     BUDGET = 3
     STOP_FILE = 4
     FAILED_TWICE = 5
+    DRAINED = 6
     INTERRUPTED = 130
