@@ -103,7 +103,7 @@ def handoff(result: RunResult, status: LeadStatus | None) -> str | None:
     """With a status: "The previous lead's final report (that session's last reply, so you need
     not recall it):\n<result_text>", or None when result_text is empty. With no status:
     "The previous lead stopped without a final report (<error_line(result)>). Its last reply:
-    <result_text or 'none'>. Its agents, as Relay saw them: <one line per agents.Agent:
+    <result_text or 'none'>\nIts agents, as Relay saw them: <one line per agents.Agent:
     name, description, status or 'running when it stopped'>.\""""
 
 def lead_prompt(..., report: str | None, ...) -> str:

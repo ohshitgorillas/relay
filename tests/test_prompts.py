@@ -773,8 +773,8 @@ def test_recut_brief_with_a_design_keeps_everything_else() -> None:
     assert brief.count(AMENDED) == 1
     assert brief.replace(AMENDED, " ").split() == plain.split()
 # Order 17, behavior 4: "resume <session id>" when resume is set; when report is set, next to
-# that line, the report verbatim under a heading naming it the previous lead's final report,
-# saying it is that session's last reply so the new lead need not recall it;
+# that line, the report verbatim. relay-run-overhead-design.md:110 moves the heading out: report
+# is handoff()'s text and is printed as given, with no heading added.
 # The signature check keeps a missing `report` parameter an assertion failure, not a TypeError.
 
 REPORT = (
@@ -799,21 +799,6 @@ def test_lead_prompt_holds_the_report_verbatim_when_set() -> None:
     assert "resume sess-lead-7" in prompt
 
 
-def test_lead_prompt_puts_the_report_under_a_heading_naming_it_the_previous_leads_final_report() -> None:
-    # Breaks when: the report is pasted with no heading, or the heading follows the report.
-    prompt = _with_report(REPORT)
-    heading = prompt.lower().find(HEADING)
-    assert heading != -1
-    assert heading < prompt.index(REPORT)
-
-
-def test_lead_prompt_says_the_report_is_that_sessions_last_reply() -> None:
-    # Breaks when: the prompt does not tell the new lead the report is the resumed session's last reply.
-    prompt = _with_report(REPORT)
-    before_report = prompt[: prompt.index(REPORT)].lower()
-    assert "last reply" in before_report
-
-
 def test_lead_prompt_puts_the_report_next_to_the_resume_line() -> None:
     # Breaks when: the report lands apart from the resume line, with the body, the answer or the
     # retire contract between them.
@@ -831,6 +816,43 @@ def test_lead_prompt_without_a_report_holds_no_report_heading() -> None:
     prompt = _with_report(None)
     assert "resume sess-lead-7" in prompt
     assert HEADING not in prompt.lower()
+
+
+# relay-run-overhead-design.md, Modules `relay/prompts.py` (`lead_prompt`) and Order 5: report is
+# handoff()'s text and is printed as given, with no heading added. The two texts below take
+# handoff()'s documented forms, with a status and with none.
+HANDOFF_WITH_STATUS = (
+    "The previous lead's final report (that session's last reply, so you need not recall it):\n" + REPORT
+)
+HANDOFF_STOPPED = (
+    "The previous lead stopped without a final report (killed). Its last reply: none. "
+    "Its agents, as Relay saw them:\n"
+    "builder, Build s2.d1 stub, running when it stopped"
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+@pytest.mark.parametrize("report", [HANDOFF_WITH_STATUS, HANDOFF_STOPPED], ids=["status", "stopped"])
+def test_lead_prompt_prints_the_report_as_given_and_adds_nothing_around_it(report: str) -> None:
+    # Breaks when: lead_prompt adds a heading or any text with the report, or alters the report.
+    prompt = _with_report(report)
+    assert report in prompt
+    assert _flat(prompt.replace(report, "", 1)) == _flat(_with_report(None))
+
+
+def test_lead_prompt_with_a_stopped_leads_handoff_holds_no_final_report_heading() -> None:
+    # Breaks when: lead_prompt heads a no-status handoff as "the previous lead's final report".
+    prompt = _with_report(HANDOFF_STOPPED)
+    assert HEADING not in prompt.lower()
+
+
+def test_lead_prompt_with_a_status_handoff_holds_its_heading_once() -> None:
+    # Breaks when: lead_prompt adds its own heading above handoff's, so the heading appears twice.
+    prompt = _with_report(HANDOFF_WITH_STATUS)
+    assert prompt.lower().count(HEADING) == 1
 
 
 def test_prerendered_handoff_replaces_default_resume_text_and_keeps_report() -> None:

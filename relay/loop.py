@@ -21,6 +21,7 @@ from relay.prompts import (
     design_answer_brief,
     design_brief,
     design_retry_brief,
+    handoff,
     lead_prompt,
     recut_brief,
     refresh_brief,
@@ -252,12 +253,12 @@ def _run_section(
     )
     session = result.stream.session_id
     state.set_last_log(sid, result.log)
+    status = parse_status(result.stream.result_text)
     if session is not None:
         state.set_last_session(sid, session, cfg.backend)
-        state.set_last_report(sid, result.stream.result_text or None)
+        state.set_last_report(sid, handoff(result, status))
 
     _section_worktree(cwd, queue, sid, state)
-    status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
     failed = run_failed(result, require_tokens=False) or status is None
     if watch.idle_retired and not result.stream.is_error:

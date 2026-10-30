@@ -139,6 +139,35 @@ def test_a_report_without_branch_keeps_the_bound_custom_worktree_on_restart(
     assert State.open(queue, cfg).section("s1").worktree_branch == "fix/persisted-owner"
 
 
+@pytest.mark.parametrize("kind", ["legacy", "custom"])
+def test_a_branch_named_in_a_saved_handoff_of_a_lead_without_status_is_the_sections_worktree_on_restart(
+    kind: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # README.md:33, where the saved lead report is handoff()'s text for a lead that stopped
+    # without a status (relay-run-overhead-design.md, `relay/prompts.py` `handoff`, `relay/loop.py`).
+    # Breaks when: the saved report's BRANCH pair is read only at a line's start, so the handoff's
+    # "Its last reply: " hides it and the restarted check runs outside the reported worktree.
+    record = tmp_path / "handoff-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1")
+    if kind == "legacy":
+        branch, expected = "lead/s1", git_repo.worktrees["s1"]
+    else:
+        branch = "fix/handoff-owner"
+        expected = git_repo.worktree("custom", branch=branch)
+    handoff = (
+        f"The previous lead stopped without a final report (exit 1). Its last reply: "
+        f"BRANCH {branch} {expected}\nEND LEAD. "
+        "Its agents, as Relay saw them: builder, Build step 5, running when it stopped."
+    )
+    state = State.open(queue, cfg)
+    state.set_last_report("s1", handoff)
+    state.set_check_pending("s1", True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected)]
+    saved = State.open(queue, cfg).section("s1")
+    assert (saved.worktree_branch, saved.worktree_path) == (branch, str(expected))
+
+
 def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
     cfg: Config, tmp_path: Path, git_repo: GitRepo,
 ) -> None:
@@ -6144,7 +6173,9 @@ def test_waiting_on_a_blocker_recut_out_of_the_queue_whose_recut_section_needs_t
 # `last_session_any`, and `report` set to the section's own `last_report`. A report from another
 # section is never passed, even when `resume` comes from `last_session_any`.
 # Order 17, behavior 6: 7. Append the run's spend to the ledger, record its session, and record
-# `result.stream.result_text` with `set_last_report`; a run with no result text clears it.
+# the report with `set_last_report`. relay-run-overhead-design.md:114 moves what is recorded: the
+# loop stores `handoff(result, status)` instead of the raw reply (`last_report` is never the raw
+# `result_text`, :134), so a run with no status and no result text stores the stopped-lead text.
 # `getattr` with a default keeps a missing `last_report` or `set_last_report` an assertion
 # failure, not an AttributeError.
 
@@ -6222,29 +6253,33 @@ def test_each_lead_runs_result_text_is_recorded_as_its_sections_last_report(
     cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: the loop records no report, records it on another section, or alters it.
+    # relay-run-overhead-design.md:114: the record is handoff(result, status), a status lead's form.
     queue = queue_file(M2)
     scenario(_lines(DONE_LEAD))
     run(queue, cfg)
     for sid in _open_ids(queue):
-        assert _last_report(queue, cfg, sid) == DONE_LEAD_REPORT, sid
+        assert _last_report(queue, cfg, sid) == WITH_STATUS_HANDOFF + DONE_LEAD_REPORT, sid
 
 
 def test_a_failed_lead_runs_result_text_is_recorded_too(
     cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: the loop records the report only for a run that ends with a valid status.
+    # relay-run-overhead-design.md:114: the record is handoff(result, None), the stopped-lead form.
     queue = queue_file(WORKBOARD)
     scenario(_lines(NO_STATUS_LEAD))
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     first = _open_ids(queue)[0]
-    assert _last_report(queue, cfg, first) == NO_STATUS_LEAD_REPORT, "failed lead's report"
+    report = _last_report(queue, cfg, first)
+    assert _stopped(report, NO_STATUS_LEAD_REPORT) is not None, f"failed lead's report: {report}"
     assert _last_report(queue, cfg, _open_ids(queue)[1]) is None, "untouched section's report"
 
 
-def test_a_run_with_no_result_text_clears_the_sections_last_report(
+def test_a_run_with_no_result_text_replaces_the_sections_last_report_with_a_stopped_leads_handoff(
     cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
 ) -> None:
     # Breaks when: a killed run, which has no result text, leaves the earlier lead's report in place.
+    # relay-run-overhead-design.md:114: the record is handoff(result, None), "Its last reply: none".
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
@@ -6255,7 +6290,97 @@ def test_a_run_with_no_result_text_clears_the_sections_last_report(
     assert len(runs) == 3, f"{len(runs)} lead runs"
     assert RETIRED_LEAD_REPORT in str(runs[1]["prompt"]), "report passed after the retire"
     assert RETIRED_LEAD_REPORT not in str(runs[2]["prompt"]), "report passed after the kill"
-    assert _last_report(queue, cfg, first) is None, "report left after the kill"
+    report = _last_report(queue, cfg, first)
+    assert _stopped(report, "none") is not None, f"report after the kill: {report}"
+
+
+# relay-run-overhead-design.md, Modules `relay/loop.py` and Order 5: the loop stores
+# `handoff(result, status)` instead of the raw reply. With a status, handoff is "The previous
+# lead's final report (that session's last reply, so you need not recall it):\n<result_text>";
+# with no status, "The previous lead stopped without a final report (<error_line(result)>). Its
+# last reply: <result_text or 'none'>\nIts agents, as Relay saw them: <one line per agent: name,
+# description, status or 'running when it stopped'>."
+
+WITH_STATUS_HANDOFF = "The previous lead's final report (that session's last reply, so you need not recall it):\n"
+AGENTS_LEAD_FILE = "stream-agents.jsonl"  # two subagents: a1 "Build s2.d1 stub", a2 "s2.d2 red tests"
+STOPPED_REPLY = "Still running; waiting for its report."
+
+
+def _stopped(report: object, reply: str) -> re.Match[str] | None:
+    """The match of a no-status handoff whose last reply is `reply`, or None."""
+    return re.fullmatch(
+        r"The previous lead stopped without a final report \(.+?\)\.\s+"
+        rf"Its last reply: {re.escape(reply)}\n"
+        r"Its agents, as Relay saw them:(?P<agents>.*)",
+        str(report),
+        re.DOTALL,
+    )
+
+
+def test_a_lead_ending_with_a_status_has_its_reply_stored_as_the_previous_leads_final_report(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop stores the raw reply, or handoff's text with a status, as last_report.
+    queue = queue_file(M2)
+    scenario(_lines(DONE_LEAD))
+    run(queue, cfg)
+    for sid in _open_ids(queue):
+        assert _last_report(queue, cfg, sid) == WITH_STATUS_HANDOFF + DONE_LEAD_REPORT, sid
+
+
+def test_a_lead_with_no_status_is_stored_as_stopped_without_a_final_report_with_its_last_reply(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the loop stores a no-status lead's raw reply, or drops its error line or reply.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(NO_STATUS_LEAD))
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    report = _last_report(queue, cfg, _open_ids(queue)[0])
+    assert _stopped(report, NO_STATUS_LEAD_REPORT) is not None, report
+
+
+def test_a_killed_lead_with_no_reply_hands_the_next_lead_last_reply_none(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: a killed lead's run clears last_report, or its handoff omits "Its last reply: none".
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(DONE_LEAD))
+    _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT)
+    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(DONE_LEAD)])
+    run(queue, cfg)
+    runs = _runs(tmp_path, "lead")
+    assert len(runs) == 3, f"{len(runs)} lead runs"
+    prompt = str(runs[2]["prompt"])
+    found = re.search(
+        r"The previous lead stopped without a final report \(.+?\)\.\s+Its last reply: none\n"
+        r"Its agents, as Relay saw them:",
+        prompt,
+    )
+    assert found is not None, prompt
+
+
+def test_a_lead_with_no_status_hands_on_one_line_per_agent_with_its_status(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the handoff leaves out an agent, its description or its status, or marks an
+    # agent with no finish notice as anything but "running when it stopped".
+    queue = queue_file(WORKBOARD)
+    events = [json.loads(line) for line in _lines(AGENTS_LEAD_FILE)]
+    kept = [e for e in events if not (e.get("subtype") == "task_notification" and e.get("task_id") == "a2")]
+    kept[-1]["result"] = STOPPED_REPLY
+    scenario([json.dumps(e) for e in kept])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    report = _last_report(queue, cfg, _open_ids(queue)[0])
+    match = _stopped(report, STOPPED_REPLY)
+    assert match is not None, report
+    lines = match.group("agents").splitlines()
+    finished = [line for line in lines if "Build s2.d1 stub" in line]
+    running = [line for line in lines if "s2.d2 red tests" in line]
+    assert len(finished) == 1, lines
+    assert len(running) == 1, lines
+    assert "completed" in finished[0]
+    assert "running when it stopped" in running[0]
 
 
 # A research run that fails (killed, exited nonzero, its result marked as an error, or used no
@@ -6804,7 +6929,8 @@ def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
     assert pending["text"] == PROBLEM
     assert Path(pending["lead_log"]).is_file()
     assert state.section("s1").last_session == "held-lead"
-    assert state.section("s1").last_report == f"Stuck.\n{report}"
+    # relay-run-overhead-design.md:114: the loop stores handoff(result, status), not the raw reply.
+    assert state.section("s1").last_report == WITH_STATUS_HANDOFF + f"Stuck.\n{report}"
     assert len(_entries(queue, cfg, "lead")) == 1
     order: list[str] = []
 
@@ -6921,7 +7047,12 @@ def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
     if ending != "budget":
         assert _runs(tmp_path, "lead")[0]["retire-flag-seen"] is False
     assert section.last_session == "finished-lead"
-    assert section.last_report == f"Stuck.\n{status}"
+    # relay-run-overhead-design.md:114: the loop stores handoff(result, status), not the raw reply;
+    # an invalid status line is no status (docs/queue.md:130), so its form is the stopped lead's.
+    if ending == "invalid":
+        assert _stopped(section.last_report, f"Stuck.\n{status}") is not None, section.last_report
+    else:
+        assert section.last_report == WITH_STATUS_HANDOFF + f"Stuck.\n{status}"
     entries = _entries(queue, cfg, "lead")
     assert len(entries) == 1
     assert entries[0]["dollars"] == 0.01
@@ -7052,7 +7183,8 @@ def test_drain_preserves_a_running_real_child_until_its_result_is_recorded(
     assert code == ExitCode.DRAINED
     assert state.section("s1").status == "done"
     assert state.section("s1").last_session == "sess-lead-1"
-    assert state.section("s1").last_report == "Step committed.\nDONE"
+    # relay-run-overhead-design.md:114: the loop stores handoff(result, status), not the raw reply.
+    assert state.section("s1").last_report == WITH_STATUS_HANDOFF + "Step committed.\nDONE"
     assert state.section("s2").last_session is None
     assert len(_entries(queue, cfg, "lead")) == 1
 

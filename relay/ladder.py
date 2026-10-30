@@ -3,6 +3,7 @@
 Pure: no I/O, no state writes, no git.
 """
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -104,13 +105,17 @@ def said(result_text: str | None) -> str:
     return text if len(text) <= SAID_LIMIT else "…" + text[-SAID_LIMIT:]
 
 
+_BRANCH = re.compile(r"(?:^|\s)BRANCH (?P<branch>\S+) (?P<path>\S.*)$")
+
+
 def lead_branch(report: str | None) -> tuple[str, Path] | None:
     """(branch, worktree) from the last `BRANCH <branch> <worktree path>` line of a lead's
-    report; None when there is none."""
+    report, the pair running to the line's end; it may follow a prefix such as handoff()'s
+    "Its last reply: ". None when there is none."""
     for line in reversed((report or "").splitlines()):
-        parts = line.strip().split(" ", 2)
-        if len(parts) == 3 and parts[0] == "BRANCH" and parts[1] and parts[2].strip():
-            return parts[1], Path(parts[2].strip())
+        found = _BRANCH.search(line.strip())
+        if found:
+            return found["branch"], Path(found["path"].strip())
     return None
 
 

@@ -9,7 +9,8 @@ from relay.ladder import GUESS
 from relay.check import CheckResult, outcome_text
 from relay.queue import Section
 from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN, Map, block
-from relay.status import KINDS, Kind, TEXT_NAMES
+from relay.runner import RunResult, error_line
+from relay.status import KINDS, LeadStatus, Kind, TEXT_NAMES
 
 
 WORKER_RULE = (
@@ -23,6 +24,30 @@ WORKER_RULE = (
 
 def _status_form(kind: Kind) -> str:
     return f"{kind}: <{TEXT_NAMES[kind]}>" if kind in TEXT_NAMES else kind
+
+
+def handoff(result: RunResult, status: LeadStatus | None) -> str | None:
+    """With a status: "The previous lead's final report (that session's last reply, so you need
+    not recall it):\n<result_text>", or None when result_text is empty. With no status:
+    "The previous lead stopped without a final report (<error_line(result)>). Its last reply:
+    <result_text or 'none'>\nIts agents, as Relay saw them: <one line per agents.Agent:
+    name, description, status or 'running when it stopped'>.\""""
+    text = result.stream.result_text or ""
+    if status is not None:
+        if not text:
+            return None
+        return (
+            "The previous lead's final report (that session's last reply, so you need "
+            f"not recall it):\n{text}"
+        )
+    lines = "\n".join(
+        f"{a.name}, {a.description}, {a.status or 'running when it stopped'}"
+        for a in result.stream.activity.agents
+    )
+    return (
+        f"The previous lead stopped without a final report ({error_line(result)}). "
+        f"Its last reply: {text or 'none'}\nIts agents, as Relay saw them:\n{lines}"
+    )
 
 
 def lead_prompt(
@@ -58,10 +83,7 @@ def lead_prompt(
     elif resume is not None:
         parts.append(f"resume {resume}")
     if report is not None:
-        parts.append(
-            "The previous lead's final report (that session's last reply, so you need "
-            f"not recall it):\n{report}"
-        )
+        parts.append(report)
     if answer is not None:
         parts.append(f"The owner's answer to your earlier question:\n{answer}")
     if guidance is not None:
