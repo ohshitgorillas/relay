@@ -323,6 +323,7 @@ def run_agent(
             proc = subprocess.Popen(
                 argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=stderr_file, start_new_session=True,
+                env={**os.environ, "RELAY_RUN": "1"},
             )
             live.append(proc)
             try:
