@@ -73,9 +73,9 @@ section s3 | lead | steps: 3 | size: lead: tokens: 1387990.8 seconds: 738.9 over
     paths: relay/retire_gate.py, relay/backends/claude.py
     check: uv run pytest tests/test_retire_gate.py tests/test_backends.py
 section s4 | lead | steps: 4 | size: lead: tokens: 1400779.4 seconds: 736.9 overruns: 0 refusals: 0
-  s4.d1 | test-writer | steps: 4 | writes: tests/test_research.py | size: test-writer: tokens: 615203.4 seconds: 192.7 overruns: 0 refusals: 0
+  s4.d1 | test-writer | steps: 4 | writes: tests/test_research.py | size: test-writer: tokens: 613886.6 seconds: 192.2 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s4.d1
-    resume a8bb4564a3511aabb
+    resume abd9398d2c03d084e
     moved
     lines: docs/superpowers/specs/relay-run-overhead-design.md:75 | before: none (line added in 98a56b5) | after: "**`relay/research.py`**: `block()` is the map's header and body, with no instruction lines. Replaces `rule` at `relay/research.py:241-245`."
     lines: docs/superpowers/specs/relay-run-overhead-design.md:132 | before: none (line added in 98a56b5) | after: "| Map text sent to agents | `research.block` | Any instruction line around the map, in `research.py` or `prompts.py`. |"
