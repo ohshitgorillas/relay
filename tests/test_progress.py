@@ -139,6 +139,12 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("check_failed", lambda: progress.check_failed("s1", 1)),
         ("retired_idle", lambda: progress.retired_idle("s1", 130_000)),
         ("research_started", lambda: progress.research_started("s1", Path("/work/wt/s1"))),
+        (
+            "research_refreshing",
+            lambda: progress.research_refreshing(
+                "s1", Path("/work/wt/s1"), frozenset({"relay/a.py"}), _map()
+            ),
+        ),
         ("research_finished", lambda: progress.research_finished("s1", _result(), _map())),
         ("map_reused", lambda: progress.map_reused("s1", _map())),
         (
@@ -171,6 +177,7 @@ NAMES = [
     "check_failed",
     "retired_idle",
     "research_started",
+    "research_refreshing",
     "research_finished",
     "map_reused",
     "design_started",
@@ -932,6 +939,18 @@ def test_research_started_names_the_section_and_cwd(capsys: pytest.CaptureFixtur
     # "research <sid>: mapping in <cwd>".
     progress.research_started("s4.2", Path("/work/relay-wt/s4.2"))
     assert _line(capsys) == "research s4.2: mapping in /work/relay-wt/s4.2"
+
+
+@pytest.mark.parametrize("changed", [frozenset({"relay/a.py"}), frozenset({"relay/a.py", "relay/b.py"})])
+def test_research_refreshing_counts_changed_and_kept_files(
+    changed: frozenset[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: refreshing omits or fixes either count, the section id, or the research cwd.
+    # Research reuse design, Modules `relay/progress.py`; Order 4.
+    progress.research_refreshing("s4.2", Path("/work/relay-wt/s4.2"), changed, _map())
+    assert _line(capsys) == (
+        f"research s4.2: refreshing {len(changed)} changed of {3 + len(changed)} mapped files in /work/relay-wt/s4.2"
+    )
 
 
 def test_research_finished_with_a_map_counts_its_lines_and_files(

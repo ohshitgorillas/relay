@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+import stat
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from relay import git
 from relay.config import Config
 from relay.state import write_atomic
 
@@ -15,6 +16,7 @@ LINKS = "LINKS"
 MAP_CLOSE = "END MAP"
 ANSWER_OPEN = "ANSWER"
 ANSWER_CLOSE = "END ANSWER"
+UNKNOWN = "-"
 
 _SPAN = r"([^\s:|>]+):\d+(?:-\d+)?"
 _ENTRY = re.compile(rf"{_SPAN} \| \S.*")
@@ -27,6 +29,79 @@ class Map:
     commit: str  # the HEAD Relay read in the research cwd before the researcher ran
     files: tuple[str, ...]  # every path an entry or link names, sorted, no repeats
     body: str  # the lines from MAP to END MAP, both included
+    digests: tuple[str, ...] = ()  # one per files entry; () means none recorded
+
+
+def digest(cwd: Path, path: str) -> str:
+    """sha256 hex of the file bytes, or UNKNOWN for an unreadable non-regular file."""
+    target = cwd / path
+    try:
+        if not stat.S_ISREG(target.stat().st_mode):
+            return UNKNOWN
+        with target.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+    except OSError:
+        return UNKNOWN
+
+
+def stamp(m: Map, cwd: Path, since_ns: int) -> Map:
+    """Record each file's digest, or UNKNOWN if its mtime is at least since_ns."""
+    values = []
+    for path in m.files:
+        value = digest(cwd, path)
+        try:
+            if (cwd / path).stat().st_mtime_ns >= since_ns:
+                value = UNKNOWN
+        except OSError:
+            value = UNKNOWN
+        values.append(value)
+    return replace(m, digests=tuple(values))
+
+
+def changed(m: Map, cwd: Path) -> frozenset[str]:
+    """Files whose recorded digest is absent, UNKNOWN, or differs from their current digest."""
+    return frozenset(
+        path
+        for i, path in enumerate(m.files)
+        if i >= len(m.digests)
+        or m.digests[i] == UNKNOWN
+        or m.digests[i] != digest(cwd, path)
+    )
+
+
+def split(m: Map, changed: frozenset[str]) -> Map | None:
+    """Keep unchanged entries and links with both ends unchanged; None if no entry remains."""
+    parts = _parts(m.body.splitlines())
+    if parts is None:
+        return None
+    entries, links = parts
+    entries = [line for line in entries if _ENTRY.fullmatch(line)[1] not in changed]
+    links = [
+        line for line in links if not changed.intersection(_LINK.fullmatch(line).groups())
+    ]
+    kept = _build(m.sid, m.commit, _lines(entries, links))
+    if kept is None or not m.digests:
+        return kept
+    values = dict(zip(m.files, m.digests))
+    return replace(kept, digests=tuple(values.get(path, UNKNOWN) for path in kept.files))
+
+
+def parse_refresh(
+    kept: Map, commit: str, changed: frozenset[str], result_text: str | None, cfg: Config
+) -> Map | None:
+    """Merge kept with the last refresh MAP block; None if malformed, overlapping or over caps."""
+    lines = _last_block(result_text, MAP_OPEN, MAP_CLOSE)
+    fresh_parts = None if lines is None else _parts(lines)
+    kept_parts = _parts(kept.body.splitlines())
+    if fresh_parts is None or kept_parts is None:
+        return None
+    entries, links = kept_parts
+    fresh_entries, fresh_links = fresh_parts
+    kept_paths = {_ENTRY.fullmatch(line)[1] for line in entries}
+    if any(_ENTRY.fullmatch(line)[1] in kept_paths for line in fresh_entries):
+        return None
+    body = "\n".join(_lines(entries + fresh_entries, links + fresh_links))
+    return parse_map(kept.sid, commit, body, cfg)
 
 
 def _last_block(text: str | None, opener: str, closer: str) -> list[str] | None:
@@ -43,10 +118,10 @@ def _last_block(text: str | None, opener: str, closer: str) -> list[str] | None:
     return found
 
 
-def _files(lines: list[str]) -> tuple[str, ...] | None:
-    """The sorted paths of a block's inner lines; None when a line fits neither form or no entry."""
-    paths: set[str] = set()
-    entries = 0
+def _parts(lines: list[str]) -> tuple[list[str], list[str]] | None:
+    """Validate a MAP block and separate entries and links, allowing no entries."""
+    entries: list[str] = []
+    links: list[str] = []
     in_links = False
     for line in lines[1:-1]:
         if line == LINKS and not in_links:
@@ -55,10 +130,24 @@ def _files(lines: list[str]) -> tuple[str, ...] | None:
         m = _LINK.fullmatch(line) if in_links else _ENTRY.fullmatch(line)
         if m is None:
             return None
-        if not in_links:
-            entries += 1
-        paths.update(m.groups())
-    return tuple(sorted(paths)) if entries else None
+        (links if in_links else entries).append(line)
+    return entries, links
+
+
+def _lines(entries: list[str], links: list[str]) -> list[str]:
+    return [MAP_OPEN, *entries, *([LINKS, *links] if links else []), MAP_CLOSE]
+
+
+def _files(lines: list[str]) -> tuple[str, ...] | None:
+    """The sorted paths of a valid block with at least one entry."""
+    parts = _parts(lines)
+    if parts is None or not parts[0]:
+        return None
+    entries, links = parts
+    paths = {_ENTRY.fullmatch(line)[1] for line in entries}
+    for line in links:
+        paths.update(_LINK.fullmatch(line).groups())
+    return tuple(sorted(paths))
 
 
 def _build(sid: str, commit: str, lines: list[str]) -> Map | None:
@@ -84,9 +173,13 @@ def parse_map(sid: str, commit: str, result_text: str | None, cfg: Config) -> Ma
 
 
 def save(m: Map, path: Path) -> None:
-    """Write `map <sid> at <commit>` then m.body to `path` by temp file and os.replace."""
+    """Atomically write the map header, optional per-file digests, and body."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(path, f"{_header(m.sid, m.commit)}\n{m.body}\n")
+    records = "".join(
+        f"file {value} {name}\n"
+        for name, value in zip(m.files, m.digests, strict=bool(m.digests))
+    )
+    write_atomic(path, f"{_header(m.sid, m.commit)}\n{records}{m.body}\n")
 
 
 def load(path: Path, sid: str) -> Map | None:
@@ -100,13 +193,21 @@ def load(path: Path, sid: str) -> Map | None:
     commit = head[len(prefix) :]
     if not head.startswith(prefix) or not commit or commit.split() != [commit]:
         return None
-    lines = _last_block(rest, MAP_OPEN, MAP_CLOSE)
-    return None if lines is None else _build(sid, commit, lines)
-
-
-def stale(m: Map, cwd: Path) -> bool:
-    """True unless git.changed(cwd, m.commit, m.files) is False."""
-    return git.changed(cwd, m.commit, m.files) is not False
+    records: dict[str, str] = {}
+    body_lines = rest.splitlines()
+    while body_lines and body_lines[0].startswith("file"):
+        record = body_lines.pop(0)
+        match = re.fullmatch(r"file (-|[0-9a-f]{64}) ([^\s:|>]+)", record)
+        if match is None or match[2] in records:
+            return None
+        records[match[2]] = match[1]
+    lines = _last_block("\n".join(body_lines), MAP_OPEN, MAP_CLOSE)
+    m = None if lines is None else _build(sid, commit, lines)
+    if m is None or not records:
+        return m
+    if records.keys() != set(m.files):
+        return None
+    return replace(m, digests=tuple(records[name] for name in m.files))
 
 
 def block(m: Map) -> str:
