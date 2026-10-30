@@ -21,6 +21,7 @@ class StreamState:
     seen_messages: frozenset[str] = frozenset()
     activity: agents.Activity = agents.Activity()
     usage: tuple[Usage, ...] = ()
+    peak_context: int = 0
 
 
 def _count(usage: dict, key: str) -> int:
@@ -85,7 +86,12 @@ def feed(state: StreamState, line: str) -> StreamState:
             tokens = context + _count(usage, "output_tokens")
             spend = Spend(tokens=state.spend.tokens + tokens, dollars=state.spend.dollars)
             seen = state.seen_messages | {message_id} if isinstance(message_id, str) else state.seen_messages
-            return replace(state, context_tokens=context, spend=spend, seen_messages=seen)
+            if isinstance(event.get("parent_tool_use_id"), str):
+                return replace(state, spend=spend, seen_messages=seen)
+            return replace(
+                state, context_tokens=context, spend=spend, seen_messages=seen,
+                peak_context=max(state.peak_context, context),
+            )
     elif kind == "result":
         cost = event.get("total_cost_usd")
         dollars = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else 0.0

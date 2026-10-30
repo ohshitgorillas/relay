@@ -7215,3 +7215,60 @@ def test_drain_during_new_ladder_preparation_saves_the_followup(
     assert section.pending["kind"] == ("design-recut" if dispatch == "design-recut" else "climb")
     assert section.failures == 0
     assert section.design_failures == 0
+
+
+# Run overhead (design: docs/superpowers/specs/relay-run-overhead-design.md, Homes, lead
+# context measurement; Order 1). `loop._watcher` reads only `context_tokens`, which subagent
+# events never set. In SUBAGENT_LEAD (session "sess-sub-1", result "DONE") the main thread's
+# assistant messages (lines 1 and 3) reach contexts 2 + 500 + 1500 and 4 + 100 + 2400; the
+# subagent's (lines 2 and 4) reach 50 + 20000 + 80000 and 6 + 0 + 90000.
+SUBAGENT_LEAD = "stream-subagent-context.jsonl"
+SUBAGENT_MAIN_PEAK = 4 + 100 + 2400
+SUBAGENT_SMALLER_CONTEXT = 6 + 0 + 90000
+
+
+# Behavior: `loop._watcher` (`relay/loop.py:557-582`) reads only `context_tokens`.
+
+
+def test_a_subagents_context_past_context_limit_creates_no_retire_flag(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the watcher weighs a subagent event's context against context_limit.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    cfg = dataclasses.replace(cfg, context_limit=SUBAGENT_MAIN_PEAK + 1)
+    assert run(queue, _shimmed(cfg, tmp_path, split=5)) == ExitCode.QUEUE_EMPTY
+    assert _record(tmp_path, 0)["appeared"] == []
+
+
+def test_a_subagents_context_past_the_hard_ceiling_does_not_kill_the_lead(
+    cfg: Config, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+) -> None:
+    # Breaks when: the watcher kills the lead on a subagent event's context.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    cfg = dataclasses.replace(
+        cfg, context_limit=SUBAGENT_MAIN_PEAK + 1, hard_ceiling=SUBAGENT_SMALLER_CONTEXT
+    )
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    state = State.open(queue, cfg)
+    assert all(state.section(sid).status == "done" for sid in _open_ids(queue))
+
+
+def test_the_retire_line_names_the_main_threads_context_not_a_subagents(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the watcher retires the lead at a subagent event, so the first retire comes
+    # before the main thread reaches context_limit and names the subagent's context.
+    queue = queue_file(WORKBOARD)
+    scenario(_lines(SUBAGENT_LEAD))
+    first = _only_first_open(queue, cfg)
+    cfg = dataclasses.replace(cfg, context_limit=SUBAGENT_MAIN_PEAK)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    texts = _texts(capsys.readouterr().out)
+    line = f"lead {first}: asked to retire at {SUBAGENT_MAIN_PEAK} context tokens"
+    assert [t for t in texts if ": asked to retire" in t] == [line], texts
