@@ -228,12 +228,12 @@ class SessionReader:
         if invalid:
             for key in invalid:
                 self._problem(f"{key} count invalid or unavailable")
-            return replace(state, context_tokens=context)
+            return replace(state, context_tokens=context, peak_context=max(state.peak_context, context))
         previous = self._previous or dict.fromkeys(keys, 0)
         delta = {key: total[key] - previous[key] for key in keys}
         if any(value < 0 for value in delta.values()):
             self._problem("cumulative token counter reset; baseline unavailable")
-            return replace(state, context_tokens=context)
+            return replace(state, context_tokens=context, peak_context=max(state.peak_context, context))
         self._previous = {key: total[key] for key in keys}
         # The captured provider input includes cached reads, and output includes
         # reasoning. Neither component is added a second time.
@@ -258,7 +258,7 @@ class SessionReader:
             else:
                 rows[index] = row
             self.usage = tuple(rows)
-        return replace(state, context_tokens=context,
+        return replace(state, context_tokens=context, peak_context=max(state.peak_context, context),
                        spend=Spend(max(state.spend.tokens, self._tokens), state.spend.dollars))
 
     def _settings(self) -> None:
