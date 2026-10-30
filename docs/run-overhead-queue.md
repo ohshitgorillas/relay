@@ -110,33 +110,19 @@ section s5 | lead | steps: 5 | size: lead: tokens: 1387990.8 seconds: 738.9 over
     step: 5
     paths: relay/prompts.py, relay/loop.py
     check: uv run pytest tests/test_prompts.py tests/test_loop.py
-section s6a | lead | steps: 7 | size: lead: tokens: 1379490.6 seconds: 722.5 overruns: 0 refusals: 0 | from: s6
-  s6a.d1 | test-writer | steps: 7 | writes: tests/test_progress.py | size: test-writer: tokens: 611259.3 seconds: 190.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d1
-    resume a757ec3a40fb1e068
-    red
-    design: docs/superpowers/specs/relay-run-overhead-design.md step 7
-    behavior: the spend figure tells re-read context apart from real size.
-    view: stubgen .pyi of relay/progress.py
-    behavior: the largest context_tokens seen in the run
-    view: stubgen .pyi of relay/stream.py
-  s6a.d2 | test-writer | steps: 7 | writes: tests/test_progress.py | size: test-writer: tokens: 611259.3 seconds: 190.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d2
+section s6a | lead | steps: 7 | size: lead: tokens: 1378850.5 seconds: 720.8 overruns: 0 refusals: 0 | from: s6
+  s6a.d4a | test-writer | steps: 7 | writes: tests/test_loop.py | size: test-writer: tokens: 609303.6 seconds: 190.0 overruns: 0 refusals: 0 | from: s6a.d4
+    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d4a
+    resume ae9502ad4b1529642
     moved
     lines: docs/superpowers/specs/relay-run-overhead-design.md:116 | before: none (line added in 98a56b5) | after: "**`relay/progress.py`**: the spend figure tells re-read context apart from real size. Replaces `_spend` at `relay/progress.py:45-47`."
     lines: docs/superpowers/specs/relay-run-overhead-design.md:120 | before: none (line added in 98a56b5) | after: "    """f"(peak context {peak_context}, {spend.tokens} tokens summed over turns, ${dollars:.2f})".""""
-    files: tests/test_progress.py
+    files: tests/test_loop.py
     view: stubgen .pyi of relay/progress.py
-    view: stubgen .pyi of relay/stream.py
-  s6a.d3 | test-writer | steps: 7 | writes: tests/test_codex_session.py | size: test-writer: tokens: 611259.3 seconds: 190.9 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d3
-    red
-    design: docs/superpowers/specs/relay-run-overhead-design.md step 7
-    behavior: the largest context_tokens seen in the run
-    view: stubgen .pyi of relay/backends/codex_session.py
-  s6a.d4 | builder | steps: 7 | writes: relay/progress.py, relay/backends/codex_session.py | size: builder: tokens: 281596.7 seconds: 143.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d4
+    view: stubgen .pyi of relay/loop.py
+  s6a.d4b | builder | steps: 7 | writes: relay/progress.py, relay/backends/codex_session.py | size: builder: tokens: 281330.7 seconds: 143.1 overruns: 0 refusals: 0 | from: s6a.d4
+    queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s6a.d4b
     design: docs/superpowers/specs/relay-run-overhead-design.md
     step: 7
     paths: relay/progress.py, relay/backends/codex_session.py
-    check: uv run pytest tests/test_progress.py tests/test_codex_session.py
+    check: uv run pytest tests/test_progress.py tests/test_codex_session.py tests/test_loop.py
