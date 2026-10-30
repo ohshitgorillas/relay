@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import shlex
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,4 +47,11 @@ class ClaudeBackend:
         return f"resume {session_id}"
 
     def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
-        return Launch(env=CHILD_ENV)
+        if role != "lead":
+            return Launch(env=CHILD_ENV)
+        command = shlex.join([sys.executable, "-m", "relay.retire_gate", str(retire_flag)])
+        settings = run_dir / "retire-gate.settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {"PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": command}]}]}
+        }))
+        return Launch(extra_argv=("--settings", str(settings)), env=CHILD_ENV)
