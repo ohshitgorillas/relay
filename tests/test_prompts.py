@@ -18,9 +18,11 @@ from relay.prompts import (
     design_retry_brief,
     lead_prompt,
     recut_brief,
+    refresh_brief,
     research_brief,
 )
 from relay.queue import Section
+from relay.research import Map, block
 from tests.conftest import FIXTURES
 
 QUEUE = Path("/work/repo/docs/queue.md")
@@ -426,6 +428,67 @@ def test_research_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
     # Breaks when: the flag sentence is left out, worded otherwise or names another path.
     sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
     assert sentence in _research(fake_cfg)
+
+
+# Research reuse design, Modules `relay/prompts.py`; Order 4.
+def _kept_map() -> Map:
+    body = MAP_BLOCK.split("\n", 1)[1]
+    return Map(
+        sid="s4",
+        commit="0123456789abcdef0123456789abcdef01234567",
+        files=("relay/git.py", "relay/loop.py", "relay/research.py"),
+        body=body,
+        digests=("a" * 64, "b" * 64, "c" * 64),
+    )
+
+
+def test_refresh_brief_carries_the_section_and_kept_block_without_digests(fake_cfg: Config) -> None:
+    # Breaks when: refresh drops or alters the section or retained block, or leaks file digests.
+    kept = _kept_map()
+    brief = refresh_brief(QUEUE, _section(), kept, ("relay/prompts.py",), RESEARCH_FLAG, fake_cfg)
+    assert BODY in brief
+    assert block(kept) in brief
+    for digest in kept.digests:
+        assert digest not in brief
+
+
+def test_refresh_brief_lists_changed_paths_sorted(fake_cfg: Config) -> None:
+    # Breaks when: changed paths are omitted or retain caller order rather than sorted order.
+    changed = ("relay/zebra.py", "relay/alpha.py", "relay/middle.py")
+    brief = refresh_brief(QUEUE, _section(), _kept_map(), changed, RESEARCH_FLAG, fake_cfg)
+    positions = [brief.index(path) for path in sorted(changed)]
+    assert positions == sorted(positions)
+
+
+def test_refresh_brief_limits_mapping_to_changed_section_code_and_allows_new_paths(fake_cfg: Config) -> None:
+    # Design: relay-research-reuse-design.md:85-90 makes these exact scope sentences contractual.
+    # Breaks when: refresh alters or omits any of the three scope instruction sentences.
+    brief = refresh_brief(
+        QUEUE, _section(), _kept_map(), ("relay/prompts.py",), RESEARCH_FLAG, fake_cfg
+    )
+    assert "Map only code in the changed paths that this section touches." in brief
+    assert "You may name new paths." in brief
+    assert "No entry may name a file that a kept entry names." in brief
+
+
+def test_refresh_brief_gives_the_room_left_after_kept(fake_cfg: Config) -> None:
+    # Breaks when: refresh quotes the full caps instead of subtracting the retained body.
+    kept = _kept_map()
+    cfg = _capped(fake_cfg)
+    brief = refresh_brief(QUEUE, _section(), kept, ("relay/prompts.py",), RESEARCH_FLAG, cfg)
+    assert re.search(rf"\b{cfg.map_max_lines - len(kept.body.splitlines())}\s+lines\b", brief)
+    assert re.search(rf"\b{cfg.map_max_chars - len(kept.body)}\s+(?:characters|chars)\b", brief)
+
+
+def test_refresh_brief_keeps_the_map_form_and_flag_rule(fake_cfg: Config) -> None:
+    # Breaks when: refresh omits its response form or changes the existing flag instruction.
+    kept = _kept_map()
+    brief = refresh_brief(QUEUE, _section(), kept, ("relay/prompts.py",), RESEARCH_FLAG, fake_cfg)
+    response = brief.replace(block(kept), "")
+    for marker in ("MAP", "LINKS", "END MAP"):
+        assert marker in response.splitlines()
+    sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    assert sentence in response
 
 
 # Behavior 4: The question, the ANSWER / END ANSWER form, the cap cfg.map_max_chars, the flag rule.

@@ -7,7 +7,7 @@ from relay.config import Config
 from relay.ladder import GUESS
 from relay.check import CheckResult, outcome_text
 from relay.queue import Section
-from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN
+from relay.research import ANSWER_CLOSE, ANSWER_OPEN, LINKS, MAP_CLOSE, MAP_OPEN, Map, block
 from relay.status import KINDS, Kind, TEXT_NAMES
 
 
@@ -182,13 +182,16 @@ def check_feedback(result: CheckResult) -> str:
     return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
 
 
-def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> str:
-    """The researcher's brief: queue, section, caps, MAP form and the flag rule."""
+def _map_form(flag: Path, max_lines: int, max_chars: int, *, additions: bool = False) -> str:
+    """The shared final-map form, caps and researcher flag rule."""
+    allowance = (
+        f"adding at most {max_lines} lines and {max_chars} characters to the kept map"
+        if additions
+        else f"at most {max_lines} lines and {max_chars} characters"
+    )
     return (
-        f"research section {section.id} of the queue at {queue}.\n\n"
-        f"Section body:\n{section.body}\n"
-        "Map the code this section's steps touch. End your final message with the map, "
-        f"at most {cfg.map_max_lines} lines and {cfg.map_max_chars} characters, in this form "
+        "End your final message with the map, "
+        f"{allowance}, in this form "
         f"and nothing after {MAP_CLOSE}:\n"
         f"{MAP_OPEN}\n"
         "<path>:<line>[-<line>] | <what it does>\n"
@@ -196,6 +199,41 @@ def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> st
         "<path>:<line> -> <path>:<line> | <how>\n"
         f"{MAP_CLOSE}\n\n"
         f"When the file {flag} exists, send no more readers and return the map you have.\n"
+    )
+
+
+def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> str:
+    """The researcher's brief: queue, section, caps, MAP form and the flag rule."""
+    return (
+        f"research section {section.id} of the queue at {queue}.\n\n"
+        f"Section body:\n{section.body}\n"
+        "Map the code this section's steps touch. "
+        + _map_form(flag, cfg.map_max_lines, cfg.map_max_chars)
+    )
+
+
+def refresh_brief(
+    queue: Path, section: Section, kept: Map, changed: tuple[str, ...], flag: Path, cfg: Config
+) -> str:
+    """Map changed paths within the caps left after kept; preserve the kept entries."""
+    paths = "\n".join(sorted(changed))
+    return (
+        f"refresh research section {section.id} of the queue at {queue}.\n\n"
+        f"Section body:\n{section.body}\n\n"
+        f"Kept map:\n{block(kept)}\n"
+        f"Changed paths:\n{paths}\n\n"
+        "Map only code in the changed paths that this section touches. "
+        "You may name new paths. "
+        "No entry may name a file that a kept entry names. "
+        "The following caps count only the increase in the merged map over the kept map. "
+        "Repeated MAP and END MAP framing, and a LINKS marker already in the kept map, "
+        "do not consume this allowance. "
+        + _map_form(
+            flag,
+            cfg.map_max_lines - len(kept.body.splitlines()),
+            cfg.map_max_chars - len(kept.body),
+            additions=True,
+        )
     )
 
 
