@@ -168,6 +168,12 @@ def research_started(sid: str, cwd: Path) -> None:
     _write(f"research {sid}: mapping in {cwd}")
 
 
+def research_refreshing(sid: str, cwd: Path, changed: frozenset[str], kept: Map) -> None:
+    """Report research refreshing the changed subset of the mapped files."""
+    files = len(changed.union(kept.files))
+    _write(f"research {sid}: refreshing {len(changed)} changed of {files} mapped files in {cwd}")
+
+
 def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
     if run_failed(result):
         _write(

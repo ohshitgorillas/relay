@@ -22,6 +22,7 @@ from relay.prompts import (
     design_retry_brief,
     lead_prompt,
     recut_brief,
+    refresh_brief,
     research_brief,
 )
 from relay.queue import Section, blocked_by, parse_queue, queue_design, same_entry
@@ -313,17 +314,24 @@ def _research(
     sid = section.id
     where = _section_cwd(cwd, sid)
     with state.research_lock(sid):
+        since_ns = time.time_ns()
         saved = research.load(state.map_path(sid), sid)
-        if saved is not None and not research.stale(saved, where):
+        changed = research.changed(saved, where) if saved is not None else frozenset()
+        if saved is not None and not changed:
             progress.map_reused(sid, saved)
             return saved, False
-        state.drop_map(sid)
+        kept = research.split(saved, changed) if saved is not None else None
         commit = git.head(where)
         if commit is None:
             return None, False
         flag = state.research_flag(sid)
         flag.unlink(missing_ok=True)
-        progress.research_started(sid, where)
+        if kept is not None:
+            progress.research_refreshing(sid, where, changed, kept)
+            text = refresh_brief(queue, section, kept, tuple(sorted(changed)), flag, cfg)
+        else:
+            progress.research_started(sid, where)
+            text = research_brief(queue, section, flag, cfg)
         result, watch = _run(
             cfg,
             state,
@@ -332,14 +340,20 @@ def _research(
             "research",
             sid,
             cfg.research_command,
-            research_brief(queue, section, flag, cfg),
+            text,
             where,
             flag,
         )
         state.set_research_session(sid, result.stream.session_id, cfg.backend)
         failed = run_failed(result)
-        m = None if failed else research.parse_map(sid, commit, result.stream.result_text, cfg)
+        m = None
+        if not failed:
+            if kept is not None:
+                m = research.parse_refresh(kept, commit, changed, result.stream.result_text, cfg)
+            else:
+                m = research.parse_map(sid, commit, result.stream.result_text, cfg)
         if m is not None:
+            m = research.stamp(m, where, since_ns)
             research.save(m, state.map_path(sid))
         progress.research_finished(sid, result, m)
         if failed:

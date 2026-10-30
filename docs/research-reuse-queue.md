@@ -1,8 +1,7 @@
 design docs/superpowers/specs/relay-research-reuse-design.md | order docs/superpowers/specs/relay-research-reuse-design.md | main db259df
-section s1 | lead | steps: 1, 2, 3 | size: calibration: one dependent map-core piece; stub, red and build together; fresh lead after context retirement
+section s1 | lead | steps: 1, 2, 3 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
   s1.d1 | builder | steps: 1 | writes: relay/research.py, relay/prompts.py, relay/progress.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/research-reuse-queue.md s1.d1
-    resume 01a18a60-28f5-7810-96af-d4ff27deffbf
     stub
     design: docs/superpowers/specs/relay-research-reuse-design.md
     step: 1
@@ -38,50 +37,36 @@ section s1 | lead | steps: 1, 2, 3 | size: calibration: one dependent map-core p
     paths: relay/research.py, relay/git.py, relay/loop.py
     check: uv run pytest tests/test_research.py tests/test_git.py
 section s2 | lead | steps: 4, 5 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s2.d1 | test-writer | steps: 4 | writes: tests/test_prompts.py, tests/test_progress.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
+  s2.d1 | test-writer | steps: 4 | writes: tests/test_prompts.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
     queue docs/research-reuse-queue.md s2.d1
-    red
-    design: docs/superpowers/specs/relay-research-reuse-design.md, Order step 4
-    behavior: Section body, research.block(kept), the changed paths sorted, and the order to map only the code
+    resume 01a18a46-4452-77c3-9881-6ea9fac95d01
+    moved
+    lines: docs/superpowers/specs/relay-research-reuse-design.md:85 | before: "" | after: "`refresh_brief` emits these exact sentences as its stable scope instruction contract:"
+    lines: docs/superpowers/specs/relay-research-reuse-design.md:88 | before: "" | after: "Map only code in the changed paths that this section touches."
+    lines: docs/superpowers/specs/relay-research-reuse-design.md:89 | before: "" | after: "You may name new paths."
+    lines: docs/superpowers/specs/relay-research-reuse-design.md:90 | before: "" | after: "No entry may name a file that a kept entry names."
+    files: tests/test_prompts.py
     view: stubgen .pyi of relay/prompts.py
-    behavior: in those paths that the section touches. It may name new paths, but no entry may name a file a kept
-    view: stubgen .pyi of relay/prompts.py
-    behavior: entry names. Gives the room left under the caps after kept, the MAP form and the flag rule.
-    view: stubgen .pyi of relay/prompts.py
-    behavior: `research_brief` and `refresh_brief` share one private helper for the MAP form text and the flag rule. That text is not written twice.
-    view: stubgen .pyi of relay/prompts.py
-    behavior: A brief never carries a digest.
-    view: stubgen .pyi of relay/prompts.py
-    behavior: red: refresh brief and progress line
-    view: stubgen .pyi of relay/progress.py
-    behavior: `map_reused`, `research_started` and `research_finished` keep their wording.
-    view: stubgen .pyi of relay/progress.py
+    view: stubgen .pyi of relay/research.py
+    view: stubgen .pyi of relay/config.py
+    view: stubgen .pyi of relay/queue.py
+    check: uv run pytest tests/test_prompts.py
   s2.d2 | builder | steps: 5 | writes: relay/prompts.py, relay/progress.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/research-reuse-queue.md s2.d2
     design: docs/superpowers/specs/relay-research-reuse-design.md
     step: 5
     paths: relay/prompts.py, relay/progress.py
     check: uv run pytest tests/test_prompts.py tests/test_progress.py
-section s3 | lead | steps: 6, 7, 8 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s3.d1 | test-writer | steps: 6 | writes: tests/test_loop.py, tests/fixtures/ | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
-    queue docs/research-reuse-queue.md s3.d1
-    red
-    design: docs/superpowers/specs/relay-research-reuse-design.md, Order step 6
-    behavior: A fresh lead after RETIRED reuses the map when no mapped file changed.
-    view: stubgen .pyi of relay/loop.py
-    behavior: A map drawn in the main checkout is reused in the new `lead/<sid>` worktree when the mapped files match.
-    view: stubgen .pyi of relay/loop.py
-    behavior: A changed mapped file, including an uncommitted or untracked one, gets a refresh run that covers only the changed files, and the lead gets the merged map.
-    view: stubgen .pyi of relay/loop.py
-    behavior: A failed or invalid refresh leaves the lead without a map and keeps the saved file for the next pass.
-    view: stubgen .pyi of relay/loop.py
-    behavior: A stale file on disk is never used, because `changed` runs on every load.
-    view: stubgen .pyi of relay/loop.py
-    behavior: `tests/test_loop.py:3895-3933` is rewritten to expect a refresh.
-    view: stubgen .pyi of relay/loop.py
-  s3.d2 | builder | steps: 7 | writes: relay/loop.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue docs/research-reuse-queue.md s3.d2
-    design: docs/superpowers/specs/relay-research-reuse-design.md
-    step: 7
-    paths: relay/loop.py
-    check: uv run pytest tests/test_loop.py
+section s3 | lead | steps: 6, 7, 8 | size: calibration: verify retained worker results, complete the two pending reviews and the full suite, then commit; lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+  queue docs/research-reuse-queue.md s3
+  resume 01a18a88-c54a-7cd1-bd02-46991e870a53
+  check: uv run pytest tests/test_loop.py
+  check: uv run pytest
+  s3.d4 | test-reviewer | steps: 6 | writes: none | size: calibration: resume the retained whole-diff review; 872 reported unread lines of tests/test_loop.py plus remaining referenced helpers and documentation, then the formal findings report; test-reviewer: tokens: 200474.9 seconds: 67.5 overruns: 0 refusals: 0
+    queue docs/research-reuse-queue.md s3.d4
+    resume 01a18aa1-140e-7793-85dd-a85ffe2dd24b
+    working tree
+    spec: docs/superpowers/specs/relay-research-reuse-design.md
+  s3.d5 | diff-reviewer | steps: 7 | writes: none | size: diff-reviewer: tokens: 169598.3 seconds: 49.3 overruns: 0 refusals: 0
+    queue docs/research-reuse-queue.md s3.d5
+    working tree

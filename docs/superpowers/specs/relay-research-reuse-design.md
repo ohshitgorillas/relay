@@ -20,7 +20,7 @@ A fresh lead gets a full remap whenever any file the map names differs from the 
 A map file records a digest of every file it names. Freshness is decided file by file from those digests, with no commit and no git. A stale map is split into the part that still holds and the files that changed, and a refresh is merged back into it.
 
 ```python
-UNKNOWN = "-"  # the digest of a file that is missing, unreadable, or changed while the researcher ran
+UNKNOWN = "-"  # the digest of a file that is missing, unreadable, or changed since freshness checking began
 
 @dataclass(frozen=True)
 class Map:
@@ -45,7 +45,8 @@ def changed(m: Map, cwd: Path) -> frozenset[str]:
 
 def split(m: Map, changed: frozenset[str]) -> Map | None:
     """The part of m that still holds: entries on unchanged files, and links with both ends unchanged,
-    in their order, with their digests. None when no entry is left."""
+    in their order, with their digests. Omit LINKS when no links survive; optional grammar markers
+    carry no retained mapping information. None when no entry is left."""
     raise NotImplementedError
 
 def parse_refresh(
@@ -81,6 +82,14 @@ def refresh_brief(
 
 `research_brief` and `refresh_brief` share one private helper for the MAP form text and the flag rule. That text is not written twice.
 
+`refresh_brief` emits these exact sentences as its stable scope instruction contract:
+
+```text
+Map only code in the changed paths that this section touches.
+You may name new paths.
+No entry may name a file that a kept entry names.
+```
+
 ### `relay/progress.py`
 
 ```python
@@ -93,15 +102,17 @@ def research_refreshing(sid: str, cwd: Path, changed: frozenset[str], kept: Map)
 
 ### `relay/loop.py`: `_research` chooses reuse, refresh or full research
 
-All of this runs under `state.research_lock(sid)`, in `where = _section_cwd(cwd, sid)`:
+All of this runs under `state.research_lock(sid)`, in `where = _section_cwd(cwd, sid)`. Main-to-worktree reuse applies to that selected research cwd. Leads retain their existing launch cwd (`relay/loop.py:151-164`).
 
-1. `saved = research.load(...)`. When it is present and `research.changed(saved, where)` is empty, report `progress.map_reused` and return `saved`. Nothing runs. This is the path across RETIRED and across main-to-worktree when no mapped file changed.
+1. Immediately after acquiring the lock, record `since_ns = time.time_ns()`, before `saved = research.load(...)` and any freshness checks. When `saved` is present and `research.changed(saved, where)` is empty, report `progress.map_reused` and return `saved`. Nothing runs. This is the path across RETIRED and across main-to-worktree when no mapped file changed.
 2. `kept = research.split(saved, changed)` when `saved` is present, else None.
 3. `commit = git.head(where)`. On None, return no map, as today.
-4. Record `since_ns = time.time_ns()`, then run the researcher (ledger kind `"research"`):
+4. Run the researcher (ledger kind `"research"`):
    - when `kept` is present: `progress.research_refreshing`, `refresh_brief`, then `research.parse_refresh`;
    - otherwise: `progress.research_started`, `research_brief`, then `research.parse_map`.
-5. On a map, `research.save(research.stamp(m, where, since_ns), state.map_path(sid))` and return it. `set_research_session`, `research_finished`, the failure ping and the budget flag stay as they are today.
+5. On a map, `research.save(research.stamp(m, where, since_ns), state.map_path(sid))` and return it. Both research paths use the same timestamp recorded at lock acquisition; it is never reset before researcher launch. A retained file modified after its freshness check and before the researcher starts receives `UNKNOWN` rather than a newly trusted digest, so the next pass refreshes it. `set_research_session`, `research_finished`, the failure ping and the budget flag stay as they are today.
+
+Both research paths retain `run_failed(result)` before parsing (`relay/loop.py:340-341`). Its validity rules remain unchanged (`relay/runner.py:39-46`): a successful run is not killed, exits zero, has no backend error and has observed nonzero token usage. Replay fixtures for successful research include nonzero assistant token usage; result usage alone does not establish success (`relay/stream.py:43-65`).
 
 `_research` no longer calls `state.drop_map`. The saved file is replaced only by a good map, through `write_atomic`. A failed, malformed or over-cap refresh leaves that lead without a map, as a failed research does today, and the next pass checks the saved map again and refreshes again. A stale file on disk is never used, because `changed` runs on every load. Done sections and recuts keep their `drop_map` calls (`relay/state.py:136`, `relay/loop.py:799`).
 
@@ -113,7 +124,7 @@ All of this runs under `state.research_lock(sid)`, in `where = _section_cwd(cwd,
 | Map freshness and file digests | `research.digest`, `research.stamp`, `research.changed` | Hashing mapped files elsewhere, or deciding freshness with git. `state.py:74`'s hash keys the state directory and is a separate concern. |
 | Map file on disk | `research.save` / `research.load`, path from `State.map_path` | Reading or writing `maps/<sid>.map` anywhere else |
 | Git queries | `relay/git.py` | `runner.capture(["git", ...])` outside `git.py` |
-| Choosing reuse, refresh or full research, and the lock | `loop._research` | A second caller of the researcher for maps |
+| Choosing reuse, refresh or full research, the lock, and the freshness interval | `loop._research` | A second caller of the researcher for maps, or a second timestamp starting the freshness interval |
 | Researcher brief text and the MAP form | `relay/prompts.py`, one shared private form helper | Writing the MAP form text twice |
 | Research progress lines | `relay/progress.py` | `print` of research lines in `loop.py` |
 | Map test fixtures | `tests/fixtures/research-map.txt`, plus the refresh fixtures that the loop tests add under `tests/fixtures/` | Map text written inline in more than one test module |
@@ -126,6 +137,6 @@ All of this runs under `state.research_lock(sid)`, in `where = _section_cwd(cwd,
 3. **map core** (`builder`): `relay/research.py`, and `relay/git.py`, which drops `changed`.
 4. **red: refresh brief and progress line** (`test-writer`): `tests/test_prompts.py`, `tests/test_progress.py`.
 5. **refresh brief and progress line** (`builder`): `relay/prompts.py`, `relay/progress.py`.
-6. **red: loop reuse and refresh** (`test-writer`): `tests/test_loop.py`, plus fixtures under `tests/fixtures/`. A fresh lead after RETIRED reuses the map when no mapped file changed. A map drawn in the main checkout is reused in the new `lead/<sid>` worktree when the mapped files match. A changed mapped file, including an uncommitted or untracked one, gets a refresh run that covers only the changed files, and the lead gets the merged map. A failed or invalid refresh leaves the lead without a map and keeps the saved file for the next pass. `tests/test_loop.py:3895-3933` is rewritten to expect a refresh.
-7. **loop** (`builder`): `relay/loop.py` `_research`.
+6. **red: loop reuse and refresh** (`test-writer`): `tests/test_loop.py`, plus fixtures under `tests/fixtures/`. A fresh lead after RETIRED reuses the map when no mapped file changed. A map drawn in the main checkout is reused when `_section_cwd` selects the new `lead/<sid>` worktree and the mapped files match; lead launch cwd stays unchanged. A changed mapped file, including an uncommitted or untracked one, gets a refresh run that covers only the changed files, and the lead gets the merged map. A retained file modified after its freshness check and before the researcher starts receives `UNKNOWN` rather than a newly trusted digest, so the next pass refreshes it. A failed or invalid refresh leaves the lead without a map and keeps the saved file for the next pass. Successful research replay fixtures satisfy `run_failed`, including observed nonzero assistant token usage. `tests/test_loop.py:3895-3933` is rewritten to expect a refresh.
+7. **loop** (`builder`): `relay/loop.py` `_research`, including the single timestamp immediately after lock acquisition and before loading or checking the saved map, used by stamping after either research path.
 8. **full suite** (`lead`, writes nothing): `uv run pytest` over the whole suite, with the existing tests and the new ones all passing.

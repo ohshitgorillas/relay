@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-refresh-1"}
+{"type":"assistant","message":{"id":"msg-refresh-1","type":"message","role":"assistant","content":[{"type":"text","text":"Refreshed the changed paths."}],"usage":{"input_tokens":1,"output_tokens":1}},"session_id":"sess-refresh-1"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"result":"MAP\nrelay/git.py:18-22 | head reads the current checkout HEAD after the lead edit\nLINKS\nrelay/loop.py:101 -> relay/git.py:18 | _research reads HEAD for the refresh\nEND MAP","session_id":"sess-refresh-1","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}

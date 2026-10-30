@@ -1,0 +1,7 @@
+MAP
+relay/research.py:30-41 | parse_map reads the last MAP block of a result
+relay/research.py:50 | save writes the map by temp file and os.replace
+relay/git.py:18-22 | head reads the current checkout HEAD after the lead edit
+LINKS
+relay/loop.py:101 -> relay/git.py:18 | _research reads HEAD for the refresh
+END MAP
