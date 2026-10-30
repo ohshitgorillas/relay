@@ -192,6 +192,18 @@ def check_feedback(result: CheckResult) -> str:
     return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
 
 
+ENTRY_RULE = (
+    "Each entry names what lies at its lines (a symbol, table, section or call) in nouns. "
+    "An entry never says what the code proves, lacks, allows, or justifies, and never tells "
+    "a reader what to open, skip or search.\n"
+)
+
+READ_RULE = (
+    "Read the section's files yourself, and send a reader only for a file too large to read "
+    "whole within the map caps.\n"
+)
+
+
 def _map_form(flag: Path, max_lines: int, max_chars: int, *, additions: bool = False) -> str:
     """The shared final-map form, caps and researcher flag rule."""
     allowance = (
@@ -208,6 +220,7 @@ def _map_form(flag: Path, max_lines: int, max_chars: int, *, additions: bool = F
         f"{LINKS}\n"
         "<path>:<line> -> <path>:<line> | <how>\n"
         f"{MAP_CLOSE}\n\n"
+        f"{ENTRY_RULE}"
         f"When the file {flag} exists, send no more readers and return the map you have.\n"
     )
 
@@ -218,6 +231,7 @@ def research_brief(queue: Path, section: Section, flag: Path, cfg: Config) -> st
         f"research section {section.id} of the queue at {queue}.\n\n"
         f"Section body:\n{section.body}\n"
         "Map the code this section's steps touch. "
+        + READ_RULE
         + _map_form(flag, cfg.map_max_lines, cfg.map_max_chars)
     )
 
@@ -238,6 +252,7 @@ def refresh_brief(
         "The following caps count only the increase in the merged map over the kept map. "
         "Repeated MAP and END MAP framing, and a LINKS marker already in the kept map, "
         "do not consume this allowance. "
+        + READ_RULE
         + _map_form(
             flag,
             cfg.map_max_lines - len(kept.body.splitlines()),

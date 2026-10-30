@@ -237,13 +237,8 @@ def load(path: Path, sid: str) -> Map | None:
 
 
 def block(m: Map) -> str:
-    """The text every brief in the section carries verbatim."""
-    rule = (
-        "Start from this map of the code, which Relay's researcher drew. Open a file it names "
-        "only at the lines it gives. Needing more, say what in your report and do not search "
-        "for it: the lead asks the researcher."
-    )
-    return f"{rule}\n\n{_header(m.sid, m.commit)}\n{m.body}\n"
+    """The map's header and body, the text every brief in the section carries verbatim."""
+    return f"{_header(m.sid, m.commit)}\n{m.body}\n"
 
 
 def parse_answer(result_text: str | None, cfg: Config) -> str | None:
