@@ -51,6 +51,9 @@ def _resume_pending(
     pending: Pending,
     drain: DrainSwitch,
 ) -> _Stop | None:
+    if drain.requested:
+        state.set_pending(section.id, pending)
+        return _drained()
     current = state.section(section.id)
     if _over_cap(cfg, queue, state, ledger, section):
         return None
@@ -67,17 +70,24 @@ def _resume_pending(
     design = Path(pending.design)
     if pending.kind == "design-retry":
         assert pending.brief is not None
-        result, report = _architect_run(
-            cfg, state, ledger, since, retire_flag, section, design, pending.brief, pending.problem
+        ran = _architect_run(
+            cfg, state, ledger, since, retire_flag, section, design, pending.brief, pending.problem, drain
         )
+        if ran is None:
+            state.set_pending(section.id, pending)
+            return _drained()
+        result, report = ran
         return _design_outcome(
             queue, cfg, state, ledger, since, cwd, retire_flag, section, design,
             pending.problem, lead_log, result, report, drain,
         )
     failed = _recut(
         queue, cfg, state, ledger, since, cwd, retire_flag, section,
-        pending.problem, lead_log, design, 2,
+        pending.problem, lead_log, design, 2, drain=drain,
     )
+    if isinstance(failed, tuple):
+        state.set_pending(section.id, pending)
+        return failed
     if failed:
         _park(cfg, queue, state, section.id, ladder.failed_text(section.id, design, failed))
     return None
@@ -186,12 +196,12 @@ def _run_section(
     if pending is not None:
         return _resume_pending(queue, cfg, state, ledger, since, cwd, retire_flag, section, pending, drain)
     if current.design_open is not None:
-        answer = state.take_answer(sid)
+        answer = current.answer
         if answer is not None:
             return _design_answer(
                 queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer, drain
             )
-    m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
+    m, spent = _research(cfg, state, ledger, since, cwd, queue, section, drain)
     if spent:
         return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
     if drain.requested:
@@ -199,9 +209,10 @@ def _run_section(
     resume = current.last_session or state.last_session_any
     previous_backend = current.last_backend if current.last_session else state.last_backend_any
     backend = backends.get_backend(previous_backend)
-    answer = state.take_answer(sid)
-    feedback = state.take_check_feedback(sid)
-    guidance = state.take_guidance(sid)
+    current = state.section(sid)
+    answer = current.answer
+    feedback = current.check_feedback
+    guidance = current.guidance
     prompt = lead_prompt(
         queue,
         section,
@@ -217,6 +228,11 @@ def _run_section(
     )
 
     retire_flag.unlink(missing_ok=True)
+    if drain.requested:
+        return _drained()
+    state.take_answer(sid)
+    state.take_check_feedback(sid)
+    state.take_guidance(sid)
     progress.lead_started(sid, resume, answer is not None)
     result, watch = _run(
         cfg,
@@ -383,6 +399,7 @@ def _research(
     cwd: Path,
     queue: Path,
     section: Section,
+    drain: DrainSwitch,
 ) -> tuple[research.Map | None, bool]:
     """The section's map and whether the budget ran out in research; None on no map.
 
@@ -391,6 +408,8 @@ def _research(
     sid = section.id
     where = _section_cwd(cwd, sid)
     with state.research_lock(sid):
+        if drain.requested:
+            return None, False
         since_ns = time.time_ns()
         saved = research.load(state.map_path(sid), sid)
         changed = research.changed(saved, where) if saved is not None else frozenset()
@@ -409,6 +428,8 @@ def _research(
         else:
             progress.research_started(sid, where)
             text = research_brief(queue, section, flag, cfg)
+        if drain.requested:
+            return None, False
         result, watch = _run(
             cfg,
             state,
@@ -614,7 +635,15 @@ def _climb(
     step = ladder.climb(kind, state.section(sid), design, sid)
     problem = ladder.split_reason(text)[0]
     if step.rung == 1:
-        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log):
+        failed = _recut(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, drain=drain
+        )
+        if isinstance(failed, tuple):
+            state.set_pending(sid, Pending(
+                kind="climb", lead_log=str(lead_log), problem=problem, status=kind, text=text,
+            ))
+            return failed
+        if failed:
             second, count = _fail(state, sid)
             progress.failed(sid, count)
             if second:
@@ -623,9 +652,14 @@ def _climb(
         _park(cfg, queue, state, sid, step.why)
     else:
         # ladder.climb gives rung 2 only with a design in hand.
-        return _design_change(
+        stop = _design_change(
             queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log, drain
         )
+        if stop == _drained() and state.section(sid).pending is None:
+            state.set_pending(sid, Pending(
+                kind="climb", lead_log=str(lead_log), problem=problem, status=kind, text=text,
+            ))
+        return stop
     return None
 
 
@@ -699,7 +733,7 @@ def _design_answer(
     problem = f"the owner ruled on the open design decisions: {answer}"
     return _architect(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
-        Path(current.last_log), drain,
+        Path(current.last_log), drain, on_dispatch=lambda: state.take_answer(sid),
     )
 
 
@@ -729,6 +763,7 @@ def _architect(
     problem: str,
     lead_log: Path,
     drain: DrainSwitch,
+    on_dispatch: Callable[[], object] | None = None,
 ) -> _Stop | None:
     """The architect run on `design` with `brief`, run once more when it failed or filed no report
     (the reason and its final message added to the brief) unless the budget or the section's cap is
@@ -737,7 +772,12 @@ def _architect(
     current = state.section(sid)
     if current.design_failures >= DESIGN_FAILURE_LIMIT:
         return _design_failed_stop(sid, current.design_failures, current.design_failure)
-    result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, brief, problem)
+    ran = _architect_run(
+        cfg, state, ledger, since, retire_flag, section, design, brief, problem, drain, on_dispatch
+    )
+    if ran is None:
+        return _drained()
+    result, report = ran
     failed = run_failed(result)
     if failed or report is None:
         if _over_cap(cfg, queue, state, ledger, section):
@@ -747,13 +787,16 @@ def _architect(
             what = f"it failed: {error}" if failed else "it filed no report"
             progress.design_retrying(sid, what)
             retry = design_retry_brief(brief, ladder.said(result.stream.result_text), error)
-            if drain.requested:
+            ran = _architect_run(
+                cfg, state, ledger, since, retire_flag, section, design, retry, problem, drain
+            )
+            if ran is None:
                 state.set_pending(sid, Pending(
                     kind="design-retry", lead_log=str(lead_log), problem=problem,
                     design=str(design), brief=retry,
                 ))
                 return _drained()
-            result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
+            result, report = ran
     return _design_outcome(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report, drain
     )
@@ -769,12 +812,19 @@ def _architect_run(
     design: Path,
     brief: str,
     problem: str,
-) -> tuple[RunResult, ladder.DesignReport | None]:
+    drain: DrainSwitch,
+    on_dispatch: Callable[[], object] | None = None,
+) -> tuple[RunResult, ladder.DesignReport | None] | None:
     """One architect run on `design` with `brief`: its result and its parsed report."""
+    where = _git_top(design.parent)
+    if drain.requested:
+        return None
+    if on_dispatch is not None:
+        on_dispatch()
     progress.design_started(section.id, design, section.steps, problem)
     result, _ = _run(
         cfg, state, ledger, since, "design", section.id, cfg.design_command, brief,
-        _git_top(design.parent), retire_flag, None, 2,
+        where, retire_flag, None, 2,
     )
     report = ladder.parse_report(result.stream.result_text)
     progress.design_finished(section.id, result, report)
@@ -841,8 +891,13 @@ def _design_outcome(
         ))
         return _drained()
     failed = _recut(
-        queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2, drain=drain
     )
+    if isinstance(failed, tuple):
+        state.set_pending(sid, Pending(
+            kind="design-recut", lead_log=str(lead_log), problem=problem, design=str(design),
+        ))
+        return failed
     if failed:
         _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
 
@@ -860,12 +915,16 @@ def _recut(
     lead_log: Path,
     design: Path | None = None,
     rung: Literal[1, 2] = 1,
-) -> str | None:
+    *,
+    drain: DrainSwitch,
+) -> str | _Stop | None:
     """Run a transactional recut; why it failed, else None, with failure policy owned by the caller."""
     brief = recut_brief(queue, section, reason, lead_log, design)
     original_queue = queue.read_bytes()
     original_mode = stat.S_IMODE(queue.stat().st_mode)
     before = parse_queue(queue)
+    if drain.requested:
+        return _drained()
     progress.recut_started(section.id, reason)
     changed = False
     after = before

@@ -53,6 +53,37 @@ class DrainRealChild:
             os.kill(self.pid, 0)
 
 
+class DrainResearchLock:
+    """Hold research's real lock until a drain is observed during acquisition."""
+
+    def __init__(self, state: State, sid: str) -> None:
+        self.state = state
+        self.lock = state.research_lock
+        self.sid = sid
+        self.held = threading.Event()
+        self.waiting = threading.Event()
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._body)
+        self.thread.start()
+        assert self.held.wait(15.0), "research lock holder did not acquire its lock"
+
+    def _body(self) -> None:
+        try:
+            with self.lock(self.sid):
+                self.held.set()
+                assert self.waiting.wait(15.0), "run did not reach research lock acquisition"
+                os.kill(os.getpid(), signal.SIGTERM)
+                until(lambda: (live := self.state.live_run()) is not None and live.draining)
+        except BaseException as exc:
+            self.error = exc
+
+    def finish(self) -> None:
+        self.thread.join(16.0)
+        assert not self.thread.is_alive(), "research lock holder did not finish"
+        if self.error is not None:
+            raise self.error
+
+
 def request_drain() -> None:
     """Request a drain only after the run has safely armed its SIGTERM handler."""
     assert callable(signal.getsignal(signal.SIGTERM)), "run did not arm SIGTERM"

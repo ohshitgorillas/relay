@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -6507,3 +6508,190 @@ def test_drain_preserves_a_running_real_child_until_its_result_is_recorded(
     assert state.section("s1").last_report == "Step committed.\nDONE"
     assert state.section("s2").last_session is None
     assert len(_entries(queue, cfg, "lead")) == 1
+
+
+@pytest.mark.parametrize("refresh", [False, True], ids=["initial", "refresh"])
+@pytest.mark.parametrize("preparation", ["lock", "brief"])
+def test_drain_during_research_preparation_preserves_map_and_session(
+    refresh: bool, preparation: str, cfg: Config, tmp_path: Path,
+    git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: acquisition or brief preparation authorizes research despite a
+    # drain received during preparation, or held refresh replaces its saved map.
+    import relay.loop
+    from harness import DrainResearchLock
+
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    state = State.open(queue, cfg)
+    if refresh:
+        state.set_research_session("s1", "saved-research-session")
+        mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
+        assert mapped is not None
+        save(stamp(mapped, git_repo.worktrees["s1"], time.time_ns()), state.map_path("s1"))
+        (git_repo.worktrees["s1"] / "relay/git.py").write_text("# needs refresh\n")
+    before_map = state.map_path("s1").read_bytes() if refresh else None
+    before_session = state.section("s1").research_session
+    prepared: list[bool] = []
+    holder = DrainResearchLock(state, "s1") if preparation == "lock" else None
+    with monkeypatch.context() as patch:
+        if preparation == "lock":
+            original = State.research_lock
+
+            @contextmanager
+            def acquired(self, sid):
+                holder.waiting.set()
+                with original(self, sid):
+                    prepared.append(True)
+                    yield
+
+            patch.setattr(State, "research_lock", acquired)
+        else:
+            name = "refresh_brief" if refresh else "research_brief"
+            original = getattr(relay.loop, name)
+
+            def built(*args, **kwargs):
+                result = original(*args, **kwargs)
+                _request_drain()
+                prepared.append(True)
+                return result
+
+            patch.setattr(relay.loop, name, built)
+        try:
+            code = run(queue, cfg)
+        finally:
+            if holder is not None:
+                holder.finish()
+    assert prepared == [True], "research preparation hook was not reached exactly once"
+    assert _research_runs(tmp_path) == [], "research launched after drain during preparation"
+    assert _runs(tmp_path, "lead") == []
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").research_session == before_session
+    assert (state.map_path("s1").read_bytes() if state.map_path("s1").exists() else None) == before_map
+
+
+@pytest.mark.parametrize(
+    "dispatch", ["lead", "design-answer", "climb", "design-retry", "design-recut"]
+)
+def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
+    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: blocking brief preparation is treated as the late-signal window,
+    # or a held dispatch loses its answer, guidance or consumed pending record.
+    import relay.loop
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    state = State.open(queue, cfg)
+    answer = "Preserve the owner's answer through preparation."
+    guidance = "Preserve the lead's guidance through preparation."
+    state.set_answer("s1", answer)
+    state.set_guidance("s1", guidance)
+    feedback = "Preserve check feedback through preparation."
+    state.record_check_failure("s1", feedback)
+    pending = None
+    if dispatch == "design-answer":
+        state.park("s1", "Which choice?", design=(DESIGN_PATH, (1,)))
+        state.set_answer("s1", answer)
+        state.set_last_log("s1", _status_lead(tmp_path, "earlier-lead", f"DESIGN: {PROBLEM}"))
+    elif dispatch != "lead":
+        pending = relay.loop.Pending(
+            kind=dispatch, lead_log="held-lead.log", problem=PROBLEM,
+            status="RECUT" if dispatch == "climb" else None,
+            text=PROBLEM if dispatch == "climb" else None,
+            design=str((tmp_path / DESIGN_PATH).resolve()) if dispatch != "climb" else None,
+            brief="Retain this exact retry brief." if dispatch == "design-retry" else None,
+        )
+        state.set_pending("s1", pending)
+    name = {
+        "lead": "lead_prompt", "design-answer": "design_answer_brief",
+        "climb": "recut_brief", "design-retry": "design_brief",
+        "design-recut": "recut_brief",
+    }[dispatch]
+    original = getattr(relay.loop, name)
+    prepared: list[bool] = []
+
+    def built(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not prepared:
+            _request_drain()
+            prepared.append(True)
+        return result
+
+    with monkeypatch.context() as patch:
+        if dispatch == "design-retry":
+            take_pending = State.take_pending
+
+            def consumed(self, sid):
+                result = take_pending(self, sid)
+                if result is not None and not prepared:
+                    _request_drain()
+                    prepared.append(True)
+                return result
+
+            patch.setattr(State, "take_pending", consumed)
+        else:
+            patch.setattr(relay.loop, name, built)
+        code = run(queue, cfg)
+    assert prepared == [True], "dispatch preparation hook was not reached exactly once"
+    assert _runs(tmp_path, "lead") == [], "lead launched after drain during preparation"
+    assert _runs(tmp_path, "design") == [], "architect launched after drain during preparation"
+    assert _runs(tmp_path, "recut") == [], "recut launched after drain during preparation"
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").failures == 0
+    assert state.section("s1").design_failures == 0
+    if pending is not None:
+        assert state.section("s1").pending == dataclasses.asdict(pending)
+    else:
+        assert state.take_answer("s1") == answer
+        assert state.take_guidance("s1") == guidance
+        assert state.take_check_feedback("s1") == feedback
+
+
+@pytest.mark.parametrize("dispatch", ["design", "climb", "design-recut"])
+def test_drain_during_new_ladder_preparation_saves_the_followup(
+    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: new ladder work launches after blocking brief preparation, or
+    # holding it back discards the follow-up of the already recorded child.
+    import relay.loop
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    status = "RECUT" if dispatch == "climb" else "DESIGN"
+    cfg = _sequenced(cfg, tmp_path, [
+        _step(str(_status_lead(tmp_path, "finished-lead", f"{status}: {PROBLEM}")))
+    ])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    name = "design_brief" if dispatch == "design" else "recut_brief"
+    original = getattr(relay.loop, name)
+    prepared: list[bool] = []
+
+    def built(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not prepared:
+            _request_drain()
+            prepared.append(True)
+        return result
+
+    monkeypatch.setattr(relay.loop, name, built)
+    code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    assert prepared == [True], "new ladder preparation hook was not reached exactly once"
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert len(_runs(tmp_path, "design")) == int(dispatch == "design-recut"), "architect launched after drain during preparation"
+    assert _runs(tmp_path, "recut") == [], "recut launched after drain during preparation"
+    assert code == ExitCode.DRAINED
+    section = state.section("s1")
+    assert section.last_session == "finished-lead"
+    assert section.pending is not None
+    assert section.pending["kind"] == ("design-recut" if dispatch == "design-recut" else "climb")
+    assert section.failures == 0
+    assert section.design_failures == 0
