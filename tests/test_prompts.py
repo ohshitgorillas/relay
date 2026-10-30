@@ -1087,3 +1087,115 @@ def test_lead_prompt_renders_the_assignment_without_selecting_names(
     )
     assert calls == []
     assert f"BRANCH {binding.branch} {binding.path}" in prompt
+
+
+# Run overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
+# `relay/prompts.py` ENTRY_RULE, READ_RULE and lead_prompt; Order 4).
+
+
+def _flat_lower(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+def _run_overhead_brief(cfg: Config, which: str) -> str:
+    if which == "research":
+        return research_brief(QUEUE, _section(), RESEARCH_FLAG, cfg)
+    return refresh_brief(
+        QUEUE, _section(), _kept_map(), ("relay/prompts.py",), RESEARCH_FLAG, cfg
+    )
+
+
+# ENTRY_RULE, appended by _map_form: each entry names what lies at its lines (a symbol, table,
+# section or call) in nouns. An entry never says what the code proves, lacks, allows or
+# justifies, and never tells a reader what to open, skip or search.
+
+
+@pytest.mark.parametrize("which", ["research", "refresh"])
+def test_map_form_says_an_entry_never_says_what_the_code_proves_lacks_allows_or_justifies(
+    fake_cfg: Config, which: str
+) -> None:
+    # Breaks when the brief's map form leaves out any clause of the entry rule: that an entry
+    # names what lies at its lines in nouns, any of the four verbs it never says the code does,
+    # or that it never tells a reader what to open, skip or search.
+    brief = _flat_lower(_run_overhead_brief(fake_cfg, which))
+    assert re.search(
+        r"an entry never says what the code proves, lacks, allows,? or justifies", brief
+    )
+    assert re.search(
+        r"each entry names what lies at its lines \(a symbol, table, section,? or call\) "
+        r"in nouns",
+        brief,
+    )
+    assert re.search(
+        r"an entry never says what the code proves, lacks, allows,? or justifies,? and never "
+        r"tells a reader what to open, skip,? or search",
+        brief,
+    )
+
+
+# READ_RULE, in research_brief and refresh_brief: read the section's files yourself, and send a
+# reader only for a file too large to read whole within the map caps.
+
+
+@pytest.mark.parametrize("which", ["research", "refresh"])
+def test_brief_says_read_the_sections_files_yourself_and_send_a_reader_only_for_a_large_file(
+    fake_cfg: Config, which: str
+) -> None:
+    # Breaks when the brief leaves the choice to send readers to the researcher, or drops the
+    # limit that a reader goes only for a file too large to read whole within the map caps.
+    brief = _flat_lower(_run_overhead_brief(fake_cfg, which))
+    assert "read the section's files yourself" in brief
+    assert "send a reader only for a file too large to read whole within the map caps" in brief
+
+
+# lead_prompt: the map paragraph keeps its paste-verbatim and relay-ask lines and holds only
+# block()'s text.
+
+
+def test_lead_prompt_map_paragraph_holds_only_the_rule_route_and_block_text() -> None:
+    # Breaks when the map paragraph carries an instruction line beyond the paste-verbatim and
+    # relay-ask lines and block()'s header and body, or drops either of those two lines.
+    kept = _kept_map()
+    expected_block = f"map {kept.sid} at {kept.commit}\n{kept.body}\n"
+    with_map = _with_map(block(kept))
+    without = set(_with_map(None).splitlines())
+    assert MAP_RULE in with_map
+    assert MAP_RULING_ONLY in with_map
+    assert MAP_ROUTE in with_map
+    assert expected_block in with_map
+    block_lines = set(expected_block.splitlines())
+    added = [line for line in with_map.splitlines() if line not in without]
+    for line in added:
+        assert (
+            not line.strip()
+            or line in block_lines
+            or MAP_RULE in line
+            or MAP_RULING_ONLY in line
+            or MAP_ROUTE in line
+        ), line
+    # The paragraph runs from the start of the rule's line through block()'s text, and the
+    # prompt with it taken out is the no-map prompt, so nothing else rides along with the map.
+    start = with_map.rfind("\n", 0, with_map.find(MAP_RULE)) + 1
+    block_at = with_map.find(expected_block, start)
+    assert block_at != -1
+    paragraph = with_map[start : block_at + len(expected_block)]
+    rest = with_map.replace(paragraph, "", 1)
+    assert [line for line in rest.splitlines() if line.strip()] == [
+        line for line in _with_map(None).splitlines() if line.strip()
+    ]
+    # Before the block, the paragraph holds the route sentence once and otherwise only the
+    # paste-verbatim rule's lines; no sentence follows the rule's last one, and nothing in them
+    # tells an agent what to open, skip, search or read.
+    lead_in = paragraph[: len(paragraph) - len(expected_block)]
+    assert lead_in.count(MAP_ROUTE) == 1
+    rule_text = lead_in.replace(MAP_ROUTE, "\n")
+    for line in rule_text.splitlines():
+        if line.strip():
+            assert MAP_RULE in line or MAP_RULING_ONLY in line, line
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", rule_text.strip()) if s.strip()]
+    last_rule = max(
+        i for i, s in enumerate(sentences) if MAP_RULE in s or MAP_RULING_ONLY in s
+    )
+    assert sentences[last_rule + 1 :] == []
+    outside = rule_text.replace(MAP_RULE, " ").replace(MAP_RULING_ONLY, " ")
+    assert not re.search(r"\b(?:open|skip|search|read|grep)(?:s|es|ing)?\b", outside, re.I)
