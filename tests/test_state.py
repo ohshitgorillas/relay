@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Callable
@@ -1064,3 +1066,137 @@ def test_a_record_saved_before_last_report_existed_loads_with_it_none(queue: Pat
     assert section.last_session == "session-a"
     assert section.failures == 1
     assert getattr(section, "last_report", "missing") is None
+
+
+# Queue ownership design, Order 2: shared identity and durable section bindings.
+
+
+def test_queue_id_is_the_full_hash_of_the_resolved_queue_path(
+    queue: Path, other_queue: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: identity is truncated, basename-only, or computed before resolving aliases.
+    expected = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    alias = tmp_path / "queue-alias.md"
+    alias.symlink_to(queue)
+    monkeypatch.chdir(queue.parent)
+    assert state_module.queue_id(queue) == expected
+    assert state_module.queue_id(alias) == expected
+    assert state_module.queue_id(Path(queue.name)) == expected
+    assert state_module.queue_id(other_queue) != expected
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_queue_key_preserves_the_existing_state_directory_name(
+    tmp_path: Path, fake_cfg: Config, nested: bool
+) -> None:
+    # Breaks when: extracting identity changes sanitization, suffix length, or the state path.
+    directory = tmp_path / ("long-directory-" * 8 if nested else "short")
+    directory.mkdir()
+    queue = directory / "queue..with spaces λ.md"
+    queue.write_text("section s1\n")
+    absolute = str(queue.resolve())
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "-", absolute).strip("-")
+    expected = f"{readable[-80:]}-{hashlib.sha256(absolute.encode()).hexdigest()[:16]}"
+    legacy = fake_cfg.state_root / expected
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text(
+        '{"sections": {"s1": {"status": "parked", "failures": 2, '
+        '"question": "keep this", "answer": null, "last_session": "old-lead"}}, '
+        '"last_any": "old-lead"}'
+    )
+    assert state_module.queue_key(queue) == expected
+    reopened = State.open(queue, fake_cfg)
+    assert _dir(reopened) == legacy
+    assert reopened.section("s1").last_session == "old-lead"
+    assert reopened.section("s1").question == "keep this"
+
+
+def test_worktree_binding_is_absolute_durable_and_scoped_to_the_queue_section(
+    queue: Path, other_queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: binding stores a relative path, loses section state, or reaches another owner.
+    state = State.open(queue, fake_cfg)
+    state.record_failure("s1")
+    state.set_last_session("s1", "old-lead")
+    monkeypatch.chdir(queue.parent)
+    relative = Path("worktrees") / "queue-s1"
+    state.bind_worktree("s1", "lead/legacy-s1", relative)
+    reopened = State.open(queue, fake_cfg)
+    section = reopened.section("s1")
+    assert section.worktree_branch == "lead/legacy-s1"
+    assert section.worktree_path == str(relative.resolve())
+    assert (section.failures, section.last_session) == (1, "old-lead")
+    for untouched in (reopened.section("s2"), State.open(other_queue, fake_cfg).section("s1")):
+        assert (untouched.worktree_branch, untouched.worktree_path) == (None, None)
+
+
+def test_binding_replaces_branch_and_path_in_one_atomic_publication(
+    queue: Path, fake_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: new branch and old path can be observed in separate state publications.
+    state = State.open(queue, fake_cfg)
+    state.bind_worktree("s1", "lead/old", tmp_path / "old")
+    state_path = _dir(state) / "state.json"
+    publications: list[dict] = []
+    real_replace = os.replace
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == state_path:
+            publications.append(json.loads(Path(os.fsdecode(src)).read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    state.bind_worktree("s1", "lead/new", tmp_path / "new")
+    assert publications
+    for publication in publications:
+        published = publication["sections"]["s1"]
+        assert (published["worktree_branch"], published["worktree_path"]) == (
+            "lead/new", str((tmp_path / "new").resolve())
+        )
+    reopened = State.open(queue, fake_cfg).section("s1")
+    assert (reopened.worktree_branch, reopened.worktree_path) == (
+        "lead/new", str((tmp_path / "new").resolve())
+    )
+
+
+@pytest.mark.parametrize("report", ["More work remains.\nRETIRED", None])
+def test_reports_without_branch_and_completion_keep_the_saved_binding(
+    queue: Path, fake_cfg: Config, tmp_path: Path, report: str | None
+) -> None:
+    # Breaks when: a report without BRANCH or marking done forgets the blocker worktree.
+    state = State.open(queue, fake_cfg)
+    tree = tmp_path / "existing-legacy-tree"
+    state.bind_worktree("s1", "custom-existing-branch", tree)
+    state.set_last_report("s1", report)
+    after_report = State.open(queue, fake_cfg).section("s1")
+    assert (after_report.worktree_branch, after_report.worktree_path) == (
+        "custom-existing-branch", str(tree.resolve())
+    )
+    state.mark_done("s1")
+    completed = State.open(queue, fake_cfg).section("s1")
+    assert completed.status == "done"
+    assert (completed.worktree_branch, completed.worktree_path) == (
+        "custom-existing-branch", str(tree.resolve())
+    )
+
+
+def test_legacy_record_defaults_bindings_and_can_gain_one_without_losing_its_state(
+    queue: Path, fake_cfg: Config, tmp_path: Path
+) -> None:
+    # Breaks when: old records require binding keys or migration erases the saved run state.
+    state = State.open(queue, fake_cfg)
+    (_dir(state) / "state.json").write_text(
+        '{"sections": {"s1": {"status": "parked", "failures": 2, '
+        '"question": "old question", "answer": null, "last_session": "legacy-lead"}}, '
+        '"last_any": "legacy-lead"}'
+    )
+    old = State.open(queue, fake_cfg).section("s1")
+    assert (old.worktree_branch, old.worktree_path) == (None, None)
+    state.bind_worktree("s1", "lead/s1", tmp_path / "legacy")
+    migrated = State.open(queue, fake_cfg).section("s1")
+    assert (migrated.status, migrated.failures, migrated.question, migrated.last_session) == (
+        "parked", 2, "old question", "legacy-lead"
+    )
+    assert (migrated.worktree_branch, migrated.worktree_path) == (
+        "lead/s1", str((tmp_path / "legacy").resolve())
+    )

@@ -2,25 +2,67 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from relay import runner
+from relay.state import queue_id
 
 _TIMEOUT = 30.0
 
 
-def section_worktree(repo: Path, sid: str) -> Path | None:
-    """The worktree on branch refs/heads/lead/<sid>, or None when there is none or git fails."""
+@dataclass(frozen=True)
+class SectionWorktree:
+    branch: str
+    path: Path
+
+
+def section_branch(queue: Path, sid: str) -> str:
+    """The queue-qualified lead branch for this section."""
+    return f"lead/{queue_id(queue)}/{sid}"
+
+
+def section_path(repo: Path, queue: Path, sid: str) -> Path:
+    """The queue-qualified section worktree location beside the repository."""
+    return repo.parent / (repo.name + "-wt") / queue_id(queue) / sid
+
+
+def section_worktree(
+    repo: Path,
+    queue: Path,
+    sid: str,
+    recorded: SectionWorktree | None = None,
+) -> SectionWorktree | None:
+    """Validate a binding or discover this queue's qualified branch."""
+    wanted = section_branch(queue, sid)
+    if recorded is not None:
+        if re.match(r"lead/[0-9a-f]{64}/", recorded.branch) and recorded.branch != wanted:
+            return None
+        wanted = recorded.branch
     code, out = runner.capture(["git", "worktree", "list", "--porcelain"], repo, _TIMEOUT)
     if code != 0:
         return None
-    wanted = f"branch refs/heads/lead/{sid}"
-    path: Path | None = None
-    for line in out.splitlines():
-        if line.startswith("worktree "):
-            path = Path(line[len("worktree ") :])
-        elif line == wanted and path is not None:
-            return path
+    for record in out.split("\n\n"):
+        fields = record.splitlines()
+        paths = [
+            Path(line[len("worktree ") :])
+            for line in fields
+            if line.startswith("worktree ")
+        ]
+        branches = [
+            line[len("branch refs/heads/") :]
+            for line in fields
+            if line.startswith("branch refs/heads/")
+        ]
+        if len(paths) != 1 or branches != [wanted] or "detached" in fields:
+            continue
+        path = paths[0]
+        path = path.resolve()
+        if not path.is_dir():
+            continue
+        if recorded is None or path == recorded.path.resolve():
+            return SectionWorktree(wanted, path)
     return None
 
 

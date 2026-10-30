@@ -74,7 +74,7 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
             return ExitCode.BUDGET, "over budget", f"the {over} budget is spent"
 
         sections = parse_queue(queue)
-        _wake(sections, state, cwd)
+        _wake(sections, state, cwd, queue)
         parked = {s.id for s in sections if state.section(s.id).status == "parked"}
         waiting_ids = {s.id for s in sections if state.section(s.id).status == "waiting"}
         blocked = blocked_by(sections, parked | waiting_ids)
@@ -145,6 +145,8 @@ def _run_section(
         handoff_hint=backend.resume_hint(resume) if resume is not None else None,
         backend=cfg.backend,
         guidance=guidance,
+        worktree=_section_worktree(cwd, queue, sid, state)
+        or git.SectionWorktree(git.section_branch(queue, sid), git.section_path(cwd, queue, sid)),
     )
 
     retire_flag.unlink(missing_ok=True)
@@ -169,6 +171,7 @@ def _run_section(
         state.set_last_session(sid, session, cfg.backend)
         state.set_last_report(sid, result.stream.result_text or None)
 
+    _section_worktree(cwd, queue, sid, state)
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
     failed = run_failed(result, require_tokens=False) or status is None
@@ -198,24 +201,24 @@ def _run_section(
     return None
 
 
-def _landed(blocker: str, sections: list[Section], state: State, cwd: Path) -> bool:
+def _landed(blocker: str, sections: list[Section], state: State, cwd: Path, queue: Path) -> bool:
     """A blocker in the queue has landed when done and its section worktree is not dirty; one
     gone from the queue, when every section recut from it has landed (or none exists)."""
     found = next((s for s in sections if s.id == blocker), None)
     if found is None:
-        return all(_landed(s.id, sections, state, cwd) for s in sections if s.came_from == blocker)
+        return all(_landed(s.id, sections, state, cwd, queue) for s in sections if s.came_from == blocker)
     if state.section(blocker).status != "done" and found.open:
         return False
-    tree = git.section_worktree(cwd, blocker)
-    return tree is None or git.clean(tree) is not False
+    tree = _section_worktree(cwd, queue, blocker, state)
+    return tree is None or git.clean(tree.path) is not False
 
 
-def _wake(sections: list[Section], state: State, cwd: Path) -> None:
+def _wake(sections: list[Section], state: State, cwd: Path, queue: Path) -> None:
     """Reopen each waiting section whose blocker has landed. No ping."""
     for s in sections:
         record = state.section(s.id)
         blocker = record.waits_on
-        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd):
+        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd, queue):
             state.wake(s.id)
             progress.woken(s.id, blocker)
 
@@ -232,7 +235,7 @@ def _wait(
         reason = f"it waits on {blocker}, which is not in the queue"
     elif blocker == sid:
         reason = "it waits on itself"
-    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent)):
+    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent), queue=queue):
         reason = f"it waits on {blocker}, which has already landed"
     else:
         seen: set[str] = set()
@@ -258,9 +261,34 @@ def _wait(
     progress.section_waiting(sid, blocker)
 
 
-def _section_cwd(cwd: Path, sid: str) -> Path:
+def _section_worktree(
+    cwd: Path, queue: Path, sid: str, state: State,
+) -> git.SectionWorktree | None:
+    """Resolve and persist this queue section's validated worktree."""
+    current = state.section(sid)
+    recorded = None
+    if current.worktree_branch is not None and current.worktree_path is not None:
+        recorded = git.SectionWorktree(current.worktree_branch, Path(current.worktree_path))
+    else:
+        report = ladder.lead_branch(current.last_report)
+        if report is not None:
+            recorded = git.SectionWorktree(*report)
+    found = git.section_worktree(cwd, queue, sid, recorded)
+    if found is None and recorded is not None:
+        found = git.section_worktree(cwd, queue, sid)
+    if found is not None and (
+        current.worktree_branch != found.branch or current.worktree_path != str(found.path)
+    ):
+        state.bind_worktree(sid, found.branch, found.path)
+    return found
+
+
+def _section_cwd(
+    cwd: Path, queue: Path, sid: str, state: State,
+) -> Path:
     """Where a section's check and research run: its worktree, else `cwd`."""
-    return git.section_worktree(cwd, sid) or cwd
+    tree = _section_worktree(cwd, queue, sid, state)
+    return tree.path if tree is not None else cwd
 
 
 def _run(
@@ -312,10 +340,13 @@ def _research(
     Holds the section's research lock, so a `relay ask` never meets a map half-refreshed.
     """
     sid = section.id
-    where = _section_cwd(cwd, sid)
+    where = _section_cwd(cwd, queue, sid, state)
     with state.research_lock(sid):
         since_ns = time.time_ns()
         saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.owned(saved, queue):
+            state.drop_map(sid)
+            saved = None
         changed = research.changed(saved, where) if saved is not None else frozenset()
         if saved is not None and not changed:
             progress.map_reused(sid, saved)
@@ -353,7 +384,7 @@ def _research(
             else:
                 m = research.parse_map(sid, commit, result.stream.result_text, cfg)
         if m is not None:
-            m = research.stamp(m, where, since_ns)
+            m = research.attribute(research.stamp(m, where, since_ns), queue)
             research.save(m, state.map_path(sid))
         progress.research_finished(sid, result, m)
         if failed:
@@ -365,6 +396,10 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
     """Put `question` to the section's researcher and return its answer; ResearchError without one."""
     state = State.open(queue, cfg)
     with state.research_lock(sid):
+        saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.owned(saved, queue):
+            state.drop_map(sid)
+            raise ResearchError(f"section {sid} research must be refreshed before a follow-up")
         current = state.section(sid)
         session = current.research_session
         if session is None:
@@ -388,7 +423,7 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
             sid,
             [*cfg.research_command, "--resume", session],
             ask_brief(question, flag, cfg),
-            _section_cwd(cwd, sid),
+            _section_cwd(cwd, queue, sid, state),
             flag,
         )
         if run_failed(result):
@@ -480,7 +515,7 @@ def _verify(
 ) -> None:
     """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
     sid = section.id
-    where = _section_cwd(cwd, sid)
+    where = _section_cwd(cwd, queue, sid, state)
     progress.check_started(sid, len(section.checks), where)
     result = run_checks(cfg, section, where, check_log)
     ledger.append_check(sid, result)
@@ -572,23 +607,15 @@ def _design_change(
     current = state.section(section.id)
     brief = design_brief(
         design, queue, section, problem, evidence, cfg.design_approval,
-        current.answers, _lead_code(cwd, section.id, current.last_report),
+        current.answers, _lead_code(cwd, queue, section.id, state),
     )
     return _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
 
 
-def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, str | None] | None:
-    """(branch, head commit) of the lead's code: the BRANCH line of its report, else the worktree
-    on lead/<sid>; None when neither is found. The architect reads it through git by branch and
-    commit, never by the worktree's path, which lies outside its repository."""
-    found = ladder.lead_branch(report)
-    if found is None:
-        tree = git.section_worktree(cwd, sid)
-        if tree is None:
-            return None
-        found = (f"lead/{sid}", tree)
-    branch, tree = found
-    return branch, git.head(tree) if tree.is_dir() else None
+def _lead_code(cwd: Path, queue: Path, sid: str, state: State) -> tuple[str, str | None] | None:
+    """The validated lead branch and its current worktree HEAD for architect evidence."""
+    tree = _section_worktree(cwd, queue, sid, state)
+    return (tree.branch, git.head(tree.path)) if tree is not None else None
 
 
 def _design_answer(

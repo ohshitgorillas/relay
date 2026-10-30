@@ -28,13 +28,17 @@ Relay reads a queue written by Guild's `divvyer`: a Markdown file of sections, e
 
 A `RECUT:` or `DESIGN:` problem may end in ` | guess: <cause>`. Relay passes on only the problem.
 
-A blocker has landed when it is done and its worktree (the one on branch `lead/<id>`, if there is one) has nothing uncommitted. If the blocker was recut out of the queue, it has landed once every section cut from it has.
+A section belongs to its resolved queue path and section id. New worktrees use branch `lead/<queue-id>/<id>` at `<repo>-wt/<queue-id>/<id>` beside the repository, where `<queue-id>` is the full SHA-256 hash of the resolved queue path. Separate queues can therefore both have an `s1` without sharing a worktree. Relay gives the lead the exact branch and path to create or use.
+
+Relay persists a validated branch/path binding for each section. An existing `lead/<id>` or custom branch remains usable when that queue section's saved lead report explicitly identifies it with `BRANCH <branch> <absolute path>` and the pair matches a worktree in the repository. The binding survives later reports without `BRANCH` and remains preferred over a new qualified branch. Relay never adopts an unrecorded legacy worktree just because its section id matches.
+
+A blocker has landed when it is done and its owned worktree, if there is one, has nothing uncommitted. If the blocker was recut out of the queue, it has landed once every section cut from it has.
 
 When only parked and waiting sections are left, Relay waits, checking every `poll_seconds` for an answer, a blocker landing, or the stop file. Every stop sends the owner a ping saying why.
 
 ### Checks
 
-A section's body can carry check lines, `check: <command>` (or `done-check: <command>`). After a lead says `DONE`, Relay runs them in order in the section's worktree (or the repository top if it has none) and stops at the first that fails, with a time limit of `check_timeout` on each:
+A section's body can carry check lines, `check: <command>` (or `done-check: <command>`). After a lead says `DONE`, Relay runs them in order in that queue section's validated worktree (or the queue's repository checkout if it has none) and stops at the first that fails, with a time limit of `check_timeout` on each. Research, refresh, researcher questions and architect code evidence use the same worktree selection:
 
 - Every check passes: the section is done.
 - A check fails: the section stays open, and the next lead gets the failing command and the end of its output. After the third failed check, the section is parked.
@@ -197,13 +201,13 @@ The default Claude command runs with `bypassPermissions`; Codex uses `--dangerou
 
 ## State on disk
 
-Relay keeps its own record of each queue under `state_root`, in a directory named after the queue's path plus a short hash of it:
+Relay keeps its own record of each queue under `state_root`, in a directory named after the resolved queue path plus its existing short hash. Existing state directories remain discoverable; no queue files or live state need a manual migration:
 
 | Path | What it holds |
 |---|---|
-| `state.json` | Each section's status, lead, architect-cycle and check-failure counts, last architect failure reason, parked question, answer, last session and last report, what it waits on, its researcher session, and where it stands on the ladder. |
+| `state.json` | Each section's status, lead, architect-cycle and check-failure counts, last architect failure reason, parked question, answer, last session and last report, validated worktree branch/path binding, what it waits on, its researcher session, and where it stands on the ladder. |
 | `ledger.jsonl` | One line per finished run (lead, research, ask, recut or design) and per check: time, section, session, tokens and dollars. |
-| `maps/<id>.map` | Each section's research map. |
+| `maps/<id>.map` | Each section's research map, including its owning queue identity and original research commit. |
 | `runs/<n>.jsonl` | Each run's stdout, verbatim: Claude stream-json, Codex JSON events or generic plain text. |
 | `runs/<n>.backend.json` | The backend used for the run. Older logs without this metadata are treated as Claude. |
 | `runs/<n>.telemetry.json` | Saved normalized observations for historical replay without live Codex rollout files. |
@@ -213,6 +217,8 @@ Relay keeps its own record of each queue under `state_root`, in a directory name
 | `runs/retire`, `runs/research-<id>` | The flags a lead and a researcher check at each safe point; Relay creates them to ask for a retire. |
 | `STOP` | The stop file. |
 | `lock`, `write.lock`, `research-<id>.lock` | Held by the running `relay go`, around each state write, and while a section's map is drawn or asked. |
+
+Maps saved before queue ownership was recorded, or attributed to another queue, receive one full remap before reuse, even if their mapped files still match. Relay also discards the old researcher session. A researcher question against such a saved map fails with a request to refresh research first. Correctly owned maps keep the existing file-digest reuse behavior and retain the commit where the research originally ran.
 
 To start a queue over from scratch, delete its directory under `state_root`.
 
