@@ -32,6 +32,8 @@ def _state() -> StreamState:
 def test_codex_history_hint_identifies_native_history_and_report_handoff() -> None:
     # Breaks when the hint sends Codex IDs to Terminus or loses report handoff.
     hint = CodexBackend().resume_hint("prior-thread")
+    assert "~/.codex/skills/deja/scripts/recall-session prior-thread" in hint
+    assert "~/.claude/" not in hint
     assert "prior-thread" in hint
     assert "codex exec resume prior-thread" in hint
     assert "report" in hint.lower()
