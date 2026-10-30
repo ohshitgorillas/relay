@@ -1,13 +1,20 @@
 design docs/superpowers/specs/relay-codex-native-enforcement-design.md | order docs/superpowers/specs/relay-codex-native-enforcement-design.md | main db259df
 section s1 | lead | steps: 1 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s1.d1 | builder | steps: 1 | writes: docs/codex-native-report.md | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue docs/codex-native-queue.md s1.d1
+  s1.d1a | builder | steps: 1 | writes: docs/codex-native-report.md | size: calibration: remaining policy evidence only; no status-command probe; below the stopped combined dispatch | from: s1.d1
+    queue docs/codex-native-queue.md s1.d1a
+    resume 01a18a98-a47a-78f0-ba03-b81c4babf1a5
     design: docs/superpowers/specs/relay-codex-native-enforcement-design.md
     step: 1
     writes: docs/codex-native-report.md
-    part: the adapter's command-line form (scope flag, target, target args) and the legacy-scope file's contents;
     part: for `policy.py`: each change/edit budget's limits and command classes, the scratch roots for `rm`, the foreground-test command positions, the exempt agent names, the background form, and the governed docs with their caps;
-    part: `sync-claude.py --rules-hook` and `cc-status` behavior;
+    check: grep -nF -e 'classifier' -e 'Foreground' -e 'hygiene' docs/codex-native-report.md
+  s1.d1b | builder | steps: 1 | writes: docs/codex-native-report.md | size: calibration: remaining status-command probe and evidence only; below the stopped combined dispatch | from: s1.d1
+    queue docs/codex-native-queue.md s1.d1b
+    resume 01a18a96-0e59-7c03-beaf-aa42813a04db
+    design: docs/superpowers/specs/relay-codex-native-enforcement-design.md
+    step: 1
+    writes: docs/codex-native-report.md
+    part: `cc-status` behavior;
     check: grep -nF 'cc-status' docs/codex-native-report.md
   s1.d2 | builder | steps: 1 | writes: docs/codex-native-report.md | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/codex-native-queue.md s1.d2

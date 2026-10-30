@@ -185,3 +185,289 @@ equivalent in the inspected native sandbox, config and exec-policy surfaces.
 The launch design must retain their enforcement through an approved native
 mechanism before excluding these hooks. Hook exclusion is not proven here;
 no `PROVEN` entry or real-model exclusion run is claimed.
+
+### Expanded policy grounding: partial dispatch s1.d1
+
+The following evidence was supplied by the coordinator through the lead on
+2026-10-29. This builder did not open `~/.codex` or `~/.claude`; those source
+anchors identify supplied evidence, not direct builder reads. This supplements
+the earlier inventory without completing the expanded Grounding scope.
+
+**Adapter arguments and scope.** `~/.codex/hooks/claude_adapter.py:796-803`
+requires `--script`, accepts integer `--script-timeout` (default 20), repeated
+`--python-arg` and `--script-arg`, `--scope` (default `ROOT`), and
+`--sync-source`. The script target and its arguments are therefore separate
+options; a positional target-and-arguments form is not established. Lines
+21-23 select `hooks/legacy-scope` when present, otherwise `~/dev/gauntlet`.
+The coordinator found the legacy-scope file absent, so it has no contents to
+record and the fallback applies. Lines 662-674 cover scope `*`, a cwd under
+the resolved scope, or a cwd sharing the scope's git common directory.
+
+**Change and edit budgets.** Limits below are changes / in-tree edits /
+out-of-tree edits, applied to the pending call once; denial is strictly above
+the limit (`~/.claude/hooks/command-burst-guard.py:394-428`).
+
+| Source and anchors | Ordinary limits | Host limits and selection |
+|---|---|---|
+| `command-burst-guard.py:68-79` | 10 / 30 / 10 | Default host limits. |
+| `~/.claude/hooks/gauntlet-change-budget.py:12-24` | 25 / 60 / 10 | 10 / 30 / 10 for `sudo`, `docker`, `podman`, `systemctl`, or `rm`. A lone `ping-me` is free. |
+| `~/.codex/hooks/codex-change-budget.py:12-67` | 75 / 180 / 30 | 10 / 30 / 10 for `sudo`, `docker`, `podman`, `systemctl`, or host `rm`. Free calls include `sleep`, `wait_agent`, `wait`, `list_agents`, `view_image`, and a lone unchained `ping-me`. |
+
+The Codex host-`rm` detector recurses through shell heads `sh`, `bash`, and
+`zsh` with `-c`. Temporary removal must normalize under `/tmp/` or
+`/private/tmp/`; arguments containing `$`, backticks, or braces do not qualify
+as temporary (`codex-change-budget.py:12-50`). These are the supplied scratch
+roots; no additional `$TMPDIR` exemption was established.
+
+The common classifier treats `Read`, `Grep`, `Glob`, `WebFetch`, and
+`WebSearch` as free; takes `Write`/`Edit` paths from `file_path` and
+`NotebookEdit` paths from `notebook_path`; and exempts exact Agent types
+`Explore`, `Plan`, and `caveman:cavecrew-investigator`
+(`command-burst-guard.py:68-79`). Root selection is `CLAUDE_PROJECT_DIR`,
+otherwise cwd. An in-tree edit must be under that root and git-restorable;
+ignored paths or git failures count outside (`:225-290`). Unknown calls are
+changes; a Bash call is free only when sibling `free_bash.py` says so
+(`:108-115,293-307`). **The sibling classifier was not read.** Exact Bash
+change/edit classes and all free-command cases remain unverified.
+
+**Foreground execution.** `~/.claude/hooks/no-foreground-tests.py:69-89`
+exempts any truthy `agent_id` or `agent_type`, rather than a named-agent
+allowlist, and exempts `run_in_background=true`. Lines 13-66 identify command
+positions, wrappers, and test/check/lint commands after stripping data-only
+quotes and heredocs. The supplied evidence does not enumerate those command
+classes and wrappers, so their exact native equivalents remain unverified.
+The truthy-identity rule must not be replaced silently by a finite `EXEMPT`
+name set when the native policy is designed.
+
+**Governed documents.** `~/.claude/hooks/gauntlet-doc-budget.py:19-31`
+supplies the following caps. The block cap is characters per block, not a
+count of blocks. Hygiene is a separate enabled check.
+
+| Governed path | UTF-8 byte cap | Block character cap | Hygiene |
+|---|---:|---:|---|
+| `CLAUDE.md` | 4000 | 600 | yes |
+| `.claude/agents/*.md` | 16000 | 1500 | yes |
+| `.gauntlet/jobs/HANDOFF.md` | 6000 | 600 | yes |
+| `.gauntlet/jobs/queue.md` | 5000 | 300 | yes |
+| `.gauntlet/jobs/rulings.md` | 3000 | 600 | yes |
+| `docs/*.md`, `docs/superpowers/specs/*.md` | 40000 | 2000 | no |
+| `~/dev/gauntlet-harness-rules.md` | 12000 | 600 | yes |
+| `~/dev/gauntlet-harness-plan.md` | 16000 | 600 | yes |
+
+The coordinator confirmed the exact queue/rulings path prefixes at
+`~/.claude/hooks/gauntlet-doc-budget.py:23-24`. Frontmatter descriptions
+have a 600-character cap. The hook excludes
+`docs/queue.md` and paths containing `/.claude/worktrees/` (`:44-53`). Fenced
+blocks are ignored; headings and blank lines delimit paragraphs; each list
+item or table row is a block (`:56-80`). Byte checks use UTF-8, frontmatter is
+skipped for block checks, and hygiene patterns apply where enabled
+(`:83-111`). **The exact hygiene patterns remain unverified.** Hook mode
+uses `tool_input.file_path`, checks existing governed files, writes findings
+to stderr, and exits 2 (`:121-131`).
+
+**Instruction synchronization.** `~/.codex/sync-claude.py:576-600` shows
+`--rules-hook` reading stdin/cwd, finding the git root, and walking ancestor
+to descendant directories. It injects existing `CLAUDE.md` text where native
+discovery misses it: outside the native root or alongside `AGENTS.md` or its
+override. It prints `hookSpecificOutput.additionalContext` and returns
+without writes. Its native instruction delivery is therefore separate from
+the adapter's SessionStart `cat`; runtime delivery is still unproven.
+
+**Status command.** Direct `file` and symlink inspection found
+`~/.config/iterm2/cc-status` points to
+`/Applications/iTerm.app/Contents/Resources/utilities/cc-status`, a Mach-O
+universal executable for x86_64 and arm64. It was not executed. No source or
+behavior evidence was supplied, so the behavior of `cc-status` remains
+unverified and its proposed notification-only outcome is not certified.
+
+Dispatch s1.d1 remains incomplete: exact Bash classifiers, foreground
+test/check/lint command classes and wrappers, hygiene patterns, and
+`cc-status` behavior still need evidence. No feasibility probe, model run,
+hook invocation, configuration edit, or background process was performed in
+this dispatch. F1-F9 and rollout/resume evidence remain for later Grounding
+dispatches. No `HookSurface` or `PROVEN` entry is justified by this supplement.
+
+### Policy grounding completion: s1.d1a
+
+**Provenance and historical limits.** The coordinator directly read the
+sources below on 2026-10-29 and supplied their contents through the lead.
+This builder did not read, import, or execute those hook sources. Source
+anchors below refer to that supplied evidence. The preceding partial s1.d1
+section remains a historical record: its statements that the sibling Bash
+classifier, foreground command classes, and exact hygiene patterns were
+unverified are superseded by this section. Its existing budget, scope,
+scratch-root, and document-cap tables still apply. This completes the policy
+part of that dispatch; `cc-status` belongs to separate dispatch s1.d1b.
+Native runtime feasibility and rollout/resume proof remain separate work.
+
+**Budget classifier and counters.** The earlier limits remain changes /
+in-tree edits / out-of-tree edits: common defaults 10/30/10, Gauntlet
+ordinary 25/60/10, Codex ordinary 75/180/30, and host limits 10/30/10.
+The Gauntlet host set includes every `rm`; the Codex variant distinguishes
+host removal from removal normalized under `/tmp/` or `/private/tmp/`.
+Those roots are removal exemptions, distinct from the narrower scratch
+output-redirection rule below. The earlier budget source anchors and
+genuine-user-reply reset boundary still apply.
+
+The common Bash classifier is binary: FREE when `is_free_bash` succeeds,
+otherwise CHANGE. A Bash mutation never increments structured edit counts,
+even when it changes an in-tree file. `Write`, `Edit`, and `NotebookEdit`
+use the separate path classifier already recorded above
+(`~/.claude/hooks/command-burst-guard.py:293-307`). Thus a shell edit must
+not be converted into an in-tree structured edit merely from its target.
+
+**Bash normalization and composition.** All anchors in the following Bash
+inventory refer to `~/.claude/hooks/free_bash.py`.
+
+- `:196-205` unwraps only the DOTALL form
+  `^\s*bwrap\s.*?\s--\s+(?:bash|sh)\s+-s\s+<<'([A-Za-z_]\w*)'\n(.*)\n\1[ \t]*$`.
+- `:557-590` replaces only `$(pwd)` and
+  `$(git rev-parse --show-toplevel)` with `/SAFESUBST`, strips heredoc bodies,
+  masks quoted interiors, then rejects unquoted backticks, `$(`, `<(`,
+  `>(`, `||`, `--fix`, `--write`, `--in-place`, and `--output`.
+  Every segment split at `&&` or semicolon and every stage split at pipe
+  must be free. Newline is not a segment separator in this classifier.
+  Empty commands, separator-only commands, and parse exceptions are metered.
+- `:135-181` masks single/double quote interiors while preserving length;
+  unbalanced quoting fails. Heredoc stripping supports `<<` and `<<-`, an
+  optionally quoted `[A-Za-z_]\w*` delimiter, recursive stripping, and
+  drops the remaining tail when a heredoc is unterminated.
+- `:250-310` removes initial assignments, repeated `nice`, `ionice`, and
+  `timeout` wrappers, assignments again, one `uv run`, `poetry run`, or
+  `npx` prefix, then `python[0-9.]* -m`. `nice` accepts `-n` or
+  `--adjustment` plus a value, or `^-(-adjustment=)?-?\d+$`.
+  `ionice` remains unstripped when any remaining token equals or starts
+  `-p`, or starts `--pid`; otherwise `-c`, `-n`, `--class`, and
+  `--classdata` consume a value and other flags consume only themselves.
+  `timeout` consumes option values for `-k`, `--kill-after`, `-s`, and
+  `--signal`, then a duration; a missing duration leaves it unstripped.
+- `:124-132,313-334` rejects lone background `&`. Output operators
+  `(\d*)(&>>|&>|>>|>&|>)` require exact `/dev/null` or a target with no
+  `..` substring matching `/tmp/claude[^/]*/.+/scratchpad(?:/|$)`.
+  There is no `/private/tmp` exemption for output. `>&` followed by digits
+  or `-` permits fd duplication/closure. Accepted redirections are removed
+  before `shlex.split(comments=False, posix=True)`; empty/unparseable stages
+  fail and assignment-only stages are free (`:407-470`). Command matching
+  uses the basename, so a directory prefix does not change the class.
+
+**Bash free classes.** The fixed sets come from `free_bash.py:24-104`;
+dispatch and operand restrictions come from `:337-554`. These are the
+classifier's syntactic permissions, not claims that each permitted command
+is semantically read-only for all possible operands.
+
+| Position | Command class | Exact restriction or set |
+|---|---|---|
+| Head or downstream | Readers | `grep, egrep, fgrep, rg, ls, cat, head, tail, wc, stat, file, diff, comm, cut, uniq, nl, column, tr, fold, rev, tac, less, more, jq, which, whereis, echo, printf, sha256sum, md5sum, b2sum, cksum, uptime, ps, nproc, pwd, du, df, free, basename, dirname, realpath` |
+| Head or downstream | `sed` | Requires `--quiet`, `--silent`, or `n` anywhere in a short option; rejects `--in-place` prefix or `i` anywhere in a short option. |
+| Head or downstream | `date`, `find`, `sort` | `date` rejects args exact/starting `-s` or `--set`; `find` rejects exact `-exec,-execdir,-delete,-ok,-okdir,-fprint,-fprint0,-fprintf,-fls`; `sort` rejects `-o`/`--output` prefixes. |
+| Head or downstream | `rpm` | Requires `-q` prefix or `--query`; rejects exact `-i,-U,-F,-e,--install,--upgrade,--freshen,--erase,--import,--rebuilddb,--setperms,--setugids`. |
+| Head or downstream | `command`, `pip`, `pip3` | `command` requires `-v` or `-V`; pip's first non-option must be `list,show,freeze,check,inspect`. |
+| Head or downstream | `curl` (`:337-367`) | Rejects short prefixes `-d,-F,-T,-o,-O` and long prefixes `--data,--form,--upload,--output,--remote-name`. `-X`/`--request` plus value or concatenated `-X` permits only GET/HEAD, case-insensitive. Requires at least one HTTP(S) URL and all must match `^https?://(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)(:\d+)?([/?].*)?$`, case-insensitive. |
+| Head only | `cd`, `set`, `source`, `.` | `cd` has at most one arg; every `set` arg matches `^[-+][aeux]$` (empty allowed); source/dot has exactly one arg with basename `hqpcreds`. |
+| Head only | `make` | Skips flags and `-C`/`--directory` plus value; requires at least one target and every target in `check,test,test-live,lint,typecheck,fmt-check,format-check,lint-js,test-js,check-css`. |
+| Head only | JS/Python commands | `eslint,knip,jscpd,prettier` and `pytest,py.test,unittest,mypy,xenon,flake8,pyright,pylint` are free. `tsc` requires exact `-p`, `--project`, or `--noEmit`. `ruff`/`black` require `--check`, or ruff's first arg `check`. |
+| Head only | `pdftotext`, `pair.sh` | Last positional pdftotext arg must be `-` or scratch; pair's first arg must be `list`. |
+| Head only | `systemctl` | Rejects `-H,--host,-M,--machine`, `--host=`, `--machine=`; first non-option must be `status,show,cat,list-units,list-unit-files,list-timers,list-sockets,list-dependencies,is-active,is-enabled,is-failed,get-default`. |
+| Head only | `journalctl` | Same remote-option rejection; rejects `--rotate,--flush,--sync,--relinquish-var,--smart-relinquish-var,--setup-keys,--update-catalog` or any `--vacuum` prefix. |
+| Head only | `ss` | Every short-option character is in `tuxlnaemios46H`; long names before `=` must be `--tcp,--udp,--unix,--listening,--numeric,--all,--extended,--memory,--info,--options,--summary,--ipv4,--ipv6,--no-header,--family`. Non-option operands are unchecked. |
+| Head only | `git` (`:370-395`) | Skips `-C` plus value, `--no-pager,-P,--literal-pathspecs,--no-replace-objects,--bare`, `--git-dir=`, `--work-tree=`. `worktree` permits only first arg `list`; `branch` rejects exact `-d,-D,-m,-M,-c,-C,-f,--delete,--move,--copy,--force,--set-upstream-to,-u,--unset-upstream,--edit-description` and `--set-upstream-to=` prefix. Other permitted subcommands are `log,show,diff,status,blame,shortlog,rev-parse,rev-list,ls-files,ls-tree,cat-file,describe,name-rev,whatchanged,check-ignore`. |
+| Head only | `node` (`:398-404`) | Requires exact `--test`; rejects `-e,--eval,-p,--print,-i,--interactive`, `--eval=`, `--print=`. |
+
+Any other downstream stage is denied free status (`:472-554`), including a
+head-only class reused downstream. Any unknown head is also metered. These
+FREE decisions affect the change budget only; they do not override the
+separate foreground-test policy.
+
+**Foreground command positions, exemptions, and background form.** All
+anchors in this inventory refer to
+`~/.claude/hooks/no-foreground-tests.py`. Lines 69-89 apply only to `Bash`,
+returning success for any truthy `agent_id` or `agent_type`, or literal
+`run_in_background is True`. No finite exempt-agent name list exists in
+this hook. The exact common-budget Agent exemptions (`Explore`, `Plan`,
+`caveman:cavecrew-investigator`) above are a different policy. A matching
+foreground command otherwise denies with exit 2. A native Codex background
+form is not established by this Claude-shaped field; F9 remains unproved.
+
+Lines 13-45 define this command-position separator:
+
+```text
+(?:^|[;&|(`\n]|\$\()
+```
+
+They allow a path prefix `[\w.~+-]*/` and a quote only immediately after
+`-c `. The command end accepts end-of-string or
+whitespace, `;`, `&`, `|`, `)`, backtick, single quote, or double quote.
+Lines 47-66 strip data-only quoted text and heredoc bodies, retaining quoted
+commands after `-c` or `ssh` plus host (including option tokens), and
+heredocs on a line containing `bash`, `sh`, `zsh`, or `ssh`.
+
+The wrappers at lines 14-19 are assignments `[A-Za-z_]\w*=\S*`;
+`sudo,env,time,nice,command,exec`; `xargs` with repeated `-\w+` options;
+`timeout` plus one nonspace token; `npx,bunx,pnpx,uvx`;
+`(uv|poetry|pipenv|pdm|hatch|rye|pixi) run`; `bundle exec`;
+optional-path `python[\d.]*` with repeated `-\w+` options;
+`bash,sh,zsh` with the same repeated options; and `node`.
+These foreground wrappers differ from the free-Bash normalizer above.
+
+The command patterns at lines 20-36 are:
+
+- Bare `pytest,py.test,unittest,tox,nox,mypy,pyright,ruff,flake8,pylint`;
+  `black --check`; `isort --check` or `--check-only`.
+- `jest,vitest,mocha`; `playwright test`; `eslint,tsc`;
+  `prettier --check`; `biome check,ci,lint`.
+- `bats,shellcheck,hadolint,mutmut,cosmic-ray,rspec,ctest,phpunit`;
+  `pre-commit run`; `deno test,lint,check`.
+- `npm,pnpm,yarn,bun` followed by optional `run ` then
+  `(test|check|lint|typecheck|verify)[\w:-]*`, or `run ` then
+  `[\w:-]*(test|check|lint|verify|gate|ci)[\w:-]*`.
+- `cargo test,check,clippy,nextest`; `go test,vet`; `golangci-lint`.
+- `make` targets `[\w-]*(test|check|lint|verify|ci|gate)[\w-]*`;
+  `just` targets `[\w-]*(test|check|lint|gate)[\w-]*`.
+- `swift test`; `xcodebuild` with a `test` word;
+  `mvn,gradle,\S*gradlew` with a `test`, `check`, or `verify` word.
+- `foreman` plus a nonspace prefix ending `test`, `check`, `gate`, or
+  `verify`; scripts
+  `[\w.-]*(test|check|gate|verify|lint)[\w.-]*.(sh|bash|zsh|py)`.
+
+**Document hygiene.** The governed paths, UTF-8 byte caps, block character
+caps, frontmatter-description cap, exclusions, and block parsing in the
+preceding document table remain current. In addition,
+`~/.claude/hooks/gauntlet-doc-budget.py:33-41` defines exactly these seven
+regexes (case-sensitive except the last):
+
+```text
+^\s*(- )?Log\b
+^\s*- 20\d\d-\d\d-\d\d 
+\b(PIDs?|pid|shell|sleep)\s+\d{4,}\b
+/private/tmp/claude-|/tmp/claude-\d+
+\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b
+\b\d+(\.\d+)? ?(s|min)\b.*\b\d+(\.\d+)? ?(s|min)\b
+(?i)\bread\b.*gauntlet-log/
+```
+
+The second regex ends with a literal space after the date. Lines 105-110
+apply these to every raw source line, including fenced content and
+frontmatter, reporting only the first match per line where hygiene is
+enabled. The earlier statement that fences are ignored refers to block
+checks, not hygiene; byte caps are also independent.
+
+**DESIGN: policy interface mismatches, without a design edit.**
+
+- `policy.EXEMPT` and `pre` specify finite named-agent membership. The
+  source exempts any truthy identity, and `Call.agent` alone does not
+  explicitly preserve the distinction between a root role label and a
+  source caller carrying an agent identity. Mapping all known helper names
+  would not prove source-equivalent treatment of an unknown named helper.
+- `DOCS: dict[str, tuple[int,int]]` and `post` describe byte/block caps but
+  not per-path hygiene enablement, the raw-line patterns, the separate
+  600-character frontmatter-description cap, or external harness paths.
+  The complete source policy needs those distinctions in its policy home.
+- The launch goal requires retaining every carried owner policy. These
+  source checks cannot silently be dropped merely because the current
+  interface mentions only caps. All command classification belongs in
+  `relay/policy.py` under the design's Homes table; this report supplies
+  evidence rather than another implementation of that classifier.
+
+No native `HookSurface`, `PROVEN` entry, background equivalent, or F1-F9
+runtime result is claimed by s1.d1a. No hook/configuration source was changed
+and no policy source script or model probe was run for this policy inventory.
