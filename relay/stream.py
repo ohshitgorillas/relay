@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, replace
 
 from relay import agents
 from relay.ledger import Spend
+from relay.pricing import Usage
 
 
 @dataclass
@@ -18,11 +20,40 @@ class StreamState:
     is_error: bool
     seen_messages: frozenset[str] = frozenset()
     activity: agents.Activity = agents.Activity()
+    usage: tuple[Usage, ...] = ()
 
 
 def _count(usage: dict, key: str) -> int:
     value = usage.get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _task_measurements(activity: agents.Activity, event: dict) -> agents.Activity:
+    task_id = event.get("task_id")
+    if not isinstance(task_id, str) or event.get("subtype") not in {
+        "task_started", "task_progress", "task_notification",
+    }:
+        return activity
+    model, effort = event.get("model"), event.get("effort")
+    cost = None
+    reason = None
+    if event.get("subtype") == "task_notification" and "total_cost_usd" in event:
+        value = event["total_cost_usd"]
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            try:
+                if math.isfinite(value) and value >= 0:
+                    cost = float(value)
+            except OverflowError:
+                pass
+        if cost is None:
+            reason = "invalid reported final cost"
+    return agents.measured(
+        activity, task_id,
+        models=(model,) if isinstance(model, str) and model else (),
+        efforts=(effort,) if isinstance(effort, str) and effort else (),
+        cost_dollars=cost, cost_basis="reported" if cost is not None else "none",
+        cost_unavailable=reason,
+    )
 
 
 def feed(state: StreamState, line: str) -> StreamState:
@@ -38,6 +69,7 @@ def feed(state: StreamState, line: str) -> StreamState:
             return replace(state, session_id=event["session_id"])
     elif kind == "system":
         activity = agents.feed(state.activity, event)
+        activity = _task_measurements(activity, event)
         if activity is not state.activity:
             return replace(state, activity=activity)
     elif kind == "assistant":

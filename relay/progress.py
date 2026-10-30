@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from relay.agents import Event, duration
+from relay.agents import Agent, Event, duration
 from relay.check import CheckResult, outcome_text
 from relay.config import Config
 from relay.ledger import Kind
@@ -71,6 +71,30 @@ def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> Non
     else:
         outcome = status.kind
     _write(f"lead {sid}: finished {outcome} {_spend(result)}")
+    agents = result.stream.activity.agents
+    if not agents:
+        _write("no subagents observed")
+    for agent in agents:
+        _write(agent_finished_text(agent))
+
+
+def agent_finished_text(agent: Agent) -> str:
+    """Render one final normalized inventory entry without estimating missing data."""
+    name = f" {agent.name}" if agent.name else ""
+    models = ", ".join(agent.models) or "unavailable"
+    efforts = ", ".join(agent.efforts) or "unavailable"
+    if agent.cost_dollars is None:
+        cost = f"unavailable ({agent.cost_unavailable or 'not reported'})"
+    else:
+        basis = (
+            "API-equivalent estimate (not subscription billing)"
+            if agent.cost_basis == "api-estimate" else agent.cost_basis
+        )
+        cost = f"${agent.cost_dollars:.12g} {basis}"
+    return (
+        f"agent {agent.task_id}{name}: {agent.status or 'unavailable'}; "
+        f"model {models}; effort {efforts}; final cost {cost}"
+    )
 
 
 def retiring(sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead") -> None:

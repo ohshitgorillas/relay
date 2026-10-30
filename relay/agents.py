@@ -14,6 +14,11 @@ class Agent:
     context: int = 0  # the last `total_tokens` reported: the agent's context size, not a sum
     duration_ms: int | None = None  # the largest reported; a continued agent reports again
     status: str | None = None  # the last finish status: completed, failed or stopped
+    models: tuple[str, ...] = ()
+    efforts: tuple[str, ...] = ()
+    cost_dollars: float | None = None
+    cost_basis: str = "none"
+    cost_unavailable: str | None = "not reported"
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,53 @@ class Summary:
     count: int
     duration_ms: int
     biggest: Agent | None
+
+
+def measured(
+    activity: Activity,
+    task_id: str,
+    *,
+    models: tuple[str, ...],
+    efforts: tuple[str, ...],
+    cost_dollars: float | None,
+    cost_basis: str,
+    cost_unavailable: str | None,
+) -> Activity:
+    agents = tuple(
+        _measure(agent, models, efforts, cost_dollars, cost_basis, cost_unavailable)
+        if agent.task_id == task_id else agent
+        for agent in activity.agents
+    )
+    return replace(activity, agents=agents) if agents != activity.agents else activity
+
+
+def restore_agent(value: dict) -> Agent:
+    return Agent(**{
+        **value,
+        "models": tuple(value.get("models", ())),
+        "efforts": tuple(value.get("efforts", ())),
+    })
+
+
+def _measure(
+    agent: Agent,
+    models: tuple[str, ...],
+    efforts: tuple[str, ...],
+    cost_dollars: float | None,
+    cost_basis: str,
+    cost_unavailable: str | None,
+) -> Agent:
+    changes = {
+        "models": tuple(dict.fromkeys(agent.models + models)),
+        "efforts": tuple(dict.fromkeys(agent.efforts + efforts)),
+    }
+    if cost_dollars is not None or cost_unavailable is not None:
+        changes.update(
+            cost_dollars=cost_dollars,
+            cost_basis=cost_basis,
+            cost_unavailable=cost_unavailable,
+        )
+    return replace(agent, **changes)
 
 
 def _text(event: dict, key: str) -> str:
@@ -100,7 +152,24 @@ def merge(first: Activity, later: Activity) -> Activity:
     """Two runs' agents as one: an agent both hold is taken from `later`, where it ran last."""
     ids = {agent.task_id for agent in later.agents}
     kept = tuple(agent for agent in first.agents if agent.task_id not in ids)
-    return Activity(kept + later.agents, later.live, first.events + later.events)
+    previous = {agent.task_id: agent for agent in first.agents}
+    merged = []
+    for agent in later.agents:
+        old = previous.get(agent.task_id)
+        if old is not None:
+            measurements = _measure(
+                old, agent.models, agent.efforts, agent.cost_dollars,
+                agent.cost_basis,
+                None if agent.cost_unavailable == "not reported" else agent.cost_unavailable,
+            )
+            agent = replace(
+                agent, models=measurements.models, efforts=measurements.efforts,
+                cost_dollars=measurements.cost_dollars,
+                cost_basis=measurements.cost_basis,
+                cost_unavailable=measurements.cost_unavailable,
+            )
+        merged.append(agent)
+    return Activity(kept + tuple(merged), later.live, first.events + later.events)
 
 
 def summarise(activity: Activity) -> Summary:

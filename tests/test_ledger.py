@@ -16,6 +16,36 @@ from relay.ledger import Ledger, Spend
 from relay.backends.base import Capabilities
 
 
+def test_completed_inventory_persists_measurements_without_changing_aggregate_spend(tmp_path: Path) -> None:
+    # Breaks when: ledger rows omit measured detail, drop unmeasured or failed agents,
+    # or count a worker's cached charge a second time in the aggregate.
+    saved = json.loads(
+        (Path(__file__).parent / "fixtures/cache-cost/completed-report.json").read_text()
+    )
+    inventory = tuple(
+        agents.Agent(**dict(row, models=tuple(row["models"]), efforts=tuple(row["efforts"])))
+        for row in saved["activity"]["agents"]
+    )
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    aggregate = Spend(**saved["spend"])
+    ledger.append("lead", "cached-section", saved["session_id"], aggregate, agents=inventory)
+    entry = json.loads(path.read_text())
+    assert entry["tokens"] == 2200 and entry["dollars"] == pytest.approx(0.00222)
+    assert ledger.total(None) == aggregate
+    assert ledger.section_spend("cached-section") == aggregate
+    assert ledger.unreadable() == []
+    assert ledger.sessions() == [("cached-section", "cached-report-lead")]
+    assert len(entry["agents"]) == len(inventory)
+    for row, expected in zip(entry["agents"], saved["activity"]["agents"]):
+        assert row["task_id"] == expected["task_id"]
+        assert row["name"] == expected["name"]
+        assert row["total_tokens"] == expected["context"]
+        for field in ("models", "efforts", "cost_dollars", "cost_basis", "cost_unavailable"):
+            assert field in row, f"missing agent measurement: {field}"
+            assert row[field] == expected[field]
+
+
 @pytest.mark.parametrize("live", [False, True], ids=["historical", "live"])
 @pytest.mark.parametrize(
     "capabilities,spend,expected",
@@ -731,9 +761,18 @@ def _subagents() -> tuple:
     return tuple(activity.agents)
 
 
+# relay-cache-cost-design.md:76,154: legacy observations retain unavailable measurements.
 SUBAGENT_RECORDS = [
-    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
-    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+    {
+        "name": "builder", "task_id": "a1", "total_tokens": 21844,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
+    {
+        "name": "test-writer", "task_id": "a2", "total_tokens": 41000,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
 ]
 
 

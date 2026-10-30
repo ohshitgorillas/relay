@@ -1,0 +1,17 @@
+{
+  "session_id": "saved-lead",
+  "context_tokens": 120,
+  "spend": {"tokens": 129, "dollars": 0.875},
+  "result_text": "Saved final report",
+  "is_error": false,
+  "seen_messages": [],
+  "usage": [{"thread": "saved-worker", "model": "retired-model", "input": 120, "cached_input": 70, "output": 9, "cache_write_30m": 20, "cache_write_12h": null, "unavailable": "12h writes unknown"}],
+  "activity": {
+    "agents": [
+      {"task_id": "saved-worker", "name": "builder", "description": "Saved worker", "context": 129, "duration_ms": 10, "status": "completed", "models": ["retired-model", "unavailable"], "efforts": ["high", "unavailable"], "cost_dollars": 0.0, "cost_basis": "reported", "cost_unavailable": null},
+      {"task_id": "old-worker", "name": "test-writer", "description": "Old worker", "context": 0, "duration_ms": null, "status": "failed"}
+    ],
+    "live": [],
+    "events": [{"kind": "finished", "agent": {"task_id": "saved-worker", "name": "builder", "description": "Saved worker", "context": 129, "duration_ms": 10, "status": "completed", "models": ["retired-model", "unavailable"], "efforts": ["high", "unavailable"], "cost_dollars": 0.0, "cost_basis": "reported", "cost_unavailable": null}, "live": 0}]
+  }
+}

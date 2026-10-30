@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import json
 import os
 import re
 import sys
@@ -27,6 +28,77 @@ from relay.runner import RunResult
 from relay.status import LeadStatus
 from relay.stream import StreamState
 from tests.conftest import FIXTURES
+
+
+def _completed_report_agents() -> tuple[Agent, ...]:
+    saved = json.loads((FIXTURES / "cache-cost/completed-report.json").read_text())
+    return tuple(
+        Agent(**dict(row, models=tuple(row["models"]), efforts=tuple(row["efforts"])))
+        for row in saved["activity"]["agents"]
+    )
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed", "killed", "no-status"])
+def test_completed_lead_lists_the_entire_final_inventory_on_every_outcome(
+    outcome: str, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: a terminal lead omits inventory, reconstructs it from empty events,
+    # truncates it to a costly member, or drops failed, missing or descendant rows.
+    result = _result(exit_code=3 if outcome == "failed" else 0, killed=outcome == "killed")
+    activity = dataclasses.replace(result.stream.activity, agents=_completed_report_agents(), events=())
+    result = dataclasses.replace(result, stream=dataclasses.replace(result.stream, activity=activity))
+    status = None if outcome == "no-status" else LeadStatus(kind="DONE", text="")
+    progress.lead_finished("report-section", result, status)
+    lines = _out(capsys).splitlines()
+    assert "lead report-section:" in lines[0]
+    assert len(lines) == 1 + len(activity.agents)
+    for row, agent in zip(lines[1:], activity.agents):
+        assert row.count(agent.task_id) == 1
+        assert agent.status in row
+        if agent.name:
+            assert agent.name in row
+        assert "model" in row and "effort" in row and "final cost" in row
+        for value in agent.models + agent.efforts:
+            assert value in row
+        if agent.cost_dollars is None:
+            assert "model unavailable" in row and "effort unavailable" in row
+            assert "final cost unavailable" in row and agent.cost_unavailable in row
+        else:
+            amount = re.search(r"\$([0-9.eE+-]+)", row)
+            assert amount is not None
+            assert float(amount.group(1)) == pytest.approx(agent.cost_dollars)
+            assert ("reported" if agent.cost_basis == "reported" else "API-equivalent estimate") in row
+            if agent.cost_basis == "api-estimate":
+                assert "not subscription billing" in row
+
+
+def test_completed_lead_with_empty_inventory_reports_only_observation_absence(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: absent inventory silently implies no workers ran.
+    progress.lead_finished("empty-section", _result(), LeadStatus(kind="DONE", text=""))
+    lines = _out(capsys).splitlines()
+    assert len(lines) == 2
+    assert "no subagents observed" in lines[1]
+
+
+def test_final_agent_formatter_preserves_small_positive_charge_and_observed_settings() -> None:
+    # Breaks when: the shared formatter is absent, rounds a positive cost to zero,
+    # or guesses one model or effort instead of retaining observed alternatives.
+    formatter = getattr(progress, "agent_finished_text", None)
+    assert callable(formatter), "the shared final-agent formatter is required"
+    agent = dataclasses.replace(
+        _completed_report_agents()[1], cost_dollars=0.000000001,
+        models=("gpt-6.1-terra", "gpt-6.1-sol", "unavailable"),
+        efforts=("medium", "high", "unavailable"),
+    )
+    row = formatter(agent)
+    for value in (agent.task_id, agent.name, agent.status, *agent.models, *agent.efforts):
+        assert value in row
+    amount = re.search(r"\$([0-9.eE+-]+)", row)
+    assert amount is not None
+    assert float(amount.group(1)) == pytest.approx(0.000000001, abs=1e-15)
+    assert "API-equivalent estimate" in row and "not subscription billing" in row
 
 PREFIX = re.compile(r"^(\d{2}):(\d{2}):(\d{2}) ")
 
@@ -76,10 +148,20 @@ def _out(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 def _line(capsys: pytest.CaptureFixture[str]) -> str:
-    """The one line written, without its `HH:MM:SS ` prefix and newline."""
+    """The primary line, including the documented empty-inventory row for leads.
+
+    relay-cache-cost-design.md:156 adds the row after the existing first line.
+    """
     out = _out(capsys)
     assert out.endswith("\n")
-    assert out.count("\n") == 1
+    if re.match(r"^\d{2}:\d{2}:\d{2} lead \S+: finished ", out):
+        lines = out.splitlines()
+        assert len(lines) == 2
+        assert PREFIX.match(lines[1]) is not None
+        assert "no subagents observed" in lines[1]
+        out = lines[0] + "\n"
+    else:
+        assert out.count("\n") == 1
     match = PREFIX.match(out)
     assert match is not None
     return out[match.end() : -1]
@@ -298,21 +380,22 @@ def test_each_line_goes_to_stdout_and_is_flushed(
     assert max(flushes) > max(writes)
 
 
-# Behavior 3: Each function writes exactly one line.
+# Behavior 3: Each function writes one line, plus the empty-inventory row for
+# lead_finished (relay-cache-cost-design.md:156).
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_each_function_writes_exactly_one_line(
+def test_each_function_writes_its_documented_number_of_lines(
     name: str,
     queue_file: Callable[[str], Path],
     fake_cfg: Config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: a function writes no line, two lines, or a line without its newline.
+    # Breaks when: a function writes the wrong number of lines or lacks a newline.
     _call(name, queue_file, fake_cfg)()
     out = _out(capsys)
     assert out.endswith("\n")
-    assert out.count("\n") == 1
+    assert out.count("\n") == (2 if name == "lead_finished" else 1)
 
 
 def test_a_multi_line_question_still_writes_one_line(

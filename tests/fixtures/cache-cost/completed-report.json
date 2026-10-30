@@ -1,0 +1,22 @@
+{
+  "session_id": "cached-report-lead",
+  "context_tokens": 1100,
+  "spend": {"tokens": 2200, "dollars": 0.00222},
+  "result_text": "All work finished.\nDONE",
+  "is_error": false,
+  "seen_messages": [],
+  "usage": [
+    {"thread": "cached-worker", "model": "gpt-6.1-sol", "input": 1000, "cached_input": 800, "output": 100, "cache_write_30m": 0, "cache_write_12h": 0},
+    {"thread": "cached-descendant", "model": "gpt-6.1-terra", "input": 1000, "cached_input": 800, "output": 100, "cache_write_30m": 0, "cache_write_12h": 0}
+  ],
+  "activity": {
+    "agents": [
+      {"task_id": "cached-worker", "name": "builder", "description": "Cached worker", "context": 1100, "duration_ms": 10, "status": "completed", "models": ["gpt-6.1-sol"], "efforts": ["high"], "cost_dollars": 0.00148, "cost_basis": "api-estimate", "cost_unavailable": null},
+      {"task_id": "cached-descendant", "name": "test-writer", "description": "Discoverable descendant", "context": 1100, "duration_ms": 5, "status": "failed", "models": ["gpt-6.1-terra", "unavailable"], "efforts": ["medium", "unavailable"], "cost_dollars": 0.00074, "cost_basis": "api-estimate", "cost_unavailable": null},
+      {"task_id": "missing-rollout", "name": null, "description": "Missing telemetry", "context": 0, "duration_ms": null, "status": "running", "models": [], "efforts": [], "cost_dollars": null, "cost_basis": "none", "cost_unavailable": "rollout unavailable"},
+      {"task_id": "zero-worker", "name": "builder", "description": "Known zero cost", "context": 0, "duration_ms": 1, "status": "completed", "models": ["observed-model"], "efforts": ["low"], "cost_dollars": 0.0, "cost_basis": "reported", "cost_unavailable": null}
+    ],
+    "live": ["missing-rollout"],
+    "events": []
+  }
+}
