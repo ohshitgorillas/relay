@@ -72,20 +72,16 @@ section s3 | lead | steps: 3 | size: lead: tokens: 1387990.8 seconds: 738.9 over
     step: 3
     paths: relay/retire_gate.py, relay/backends/claude.py
     check: uv run pytest tests/test_retire_gate.py tests/test_backends.py
-section s4 | lead | steps: 4 | size: lead: tokens: 1387990.8 seconds: 738.9 overruns: 0 refusals: 0
-  s4.d1 | test-writer | steps: 4 | writes: tests/test_research.py, tests/test_prompts.py, tests/fixtures/research-kept.txt, tests/fixtures/research-map.txt, tests/fixtures/research-merged.txt | size: test-writer: tokens: 622740.5 seconds: 196.6 overruns: 0 refusals: 0
+section s4 | lead | steps: 4 | size: lead: tokens: 1400779.4 seconds: 736.9 overruns: 0 refusals: 0
+  s4.d1 | test-writer | steps: 4 | writes: tests/test_research.py | size: test-writer: tokens: 615203.4 seconds: 192.7 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s4.d1
-    red
-    design: docs/superpowers/specs/relay-run-overhead-design.md step 4
-    behavior: `block()` is the map's header and body, with no instruction lines.
+    resume a8bb4564a3511aabb
+    moved
+    lines: docs/superpowers/specs/relay-run-overhead-design.md:75 | before: none (line added in 98a56b5) | after: "**`relay/research.py`**: `block()` is the map's header and body, with no instruction lines. Replaces `rule` at `relay/research.py:241-245`."
+    lines: docs/superpowers/specs/relay-run-overhead-design.md:132 | before: none (line added in 98a56b5) | after: "| Map text sent to agents | `research.block` | Any instruction line around the map, in `research.py` or `prompts.py`. |"
+    files: tests/test_research.py
     view: stubgen .pyi of relay/research.py
-    behavior: An entry never says what the code proves, lacks, allows or justifies
-    view: stubgen .pyi of relay/prompts.py
-    behavior: read the section's files yourself, and send a reader only
-    view: stubgen .pyi of relay/prompts.py
-    behavior: keeps its paste-verbatim and relay-ask lines and holds only block()'s text.
-    view: stubgen .pyi of relay/prompts.py
-  s4.d2 | builder | steps: 4 | writes: relay/research.py, relay/prompts.py | size: builder: tokens: 284907.3 seconds: 145.6 overruns: 0 refusals: 0
+  s4.d2 | builder | steps: 4 | writes: relay/research.py, relay/prompts.py | size: builder: tokens: 282050.8 seconds: 143.9 overruns: 0 refusals: 0
     queue /Users/atom/dev/relay-wt/run-overhead/docs/run-overhead-queue.md s4.d2
     design: docs/superpowers/specs/relay-run-overhead-design.md
     step: 4
