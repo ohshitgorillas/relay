@@ -1154,3 +1154,21 @@ def test_lead_prompt_runs_no_assayer_on_a_rejection() -> None:
     # Breaks when: the lead is not told that no assayer runs on a rejection.
     text = _worker_rule_text()
     assert _sentence(text, r"\bno assayer\b", r"\brejection\b")
+
+
+# Behavior 5: A second rejection of the same step ends the session with RECUT: <both rejections>.
+
+
+def test_lead_prompt_ends_with_recut_and_both_rejections_on_a_second_rejection_of_the_same_step() -> None:
+    # Breaks when: a second rejection of the same step is not routed to RECUT: carrying both
+    # rejections (left out, met by another resend, or carrying only the latest rejection).
+    text = _worker_rule_text()
+    assert _sentence(
+        text,
+        r"\bsecond rejection\b",
+        r"\bsame step\b",
+        r"\bends?\b",
+        r"\bsession\b",
+        r"RECUT: ",
+        r"\bboth rejections\b",
+    )
