@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 import pytest
 
@@ -939,3 +941,200 @@ def test_status_prints_a_waiting_section_with_its_blocker(
     out = capsys.readouterr().out
     assert "s3  waiting on s2" in _section_line(out, "s3")
     assert "open" in _section_line(out, "s4")
+
+
+# `relay stop` signals a live run and `relay status` shows draining (relay-drain design, Modules,
+# `relay/cli.py`; Order 4): `_stop` calls `state.live_run()`; with a live run whose pid is not its
+# own it calls `runner.signal_drain(pid)` and touches no stop file; with none it touches `STOP`.
+
+
+def _dead_pid() -> int:
+    """The pid of a child that has exited and been reaped, so no live process is signalled."""
+    child = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True
+    )
+    return int(child.stdout)
+
+
+def _record_drains(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Swap `relay.runner.signal_drain` for a recorder, however `relay.cli` reaches it; returns
+    the pids it is called with, in order."""
+    import relay.runner as runner_module
+
+    calls: list[int] = []
+
+    def signal_drain(pid: int) -> None:
+        calls.append(pid)
+
+    real = runner_module.signal_drain
+    for name, value in list(vars(cli_module).items()):
+        if value is real:
+            monkeypatch.setattr(cli_module, name, signal_drain)
+    monkeypatch.setattr(runner_module, "signal_drain", signal_drain)
+    return calls
+
+
+def _live_run(queue: Path, cfg: Config, pid: int) -> State:
+    """A `relay go` stand-in: holds the queue's lock and publishes `pid` as its run."""
+    holder = State.open(queue, cfg)
+    holder.lock()
+    holder.publish_run(pid)
+    return holder
+
+
+def test_stop_on_a_live_run_signals_its_pid_and_touches_no_stop_file(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `relay stop` still only touches STOP while a run is live, signals another pid,
+    # or touches STOP as well as signalling.
+    calls = _record_drains(monkeypatch)
+    pid = _dead_pid()
+    holder = _live_run(queue, fake_cfg, pid)
+    _exit(["stop", str(queue)])
+    assert calls == [pid]
+    assert not holder.stop_file.exists()
+
+
+def test_stop_with_a_stale_run_record_and_a_free_lock_touches_stop_and_signals_nothing(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_stop` trusts `run.json` without the lock probe, so a SIGKILLed run's stale
+    # record is signalled and no stop file is left; or, once a run holds the lock and publishes
+    # itself, `_stop` still only touches STOP.
+    calls = _record_drains(monkeypatch)
+    State.open(queue, fake_cfg).publish_run(_dead_pid())
+    assert _exit(["stop", str(queue)]) == 0
+    assert calls == []
+    assert State.open(queue, fake_cfg).stop_file.exists()
+    live = _dead_pid()
+    holder = _live_run(queue, fake_cfg, live)  # bound, so its lock stays held through the stop
+    _exit(["stop", str(queue)])
+    assert calls == [live]
+    del holder
+
+
+def test_stop_with_the_lock_held_but_no_run_record_touches_stop_and_signals_nothing(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_stop` signals on the lock alone, with no live-run record to name a pid; or,
+    # once the holder publishes its run, `_stop` still only touches STOP.
+    calls = _record_drains(monkeypatch)
+    holder = State.open(queue, fake_cfg)
+    holder.lock()
+    assert _exit(["stop", str(queue)]) == 0
+    assert calls == []
+    assert holder.stop_file.exists()
+    pid = _dead_pid()
+    holder.publish_run(pid)
+    _exit(["stop", str(queue)])
+    assert calls == [pid]
+
+
+def test_stop_never_signals_its_own_pid(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_stop` signals a live run whose pid is its own, sending SIGTERM to itself;
+    # or does not signal once the record names another pid.
+    calls = _record_drains(monkeypatch)
+    holder = _live_run(queue, fake_cfg, os.getpid())
+    _exit(["stop", str(queue)])
+    assert calls == []
+    other = _dead_pid()
+    holder.publish_run(other)
+    _exit(["stop", str(queue)])
+    assert calls == [other]
+
+
+# A second `relay stop` on a draining run sends the second SIGTERM and stops it at once.
+
+
+def test_a_second_stop_on_a_draining_run_signals_it_again(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: `_stop` skips a run already draining, or falls back to STOP for it, so the
+    # second SIGTERM that stops the run at once is never sent.
+    calls = _record_drains(monkeypatch)
+    pid = _dead_pid()
+    holder = _live_run(queue, fake_cfg, pid)
+    _exit(["stop", str(queue)])
+    holder.mark_draining()  # as the run's first-SIGTERM `on_request` does
+    _exit(["stop", str(queue)])
+    assert calls == [pid, pid]
+    assert not holder.stop_file.exists()
+
+
+# `_status` prints `run: draining since HH:MM (pid N)` as its first line when `live_run()` says
+# draining, and nothing new otherwise.
+
+
+@pytest.fixture
+def utc() -> Iterator[None]:
+    """Local time is UTC for the test, so HH:MM reads the same in any zone."""
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if saved is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+def _status_lines(queue: Path, capsys: pytest.CaptureFixture[str]) -> list[str]:
+    assert _exit(["status", str(queue)]) == 0
+    return capsys.readouterr().out.splitlines()
+
+
+def test_status_of_a_draining_run_opens_with_its_draining_line(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str], utc: None
+) -> None:
+    # Breaks when: status leaves the draining line out, prints it below the section states,
+    # shows another time or pid, or changes the rest of its output.
+    before = _status_lines(queue, capsys)
+    pid = _dead_pid()
+    holder = _live_run(queue, fake_cfg, pid)
+    holder.mark_draining()
+    live = holder.live_run()
+    assert live is not None and live.draining_since is not None
+    since = time.strftime("%H:%M", time.gmtime(live.draining_since))
+    lines = _status_lines(queue, capsys)
+    assert lines[0] == f"run: draining since {since} (pid {pid})"
+    assert lines[1:] == before
+
+
+def test_status_of_a_live_run_not_draining_prints_nothing_new(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str], utc: None
+) -> None:
+    # Breaks when: status prints a run line for a live run that is not draining; or prints no
+    # draining line once that run starts draining.
+    before = _status_lines(queue, capsys)
+    pid = _dead_pid()
+    holder = _live_run(queue, fake_cfg, pid)
+    assert _status_lines(queue, capsys) == before
+    holder.mark_draining()
+    live = holder.live_run()
+    assert live is not None and live.draining_since is not None
+    since = time.strftime("%H:%M", time.gmtime(live.draining_since))
+    assert _status_lines(queue, capsys) == [f"run: draining since {since} (pid {pid})", *before]
+
+
+def test_status_with_a_stale_draining_record_and_a_free_lock_prints_nothing_new(
+    queue: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str], utc: None
+) -> None:
+    # Breaks when: status reads `run.json` without the lock probe, so a dead run's draining
+    # record is shown as a live drain; or shows no drain once a live run holds the lock.
+    before = _status_lines(queue, capsys)
+    stale = State.open(queue, fake_cfg)
+    stale.publish_run(_dead_pid())
+    stale.mark_draining()
+    assert _status_lines(queue, capsys) == before
+    pid = _dead_pid()
+    holder = _live_run(queue, fake_cfg, pid)
+    holder.mark_draining()
+    live = holder.live_run()
+    assert live is not None and live.draining_since is not None
+    since = time.strftime("%H:%M", time.gmtime(live.draining_since))
+    assert _status_lines(queue, capsys)[0] == f"run: draining since {since} (pid {pid})"

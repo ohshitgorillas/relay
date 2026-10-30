@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
-from relay import agents, loop
+from relay import agents, loop, runner
 from relay.backends import replay
 from relay.config import Config, load_config
 from relay.errors import ExitCode, QueueFormatError, RelayError
@@ -72,7 +73,11 @@ def _go(args: argparse.Namespace) -> int:
 
 def _stop(args: argparse.Namespace) -> int:
     state = State.open(args.queue.resolve(), _config({}))
-    state.stop_file.touch()
+    live = state.live_run()
+    if live is not None and live.pid != os.getpid():
+        runner.signal_drain(live.pid)
+    else:
+        state.stop_file.touch()
     return ExitCode.QUEUE_EMPTY
 
 
@@ -136,6 +141,10 @@ def _status(args: argparse.Namespace) -> int:
     path = state.ledger_path
     ledger = Ledger(path)
     activity = _section_activity(state, ledger)
+    live = state.live_run()
+    if live is not None and live.draining and live.draining_since is not None:
+        since = time.strftime("%H:%M", time.localtime(live.draining_since))
+        print(f"run: draining since {since} (pid {live.pid})")
     for section in parse_queue(queue):
         record = state.section(section.id)
         line = f"{section.id}  {record.status}"
