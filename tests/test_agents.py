@@ -186,3 +186,45 @@ def test_repeated_task_notifications_keep_one_measured_inventory_row() -> None:
     assert activity.agents[0].cost_dollars == 0.4
     assert activity.agents[0].models == ("observed",)
     assert activity.live == frozenset()
+
+
+# `Agent.peak` (relay-stats-design.md, Modules `relay/agents.py` (extended); Order 1).
+
+
+def test_peak_is_the_largest_total_tokens_reported_while_context_is_the_last() -> None:
+    # Breaks when: `peak` is not kept, follows the last report down, or sums the reports.
+    activity = _fold([
+        _started("a1"),
+        _finished("a1", {"total_tokens": 30000, "duration_ms": 1000}),
+        _started("a1"),
+        _finished("a1", {"total_tokens": 20000, "duration_ms": 800}),
+    ])
+    agent = activity.agents[0]
+    assert (agent.peak, agent.context) == (30000, 20000)
+
+
+def test_peak_rises_with_a_larger_later_report() -> None:
+    # Breaks when: `peak` keeps only the first report.
+    activity = _fold([
+        _started("a1"),
+        _finished("a1", {"total_tokens": 20000, "duration_ms": 1000}),
+        _started("a1"),
+        _finished("a1", {"total_tokens": 26000, "duration_ms": 800}),
+    ])
+    assert activity.agents[0].peak == 26000
+
+
+def test_an_agent_with_no_reported_usage_has_peak_zero() -> None:
+    # Breaks when: `peak` defaults to anything but 0.
+    assert _fold([_started("a1")]).agents[0].peak == 0
+    assert agents.Agent("a1", "builder", "Build it").peak == 0
+
+
+def test_restore_reads_peak_when_present_and_otherwise_leaves_it_zero() -> None:
+    # Breaks when: a saved peak is dropped on restore, or an older snapshot invents one.
+    saved = agents.restore_agent({
+        "task_id": "a1", "name": "builder", "description": "new", "context": 20000, "peak": 30000,
+    })
+    old = agents.restore_agent({"task_id": "a2", "name": "builder", "description": "old", "context": 20000})
+    assert (saved.peak, saved.context) == (30000, 20000)
+    assert (old.peak, old.context) == (0, 20000)

@@ -170,10 +170,15 @@ class Ledger:
             chunks.pop()
         return chunks
 
+    def entries(self) -> Iterator[dict]:
+        """Each readable line, in the order written."""
+        for entry, _, _ in self._entries():
+            yield entry
+
     def sessions(self) -> list[tuple[str, str]]:
         """(section, session) of each readable line naming both, in the order written."""
         found = []
-        for entry, _, _ in self._entries():
+        for entry in self.entries():
             section, session = entry.get("section"), entry.get("session")
             if isinstance(section, str) and isinstance(session, str):
                 found.append((section, session))

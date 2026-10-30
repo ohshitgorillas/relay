@@ -145,11 +145,26 @@ def pings(tmp_path: Path) -> list[list[str]]:
     return [json.loads(line) for line in record.read_text().splitlines()]
 
 
-def ledger_line(state: State, stamp: float, tokens: int, dollars: float) -> None:
-    """Append one readable ledger line stamped `stamp`."""
+def ledger_line(
+    state: State,
+    stamp: float,
+    tokens: int,
+    dollars: float,
+    *,
+    kind: str | None = None,
+    section: str | None = None,
+    session: str | None = None,
+) -> dict:
+    """Append one readable ledger line stamped `stamp`, with each of `kind`, `section`
+    and `session` that is given, and return the line as written."""
+    line: dict = {"time": stamp, "tokens": tokens, "dollars": dollars}
+    for key, value in (("kind", kind), ("section", section), ("session", session)):
+        if value is not None:
+            line[key] = value
     path = state.stop_file.parent / "ledger.jsonl"
     with path.open("a") as f:
-        f.write(json.dumps({"time": stamp, "tokens": tokens, "dollars": dollars}) + "\n")
+        f.write(json.dumps(line) + "\n")
+    return line
 
 
 class Background:

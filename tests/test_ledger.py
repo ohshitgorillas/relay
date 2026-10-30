@@ -1028,3 +1028,37 @@ def test_section_spend_leaves_every_ledger_byte_in_place(tmp_path: Path) -> None
     original = path.read_bytes()
     assert _call(ledger.section_spend, "s1") == Spend(tokens=8, dollars=0.75)
     assert path.read_bytes() == original
+
+
+# `Ledger.entries` (relay-stats-design.md, Modules `relay/ledger.py` (extended); Order 1):
+# each readable line, in the order written.
+
+
+def test_entries_gives_each_readable_line_in_the_order_written(tmp_path: Path) -> None:
+    # Breaks when: `entries` drops or reorders readable lines, or loses a line's kind.
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    ledger.append("lead", "s2", "sess-b", Spend(tokens=7, dollars=0.5))
+    ledger.append("recut", "s1", None, Spend(tokens=3, dollars=0.25))
+    ledger.append("lead", "s1", "sess-a", Spend(tokens=5, dollars=0.75))
+    found = list(ledger.entries())
+    assert [(e["kind"], e["section"], e["session"], e["tokens"]) for e in found] == [
+        ("lead", "s2", "sess-b", 7),
+        ("recut", "s1", None, 3),
+        ("lead", "s1", "sess-a", 5),
+    ]
+    assert found == [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("kind", sorted(UNREADABLE))
+def test_entries_skips_each_unreadable_line_kind(tmp_path: Path, kind: str) -> None:
+    # Breaks when: `entries` yields an unreadable line or stops at one.
+    ledger = _ledger_around(tmp_path / "ledger.jsonl", _unreadable_line(kind))
+    _raw(tmp_path / "ledger.jsonl", "\n")
+    ledger.append("lead", "s2", "sess-c", Spend(tokens=1, dollars=0.0))
+    found = list(ledger.entries())
+    assert [(e["kind"], e["section"], e["session"]) for e in found] == [
+        ("lead", "s1", "sess-a"),
+        ("recut", "s1", None),
+        ("lead", "s2", "sess-c"),
+    ]

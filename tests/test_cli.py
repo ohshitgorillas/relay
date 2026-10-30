@@ -1138,3 +1138,156 @@ def test_status_with_a_stale_draining_record_and_a_free_lock_prints_nothing_new(
     assert live is not None and live.draining_since is not None
     since = time.strftime("%H:%M", time.gmtime(live.draining_since))
     assert _status_lines(queue, capsys)[0] == f"run: draining since {since} (pid {pid})"
+
+
+# `relay stats` (relay-stats design, Modules `relay/cli.py`): takes no arguments, reads every
+# state directory under `state_root`, prints `stats.lines(...)` and returns QUEUE_EMPTY.
+
+SECOND_QUEUE = "check-queue.md"
+
+
+def _stats_log(state: State, number: int, session: str, context: int, result: str) -> None:
+    """Write run log `<number>.jsonl`: one run of `session` whose main thread reached `context`
+    tokens of context and whose result text is `result`."""
+    lines = [
+        {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work",
+         "model": "claude-opus", "tools": ["Bash"]},
+        {"type": "assistant", "message": {
+            "id": f"msg-{session}", "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "Working."}],
+            "usage": {"input_tokens": 2, "cache_creation_input_tokens": 1_000,
+                      "cache_read_input_tokens": context - 1_002, "output_tokens": 30}},
+         "parent_tool_use_id": None, "session_id": session},
+        {"type": "result", "subtype": "success", "is_error": False, "duration_ms": 500,
+         "num_turns": 1, "result": result, "session_id": session,
+         "total_cost_usd": 0.01, "usage": {"input_tokens": 1, "output_tokens": 2}},
+    ]
+    state.run_dir.mkdir(parents=True, exist_ok=True)
+    (state.run_dir / f"{number}.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+
+def _stats_runs(state: State, runs: list[tuple[str, str, str, int, str]]) -> None:
+    """Log and ledger each `(kind, section, session, context, result)` run in the order given."""
+    ledger = Ledger(state.ledger_path)
+    for number, (kind, section, session, context, result) in enumerate(runs, start=1):
+        _stats_log(state, number, session, context, result)
+        ledger.append(kind, section, session, Spend(tokens=1, dollars=0.0))
+
+
+def _two_queues(queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config) -> tuple[State, State]:
+    first = State.open(queue, fake_cfg)
+    _stats_runs(first, [
+        ("lead", "s1.1.1", "sess-a1", 40_000, "Step committed.\nDONE"),
+        ("recut", "s3", "sess-a2", 7_000, "Cut into two steps."),
+    ])
+    second = State.open(queue_file(SECOND_QUEUE), fake_cfg)
+    _stats_runs(second, [
+        ("lead", "s1", "sess-b1", 60_000, "Step committed.\nDONE"),
+        ("lead", "s2", "sess-b2", 90_000, "Safe point.\nRETIRED"),
+        ("lead", "s3", "sess-b3", 80_000, "Safe point.\nRETIRED"),
+        ("lead", "s4", "sess-b4", 60_000, "Step committed.\nDONE"),
+    ])
+    return first, second
+
+
+def test_stats_prints_each_roles_line_over_every_queue_under_the_state_root(
+    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: `stats` reads one state directory only, sizes runs by ledger tokens, prints
+    # roles unsorted, prints a skipped line with nothing skipped, or exits other than QUEUE_EMPTY.
+    _two_queues(queue, queue_file, fake_cfg)
+    assert _exit(["stats"]) == ExitCode.QUEUE_EMPTY
+    assert capsys.readouterr().out.splitlines() == [
+        "lead: 3 finished, peak context median 60000, p90 60000, max 60000; 2 overruns",
+        "  lead overrun: s2 sess-b2 peak 90000 (retired)",
+        "  lead overrun: s3 sess-b3 peak 80000 (retired)",
+        "recut: 1 finished, peak context median 7000, p90 7000, max 7000; 0 overruns",
+    ]
+
+
+def _interleaved_runs(runs: list[tuple[State, str, str, str, int, str]]) -> None:
+    """Log and ledger each `(state, kind, section, session, context, result)` run in the order
+    given, each strictly later than the one before, numbering each state's logs from 1."""
+    numbers: dict[Path, int] = {}
+    for state, kind, section, session, context, result in runs:
+        time.sleep(0.01)
+        numbers[state.run_dir] = numbers.get(state.run_dir, 0) + 1
+        _stats_log(state, numbers[state.run_dir], session, context, result)
+        Ledger(state.ledger_path).append(kind, section, session, Spend(tokens=1, dollars=0.0))
+
+
+def test_stats_prints_a_roles_newest_five_overruns_last_in_the_order_they_ran_across_queues(
+    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: `stats` joins whole state directories one after another, in either order,
+    # instead of keeping runs in the order they ran across every queue, so a role's overruns
+    # from two queues print out of order or the wrong five are shown.
+    first = State.open(queue, fake_cfg)
+    second = State.open(queue_file(SECOND_QUEUE), fake_cfg)
+    _interleaved_runs([
+        (first, "lead", "s1", "sess-a1", 81_000, "Safe point.\nRETIRED"),
+        (second, "lead", "s1", "sess-b1", 82_000, "Safe point.\nRETIRED"),
+        (first, "lead", "s2", "sess-a2", 83_000, "Safe point.\nRETIRED"),
+        (second, "lead", "s2", "sess-b2", 84_000, "Safe point.\nRETIRED"),
+        (first, "lead", "s3", "sess-a3", 85_000, "Safe point.\nRETIRED"),
+        (second, "lead", "s3", "sess-b3", 86_000, "Safe point.\nRETIRED"),
+        (first, "lead", "s4", "sess-a4", 87_000, "Safe point.\nRETIRED"),
+        (second, "lead", "s4", "sess-b4", 50_000, "Step committed.\nDONE"),
+    ])
+    assert _exit(["stats"]) == ExitCode.QUEUE_EMPTY
+    assert capsys.readouterr().out.splitlines() == [
+        "lead: 1 finished, peak context median 50000, p90 50000, max 50000; 7 overruns",
+        "  lead: 2 earlier overruns not shown",
+        "  lead overrun: s2 sess-a2 peak 83000 (retired)",
+        "  lead overrun: s2 sess-b2 peak 84000 (retired)",
+        "  lead overrun: s3 sess-a3 peak 85000 (retired)",
+        "  lead overrun: s3 sess-b3 peak 86000 (retired)",
+        "  lead overrun: s4 sess-a4 peak 87000 (retired)",
+    ]
+
+
+def test_stats_ends_with_the_count_of_unreadable_run_logs(
+    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: an unreadable log stops `stats`, is not counted, or its line is not last.
+    _, second = _two_queues(queue, queue_file, fake_cfg)
+    _stats_log(second, 5, "sess-gone", 10_000, "Step committed.\nDONE")
+    unreadable = second.run_dir / "5.jsonl"
+    os.chmod(unreadable, 0)
+    try:
+        code = _exit(["stats"])
+    finally:
+        os.chmod(unreadable, 0o644)
+    assert code == ExitCode.QUEUE_EMPTY
+    out = capsys.readouterr().out.splitlines()
+    assert out[-1] == "skipped 1 unreadable run logs"
+    assert out[0] == "lead: 3 finished, peak context median 60000, p90 60000, max 60000; 2 overruns"
+
+
+def test_stats_with_no_state_directory_says_so_and_exits_queue_empty(
+    home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a missing state root raises, prints nothing, or exits other than QUEUE_EMPTY.
+    assert not fake_cfg.state_root.exists()
+    assert _exit(["stats"]) == ExitCode.QUEUE_EMPTY
+    assert capsys.readouterr().out.splitlines() == [f"no runs under {fake_cfg.state_root}"]
+
+
+def test_stats_with_an_empty_state_root_says_so_and_exits_queue_empty(
+    home: Path, fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Breaks when: a state root holding no state directory prints empty stats instead.
+    fake_cfg.state_root.mkdir(parents=True)
+    assert _exit(["stats"]) == ExitCode.QUEUE_EMPTY
+    assert capsys.readouterr().out.splitlines() == [f"no runs under {fake_cfg.state_root}"]
+
+
+def test_stats_takes_no_arguments(home: Path) -> None:
+    # Breaks when: `stats` accepts a stray argument instead of exiting with usage.
+    assert _exit(["stats", "extra"]) == ExitCode.USAGE
+
+
+def test_stats_with_a_bad_config_file_exits_through_the_relay_error_handler(home: Path) -> None:
+    # Breaks when: a config error from `stats` escapes `main` instead of becoming its exit code.
+    (home / ".config" / "relay" / "config.toml").write_text("context_limit = [unclosed\n")
+    assert _exit(["stats"]) == ExitCode.USAGE

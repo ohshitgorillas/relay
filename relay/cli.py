@@ -8,8 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from relay import agents, loop, runner
-from relay.backends import replay
+from relay import agents, history, loop, runner, stats
 from relay.config import Config, load_config
 from relay.errors import ExitCode, QueueFormatError, RelayError
 from relay.ledger import Ledger
@@ -50,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("section")
     ask.add_argument("question")
     commands.add_parser("status").add_argument("queue", type=Path)
+    commands.add_parser("stats")
     return parser
 
 
@@ -96,30 +96,33 @@ def _ask(args: argparse.Namespace) -> int:
     return ExitCode.QUEUE_EMPTY
 
 
-def _section_activity(state: State, ledger: Ledger) -> dict[str, agents.Activity]:
-    """Each section's agents, from the run logs whose session the ledger files under it.
+def _ran_at(run: history.Run) -> float:
+    """When the run's log was last written, the time it finished; 0 if the log cannot be stat'd."""
+    try:
+        return run.log.stat().st_mtime
+    except OSError:
+        return 0.0
 
-    Runs are numbered and ledgered in the order they ran, so a session the ledger names
-    more than once pairs its logs with its ledger lines in that order.
-    """
-    sections: dict[str, list[str]] = {}
-    for section, session in ledger.sessions():
-        sections.setdefault(session, []).append(section)
-    logs = sorted(
-        (p for p in state.run_dir.glob("*.jsonl") if p.stem.isdigit()), key=lambda p: int(p.stem)
-    )
-    found: dict[str, agents.Activity] = {}
-    for log in logs:
-        try:
-            stream = replay(log)
-        except OSError:
-            continue
-        owners = sections.get(stream.session_id or "")
-        if not owners:
-            continue
-        section = owners.pop(0) if len(owners) > 1 else owners[0]
-        found[section] = agents.merge(found.get(section, agents.Activity()), stream.activity)
-    return found
+
+def _stats(args: argparse.Namespace) -> int:
+    cfg = _config({})
+    states = State.all(cfg)
+    if not states:
+        print(f"no runs under {cfg.state_root}")
+        return ExitCode.QUEUE_EMPTY
+    runs: list[history.Run] = []
+    skipped = 0
+    for state in states:
+        found = history.read(state, Ledger(state.ledger_path))
+        runs.extend(found.runs)
+        skipped += found.skipped_logs
+    runs.sort(key=_ran_at)  # stable: runs of one queue keep their order when times tie
+    merged = history.History(runs=tuple(runs), skipped_logs=skipped)
+    for line in stats.lines(stats.by_role(stats.sized(merged, cfg))):
+        print(line)
+    if skipped:
+        print(f"skipped {skipped} unreadable run logs")
+    return ExitCode.QUEUE_EMPTY
 
 
 def _agent_summary(activity: agents.Activity | None) -> str:
@@ -140,7 +143,7 @@ def _status(args: argparse.Namespace) -> int:
     state = State.open(queue, cfg)
     path = state.ledger_path
     ledger = Ledger(path)
-    activity = _section_activity(state, ledger)
+    activity = history.activity_by_section(history.read(state, ledger))
     live = state.live_run()
     if live is not None and live.draining and live.draining_since is not None:
         since = time.strftime("%H:%M", time.localtime(live.draining_since))
@@ -162,7 +165,7 @@ def _status(args: argparse.Namespace) -> int:
     return ExitCode.QUEUE_EMPTY
 
 
-_COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "ask": _ask}
+_COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "ask": _ask, "stats": _stats}
 
 
 def main(argv: list[str] | None = None) -> int:

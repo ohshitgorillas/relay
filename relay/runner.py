@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 from relay.stream import StreamState
 from relay.ledger import Spend
 from relay.files import atomic_write
+from relay.state import numbered_logs
 
 if TYPE_CHECKING:
     from relay.backends.base import Backend
@@ -133,8 +134,7 @@ class CommandResult:
 
 
 def _next_number(run_dir: Path) -> int:
-    numbers = [int(p.stem) for p in run_dir.glob("*.jsonl") if p.stem.isdigit()]
-    return max(numbers, default=0) + 1
+    return max((int(p.stem) for p in numbered_logs(run_dir)), default=0) + 1
 
 
 def _signal_group(pgid: int, signum: int) -> None:

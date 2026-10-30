@@ -77,6 +77,11 @@ class SectionState:
     pending: dict | None = None
 
 
+def numbered_logs(run_dir: Path) -> list[Path]:
+    """The numbered `<n>.jsonl` run logs in `run_dir`, ascending by number."""
+    return sorted((p for p in run_dir.glob("*.jsonl") if p.stem.isdigit()), key=lambda p: int(p.stem))
+
+
 def queue_id(queue: Path) -> str:
     """SHA-256 hex digest of the resolved queue path."""
     return hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
@@ -101,6 +106,18 @@ class State:
     def __init__(self, directory: Path):
         self._dir = directory
         self._lock_handle: IO[str] | None = None
+
+    def run_logs(self) -> list[Path]:
+        return numbered_logs(self.run_dir)
+
+    @classmethod
+    def all(cls, cfg: Config) -> list["State"]:
+        """Each directory under `cfg.state_root` holding a ledger.jsonl."""
+        try:
+            children = sorted(cfg.state_root.iterdir())
+        except OSError:
+            return []
+        return [cls(d) for d in children if (d / "ledger.jsonl").is_file()]
 
     @property
     def run_record(self) -> Path:

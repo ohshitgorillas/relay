@@ -19,6 +19,7 @@ class Agent:
     cost_dollars: float | None = None
     cost_basis: str = "none"
     cost_unavailable: str | None = "not reported"
+    peak: int = 0  # the largest `total_tokens` reported
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def _with_usage(agent: Agent, usage: object) -> Agent:
     context = _int(usage, "total_tokens")
     duration = _int(usage, "duration_ms")
     if context is not None:
-        agent = replace(agent, context=context)
+        agent = replace(agent, context=context, peak=max(context, agent.peak))
     if duration is not None:
         agent = replace(agent, duration_ms=max(duration, agent.duration_ms or 0))
     return agent

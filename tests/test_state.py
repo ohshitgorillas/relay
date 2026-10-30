@@ -14,6 +14,7 @@ from typing import Callable
 
 import pytest
 
+from harness import ledger_line
 import relay.state as state_module
 import relay.files as publication
 from relay.config import Config
@@ -1372,3 +1373,36 @@ def test_legacy_record_defaults_bindings_and_can_gain_one_without_losing_its_sta
     assert (migrated.worktree_branch, migrated.worktree_path) == (
         "lead/s1", str((tmp_path / "legacy").resolve())
     )
+
+
+# `State.run_logs` and `State.all` (relay-stats-design.md, Modules `relay/state.py`
+# (extended); Order 1).
+
+
+def test_run_logs_are_the_numbered_jsonl_files_ascending_by_number(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: run logs sort by name (10 before 9), or take in files that are not numbered logs.
+    state = State.open(queue, fake_cfg)
+    state.run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("10.jsonl", "9.jsonl", "2.jsonl", "check-2.jsonl", "notes.jsonl", "retire", "3.txt"):
+        (state.run_dir / name).write_text("")
+    expected = [state.run_dir / name for name in ("2.jsonl", "9.jsonl", "10.jsonl")]
+    assert state.run_logs() == expected
+    assert state_module.numbered_logs(state.run_dir) == expected
+
+
+def test_all_is_each_directory_under_state_root_holding_a_ledger(
+    queue: Path, other_queue: Path, fake_cfg: Config, tmp_path: Path
+) -> None:
+    # Breaks when: `all` misses a queue's directory, or takes one with no ledger.jsonl.
+    first = State.open(queue, fake_cfg)
+    second = State.open(other_queue, fake_cfg)
+    third_queue = tmp_path / "third" / QUEUE
+    third_queue.parent.mkdir()
+    third_queue.write_bytes(queue.read_bytes())
+    unledgered = State.open(third_queue, fake_cfg)
+    ledger_line(first, 1_700_000_000.0, 1, 0.0, kind="lead", section="s1", session="a")
+    ledger_line(second, 1_700_000_000.0, 1, 0.0, kind="lead", section="s1", session="b")
+    (fake_cfg.state_root / "stray.txt").write_text("not a state directory")
+    found = State.all(fake_cfg)
+    assert sorted(_dir(state) for state in found) == sorted([_dir(first), _dir(second)])
+    assert _dir(unledgered) not in [_dir(state) for state in found]
