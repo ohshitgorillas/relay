@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
 from relay.errors import ConfigError
 from relay.stream import StreamState, feed
 
 if TYPE_CHECKING:
     from relay.config import Config
+
+
+CHILD_ENV: Mapping[str, str] = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
 
 
 class ClaudeBackend:
@@ -38,3 +42,6 @@ class ClaudeBackend:
 
     def resume_hint(self, session_id: str) -> str:
         return f"resume {session_id}"
+
+    def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+        raise NotImplementedError
