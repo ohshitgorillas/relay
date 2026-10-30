@@ -41,7 +41,15 @@ section s1 | lead | steps: 1, 2, 3, 4, 5 | size: calibration: one shared-core co
     red: s1.d4 report and tests/test_agents.py, tests/test_backends.py, tests/test_stream.py
     done-check: uv run python -m pytest tests/test_pricing.py tests/test_config.py tests/test_agents.py tests/test_backends.py tests/test_stream.py
 
-section s2 | lead | steps: 6, 7 | size: calibration: one telemetry commit piece, red plus integration, after s1; below lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+section s2 | lead | steps: 6, 7 | size: calibration: one telemetry commit piece, interface preparation plus red tests plus integration, after landed s1; retain all three dispatches through green gates, no standalone stub or red commit; below lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
+  s2.d3 | builder | steps: 7 | writes: relay/backends/codex_session.py, relay/backends/codex.py | size: calibration: two telemetry interface modules, import check only, committed with s2.d1 and s2.d2; below builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
+    queue docs/cache-cost-queue.md s2.d3
+    resume 01a18a90-e46e-7a63-a8e7-3bde7dc73cb2
+    stub
+    design: docs/superpowers/specs/relay-cache-cost-design.md
+    step: 7
+    paths: relay/backends/codex_session.py, relay/backends/codex.py
+    done-check: uv run python -c 'import relay.backends.codex_session, relay.backends.codex'
   s2.d1 | test-writer | steps: 6 | writes: tests/test_codex_session.py, tests/test_backends.py, tests/fixtures/cache-cost/ | size: calibration: reader and adapter behavior, two red runs and scoped formatting; below test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0
     queue docs/cache-cost-queue.md s2.d1
     red

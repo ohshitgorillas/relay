@@ -356,3 +356,157 @@ def test_snapshot_uses_shared_agent_restoration_for_inventory_and_events(
     assert seen.count("old-worker") == 1
     assert len(state.activity.agents) == 2
     assert len(state.activity.events) == 1
+
+
+def _normalized_readers(monkeypatch: pytest.MonkeyPatch, observations: dict):
+    """Synthetic normalized records; these do not claim additional Codex wire fields."""
+    from relay.backends.codex_session import SessionReader
+
+    instances = []
+    polls = []
+
+    class ObservedReader(SessionReader):
+        def __init__(self, home: Path, session_id: str, *, boundary=None):
+            super().__init__(home, session_id, boundary=boundary)
+            self.sid = session_id
+            self.usage = ()
+            self.models = ()
+            self.efforts = ()
+            self.children = ()
+            self.unavailable = None
+            self.observed = False
+            self.model_context_window = 258400
+            instances.append(session_id)
+
+        def poll(self, state: StreamState, *, force_scan: bool = False) -> StreamState:
+            polls.append((self.sid, force_scan))
+            record = observations[self.sid]
+            self.usage = record.get("usage", ())
+            self.models = record.get("models", ())
+            self.efforts = record.get("efforts", ())
+            self.children = record.get("children", ())
+            self.unavailable = record.get("unavailable")
+            self.observed = record.get("observed", True)
+            return replace(state, context_tokens=record.get("context", 0))
+
+    monkeypatch.setattr("relay.backends.codex.SessionReader", ObservedReader)
+    return instances, polls
+
+
+def _receiver(backend: CodexBackend, state: StreamState, ids: list[str], statuses: dict) -> StreamState:
+    """Synthetic collaboration item using the backend design's documented schema."""
+    return backend.parse(state, json.dumps({
+        "type": "item.completed", "item": {
+            "id": "synthetic-metering", "type": "collab_tool_call", "tool": "spawn_agent",
+            "sender_thread_id": state.session_id, "receiver_thread_ids": ids,
+            "prompt": "Synthetic normalized billing", "status": "completed",
+            "agents_states": {sid: {"status": status, "message": None} for sid, status in statuses.items()},
+        },
+    }))
+
+
+def test_codex_registry_polls_descendants_once_and_breaks_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when descendant discovery bypasses the reader registry or a cycle creates readers again.
+    root, child, grandchild = "root", "child", "grandchild"
+    observations = {
+        root: {"context": 120, "children": (child,)},
+        child: {"context": 800, "children": (grandchild,)},
+        grandchild: {"context": 900, "children": (root, child)},
+    }
+    instances, polls = _normalized_readers(monkeypatch, observations)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    backend = CodexBackend()
+    state = backend.parse(_state(), json.dumps({"type": "thread.started", "thread_id": root}))
+    state = _receiver(backend, state, [child], {child: "running"})
+    state = backend.poll(state)
+    state = backend.poll(state)
+    assert sorted(instances) == sorted([root, child, grandchild])
+    assert all(sum(sid == thread for sid, _ in polls) >= 2 for thread in observations)
+    assert state.context_tokens == 120
+    assert [agent.task_id for agent in state.activity.agents] == [child, grandchild]
+
+
+@pytest.mark.parametrize("billed_writes,expected", [(False, 0.00253), (True, 0.00311)])
+def test_codex_finish_forces_last_read_and_prices_each_model_without_double_billing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, billed_writes: bool, expected: float,
+) -> None:
+    # Breaks when final enrichment uses stale cumulative rows, full input rates or only the last model.
+    from relay.backends.codex_session import Usage
+
+    root, child = "root", "child"
+    observations = {
+        root: {"context": 120},
+        child: {"usage": (Usage(child, "gpt-6-astra", 100, 50, 10),),
+                "models": ("gpt-6-astra",), "efforts": ("high",)},
+    }
+    instances, polls = _normalized_readers(monkeypatch, observations)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    backend = CodexBackend()
+    state = backend.parse(_state(), json.dumps({"type": "thread.started", "thread_id": root}))
+    state = _receiver(backend, state, [child], {child: "completed"})
+    state = backend.poll(state)
+    latest = Usage(child, "gpt-6.1-sol", 1000, 600, 100, 100, 50) if billed_writes else Usage(child, "gpt-6.1-sol", 1000, 800, 100)
+    observations[child] = {
+        "usage": (Usage(child, "gpt-6-astra", 100, 50, 10),
+                  latest),
+        "models": ("gpt-6-astra", "gpt-6.1-sol"), "efforts": ("high", "medium"),
+    }
+    output = tmp_path / "final.txt"
+    output.write_text("Completed synthetic report.")
+    final = backend.finish(state, output)
+    worker, = final.activity.agents
+    assert worker.cost_dollars == pytest.approx(expected)
+    assert worker.cost_basis == "api-estimate"
+    assert worker.cost_unavailable is None
+    assert worker.models == ("gpt-6-astra", "gpt-6.1-sol")
+    assert worker.efforts == ("high", "medium")
+    assert (root, True) in polls and (child, True) in polls
+    again = backend.finish(final, output)
+    assert again.activity.agents == final.activity.agents
+    assert sorted(instances) == [child, root]
+
+
+def test_codex_missing_receiver_status_still_enters_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when discovery requires a receiver status and silently omits that thread.
+    _normalized_readers(monkeypatch, {
+        "root": {}, "child": {"observed": False, "unavailable": "rollout missing"},
+    })
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    backend = CodexBackend()
+    state = backend.parse(_state(), json.dumps({"type": "thread.started", "thread_id": "root"}))
+    state = _receiver(backend, state, ["child"], {})
+    final = backend.finish(state, tmp_path / "absent-final")
+    assert [agent.task_id for agent in final.activity.agents] == ["child"]
+    worker, = final.activity.agents
+    assert worker.cost_dollars is None
+    assert worker.cost_unavailable
+
+
+@pytest.mark.parametrize("problem", ["running", "missing", "malformed", "incomplete"])
+def test_codex_partial_final_measurements_keep_inventory_with_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str,
+) -> None:
+    # Breaks when a partial or unfinished thread's observed usage is presented as its final cost.
+    from relay.backends.codex_session import Usage
+
+    child = {"usage": (Usage("child", "gpt-6.1-sol", 1000, 800, 100),),
+             "models": ("gpt-6.1-sol",), "efforts": ("high",)}
+    if problem != "running":
+        child["unavailable"] = f"{problem} telemetry"
+    if problem == "missing":
+        child.update(usage=(), observed=False)
+    _normalized_readers(monkeypatch, {"root": {}, "child": child})
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    backend = CodexBackend()
+    state = backend.parse(_state(), json.dumps({"type": "thread.started", "thread_id": "root"}))
+    state = _receiver(backend, state, ["child"], {"child": "running" if problem == "running" else "completed"})
+    final = backend.finish(state, tmp_path / "absent-final")
+    assert [agent.task_id for agent in final.activity.agents] == ["child"]
+    worker, = final.activity.agents
+    assert worker.cost_dollars is None
+    assert worker.cost_unavailable
+    assert worker.models == ("gpt-6.1-sol",)
