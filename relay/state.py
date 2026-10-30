@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import IO, Callable, Iterator, Literal, TypeVar
@@ -23,6 +24,26 @@ SectionStatus = Literal["open", "done", "parked", "waiting"]
 
 _RECORD = "state.json"
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class LiveRun:
+    pid: int
+    draining: bool
+    draining_since: float | None
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A dispatch a drain held back after the result it follows was recorded."""
+
+    kind: Literal["climb", "design-retry", "design-recut"]
+    lead_log: str
+    problem: str
+    status: Literal["RECUT", "DESIGN"] | None = None
+    text: str | None = None
+    design: str | None = None
+    brief: str | None = None
 
 
 @dataclass
@@ -51,6 +72,7 @@ class SectionState:
     guidance: str | None = None  # a reportless architect's final message, for the next lead
     design_failures: int = 0
     design_failure: str | None = None
+    pending: dict | None = None
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -66,6 +88,55 @@ class State:
     def __init__(self, directory: Path):
         self._dir = directory
         self._lock_handle: IO[str] | None = None
+
+    @property
+    def run_record(self) -> Path:
+        return self._dir / "run.json"
+
+    def publish_run(self, pid: int) -> None:
+        write_atomic(self.run_record, json.dumps(asdict(LiveRun(pid, False, None))))
+
+    def mark_draining(self) -> None:
+        try:
+            record = json.loads(self.run_record.read_text())
+        except (OSError, ValueError):
+            return
+        if record["draining"]:
+            return
+        record["draining"] = True
+        record["draining_since"] = time.time()
+        write_atomic(self.run_record, json.dumps(record))
+
+    def clear_run(self) -> None:
+        self.run_record.unlink(missing_ok=True)
+
+    def live_run(self) -> LiveRun | None:
+        with open(self._dir / "lock", "a") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                return None
+        try:
+            return LiveRun(**json.loads(self.run_record.read_text()))
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def set_pending(self, sid: str, pending: Pending) -> None:
+        def change(s: SectionState, _r: dict) -> None:
+            s.pending = asdict(pending)
+
+        self._update(sid, change)
+
+    def take_pending(self, sid: str) -> Pending | None:
+        def change(s: SectionState, _r: dict) -> Pending | None:
+            taken = Pending(**s.pending) if s.pending is not None else None
+            s.pending = None
+            return taken
+
+        return self._update(sid, change)
 
     @classmethod
     def open(cls, queue: Path, cfg: Config) -> "State":
