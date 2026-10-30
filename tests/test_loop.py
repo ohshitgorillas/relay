@@ -22,7 +22,7 @@ import relay.ping
 import relay.queue
 import relay.runner
 import relay.backends
-from relay.backends.base import Capabilities
+from relay.backends.base import Capabilities, Launch
 from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
@@ -1181,6 +1181,9 @@ def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
         def resume_hint(self, session_id: str) -> str:
             return f"Prior thread: {session_id}; native history: codex exec resume {session_id}"
 
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
+
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: RotatingBackend())
     assert run(queue, dataclasses.replace(cfg, backend="codex")) == ExitCode.QUEUE_EMPTY
     assert roles == ["lead", "lead"]
@@ -1230,6 +1233,9 @@ def test_backend_finalization_error_overrides_successful_child_report(
         def resume_hint(self, session_id: str) -> str:
             return ""
 
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
+
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: FinalizationBackend())
     result = run(queue, dataclasses.replace(cfg, backend="codex"))
     section = State.open(queue, cfg).section(first)
@@ -1272,6 +1278,9 @@ def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
 
         def resume_hint(self, session_id: str) -> str:
             return ""
+
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
 
     monkeypatch.setattr(relay.backends, "get_backend", lambda name: FailedRecutBackend())
     result = run(queue, dataclasses.replace(cfg, backend="codex"))
@@ -1348,6 +1357,9 @@ def test_recut_transaction_restores_bytes_mode_and_retries(
 
         def resume_hint(self, session_id: str) -> str:
             return ""
+
+        def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
+            return Launch()
 
     if failure == "exit":
         original_argv = RecoveryBackend.argv

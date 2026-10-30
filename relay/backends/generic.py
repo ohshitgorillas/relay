@@ -41,4 +41,4 @@ class GenericBackend:
         return ""
 
     def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
-        raise NotImplementedError
+        return Launch()

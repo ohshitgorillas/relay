@@ -195,4 +195,4 @@ class CodexBackend:
                 "report as its handoff.")
 
     def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
-        raise NotImplementedError
+        return Launch()

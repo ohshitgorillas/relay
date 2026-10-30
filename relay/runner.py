@@ -293,6 +293,8 @@ def run_agent(
     telemetry = log_path.with_suffix(".telemetry.json")
     if cfg is not None:
         argv = backend.argv(role, cfg, cwd, output)
+    launch = backend.launch(role, retire_flag, run_dir)
+    argv = [*argv, *launch.extra_argv]
     atomic_write(
         log_path.with_suffix(".backend.json"),
         (json.dumps({"backend": cfg.backend if cfg else "claude"}) + "\n").encode(),
@@ -323,6 +325,7 @@ def run_agent(
             proc = subprocess.Popen(
                 argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=stderr_file, start_new_session=True,
+                env={**os.environ, **launch.env},
             )
             live.append(proc)
             try:

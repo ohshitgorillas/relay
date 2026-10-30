@@ -44,4 +44,4 @@ class ClaudeBackend:
         return f"resume {session_id}"
 
     def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
-        raise NotImplementedError
+        return Launch(env=CHILD_ENV)

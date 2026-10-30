@@ -9,7 +9,8 @@ import pytest
 
 from relay.backends import get_backend, replay
 from relay.backends import _snapshot
-from relay.backends.claude import ClaudeBackend
+from relay.backends.base import Launch
+from relay.backends.claude import CHILD_ENV, ClaudeBackend
 from relay.backends.codex import CodexBackend
 from relay.backends.generic import GenericBackend
 from relay.config import Config
@@ -532,3 +533,27 @@ def test_codex_partial_final_measurements_keep_inventory_with_reason(
     assert worker.cost_dollars is None
     assert worker.cost_unavailable
     assert worker.models == ("gpt-6.1-sol",)
+
+
+# relay-run-overhead-design.md, Modules `relay/backends/claude.py`, `relay/backends/codex.py`
+# and `relay/backends/generic.py`: each backend's launch description for its child.
+
+
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_claude_launch_gives_every_role_the_child_env(role: str, tmp_path: Path) -> None:
+    # Breaks when a Claude child of any role launches without
+    # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0, or with other variables beside it.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    launch = ClaudeBackend().launch(role, tmp_path / "retire", run_dir)
+    assert dict(launch.env) == {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
+    assert dict(launch.env) == dict(CHILD_ENV)
+
+
+@pytest.mark.parametrize("backend", [CodexBackend, GenericBackend], ids=["codex", "generic"])
+@pytest.mark.parametrize("role", ["lead", "recut"])
+def test_codex_and_generic_launch_add_nothing(backend: type, role: str, tmp_path: Path) -> None:
+    # Breaks when a Codex or generic child is given extra argv or env, Claude's included.
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    assert backend().launch(role, tmp_path / "retire", run_dir) == Launch()
