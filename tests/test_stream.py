@@ -187,3 +187,66 @@ def test_lines_that_are_not_json_events_between_events_change_nothing() -> None:
     for line in lines:
         mixed.extend(["not json", line, ""])
     assert _fields(_feed_all(_fresh(), mixed)) == _fields(clean)
+
+
+def test_claude_task_measurements_preserve_reported_zero_and_run_total() -> None:
+    # Breaks when agent costs replace aggregate spend or parent settings leak into workers.
+    state = _feed_all(_fresh(), _lines("cache-cost/claude-agent-measurements.jsonl"))
+    measured, unmeasured = state.activity.agents
+    assert measured.models == ("worker-model",)
+    assert measured.efforts == ("high",)
+    assert (measured.cost_dollars, measured.cost_basis, measured.cost_unavailable) == (0.0, "reported", None)
+    assert unmeasured.models == unmeasured.efforts == ()
+    assert unmeasured.cost_dollars is None
+    assert unmeasured.cost_basis == "none"
+    assert unmeasured.cost_unavailable
+    assert state.spend.dollars == 0.75
+    assert state.usage == ()
+
+
+def test_claude_task_positive_final_cost_preserves_reported_charge_and_run_total() -> None:
+    # Breaks when valid positive worker charges are replaced with known zero.
+    lines = _lines("cache-cost/claude-agent-measurements.jsonl")
+    completion = json.loads(lines[2])
+    completion["total_cost_usd"] = 0.125
+    lines[2] = json.dumps(completion)
+    state = _feed_all(_fresh(), lines)
+    measured, unmeasured = state.activity.agents
+    assert measured.cost_dollars == 0.125
+    assert measured.cost_basis == "reported"
+    assert measured.cost_unavailable is None
+    assert unmeasured.cost_dollars is None
+    assert state.spend.dollars == 0.75
+
+
+@pytest.mark.parametrize("bad_cost", [-0.1, True, "0.3", float("inf"), float("nan")])
+def test_claude_invalid_task_cost_never_becomes_a_final_measurement(bad_cost: object) -> None:
+    # Breaks when explicitly associated invalid billing values become final numeric costs.
+    lines = _lines("cache-cost/claude-agent-measurements.jsonl")[:2]
+    lines.append(json.dumps({
+        "type": "system", "subtype": "task_notification", "task_id": "synthetic-worker",
+        "status": "completed", "model": "worker-model", "effort": "high",
+        "total_cost_usd": bad_cost,
+    }))
+    agent = _feed_all(_fresh(), lines).activity.agents[0]
+    assert agent.models == ("worker-model",)
+    assert agent.efforts == ("high",)
+    assert agent.cost_dollars is None
+    assert agent.cost_basis == "none"
+    assert agent.cost_unavailable
+
+
+def test_claude_progress_cost_is_not_a_final_cost_and_missing_settings_stay_unknown() -> None:
+    # Breaks when partial usage becomes final billing or unknown turn settings are guessed.
+    lines = _lines("cache-cost/claude-agent-measurements.jsonl")[:2]
+    lines.append(json.dumps({
+        "type": "system", "subtype": "task_progress", "task_id": "synthetic-worker",
+        "model": "unavailable", "effort": "unavailable", "total_cost_usd": 0.2,
+        "usage": {"total_tokens": 900},
+    }))
+    agent = _feed_all(_fresh(), lines).activity.agents[0]
+    assert agent.models == ("worker-model", "unavailable")
+    assert agent.efforts == ("high", "unavailable")
+    assert agent.context == 900
+    assert agent.cost_dollars is None
+    assert agent.cost_unavailable

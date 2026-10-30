@@ -689,3 +689,54 @@ def test_codex_backend_agent_commands_all_start_with_codex(
     }
     starts = {name: command[:1] for name, command in commands.items()}
     assert starts == {name: ["codex"] for name in commands}, starts
+
+
+# Cache-cost design, Modules config: shared native-spelling price overrides.
+PRICE_TABLE = '[prices."custom"]\ninput = 3\ncached_input = 1.5\noutput = 7\n'
+
+
+def test_price_table_loads_required_rates_and_optional_write_rates(tmp_path, home):
+    # Breaks when the shared prices table is ignored or optional write rates are discarded.
+    from relay.pricing import Rate
+
+    cfg = _load_ok(_toml(tmp_path, PRICE_TABLE), {})
+    assert cfg.prices == {"custom": Rate(3, 1.5, 7)}
+    cfg = _load_ok(_toml(tmp_path, PRICE_TABLE + 'cache_write_30m = 4\ncache_write_12h = 9\n'), {})
+    assert cfg.prices == {"custom": Rate(3, 1.5, 7, 4, 9)}
+
+
+def test_price_table_rejects_unknown_keys(tmp_path, home):
+    # Breaks when an unknown bucket is silently ignored instead of rejected.
+    assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
+    with pytest.raises(ConfigError):
+        load_config(_toml(tmp_path, PRICE_TABLE + 'cache_write_1h = 2\n'), {})
+
+
+def test_price_table_requires_all_three_base_rates(tmp_path, home):
+    # Breaks when a missing base rate is guessed or defaulted.
+    assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
+    for missing in ('input = 3\n', 'cached_input = 1.5\n', 'output = 7\n'):
+        with pytest.raises(ConfigError):
+            load_config(_toml(tmp_path, PRICE_TABLE.replace(missing, '')), {})
+
+
+def test_every_price_field_rejects_invalid_numbers(tmp_path, home):
+    # Breaks when any field admits boolean, nonnumeric, negative or nonfinite rates.
+    assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
+    for field in ('input', 'cached_input', 'output', 'cache_write_30m', 'cache_write_12h'):
+        for value in ('-1', 'true', '"1"', 'inf', '-inf', 'nan'):
+            lines = [line for line in PRICE_TABLE.splitlines() if not line.startswith(field + ' =')]
+            with pytest.raises(ConfigError):
+                load_config(_toml(tmp_path, '\n'.join(lines) + f'\n{field} = {value}\n'), {})
+
+
+def test_missing_optional_write_rate_stays_unavailable_for_billed_writes(tmp_path, home):
+    # Breaks when omitted write rates are treated as a zero or fallback rate.
+    from relay.pricing import Unpriced, Usage, dollars
+
+    cfg = _load_ok(_toml(tmp_path, PRICE_TABLE), {})
+    assert cfg.prices['custom'].cache_write_30m is None
+    assert cfg.prices['custom'].cache_write_12h is None
+    for fields in ({'cache_write_30m': 1}, {'cache_write_12h': 1}):
+        with pytest.raises(Unpriced, match='.+'):
+            dollars(cfg, (Usage('t', 'custom', 10, 0, 0, **fields),))

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from relay.backends import get_backend, replay
+from relay.backends import _snapshot
 from relay.backends.claude import ClaudeBackend
 from relay.backends.codex import CodexBackend
 from relay.backends.generic import GenericBackend
@@ -297,3 +298,61 @@ def test_generic_has_no_telemetry() -> None:
     assert backend.capabilities.dollars is False
     assert backend.capabilities.subagents is False
     assert backend.parse(_state(), "plain stdout").spend == Spend(0, 0.0)
+
+
+def test_snapshot_restores_usage_and_old_and_new_agent_measurements(tmp_path: Path) -> None:
+    # Breaks when replay loses saved usage, zero costs or old-snapshot unavailable defaults.
+    snapshot = json.loads((Path(__file__).parent / "fixtures/cache-cost/snapshot.json").read_text())
+    log = tmp_path / "saved.jsonl"
+    log.write_text("")
+    log.with_suffix(".backend.json").write_text(json.dumps({"backend": "codex"}))
+    path = log.with_suffix(".telemetry.json")
+    old_snapshot = dict(snapshot)
+    old_snapshot.pop("usage")
+    old_snapshot["activity"] = {"agents": [snapshot["activity"]["agents"][1]], "events": [], "live": []}
+    path.write_text(json.dumps(old_snapshot))
+    old_state = _snapshot(path)
+    assert old_state.usage == ()
+    assert old_state.activity.agents[0].cost_dollars is None
+    assert old_state.activity.agents[0].cost_unavailable
+    assert replay(log) == old_state
+    path.write_text(json.dumps(snapshot))
+    state = _snapshot(path)
+    assert len(state.usage) == 1
+    usage = state.usage[0]
+    assert type(usage).__name__ == "Usage"
+    assert (usage.thread, usage.model, usage.input, usage.cached_input, usage.output) == ("saved-worker", "retired-model", 120, 70, 9)
+    assert (usage.cache_write_30m, usage.cache_write_12h, usage.unavailable) == (20, None, "12h writes unknown")
+    assert state.spend == Spend(129, 0.875)
+    measured, old = state.activity.agents
+    assert measured.models == ("retired-model", "unavailable")
+    assert measured.efforts == ("high", "unavailable")
+    assert (measured.cost_dollars, measured.cost_basis, measured.cost_unavailable) == (0.0, "reported", None)
+    assert old.models == old.efforts == ()
+    assert (old.cost_dollars, old.cost_basis, old.cost_unavailable) == (None, "none", "not reported")
+    assert state.activity.events[0].agent == measured
+    assert replay(log) == state
+
+
+def test_snapshot_uses_shared_agent_restoration_for_inventory_and_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when either saved inventory or saved event records bypass shared restoration.
+    from relay import agents
+
+    saved = json.loads((Path(__file__).parent / "fixtures/cache-cost/snapshot.json").read_text())
+    path = tmp_path / "saved.json"
+    path.write_text(json.dumps(saved))
+    seen = []
+    restore = agents.restore_agent
+
+    def observed(value: dict) -> agents.Agent:
+        seen.append(value["task_id"])
+        return restore(value)
+
+    monkeypatch.setattr(agents, "restore_agent", observed)
+    state = _snapshot(path)
+    assert seen.count("saved-worker") == 2
+    assert seen.count("old-worker") == 1
+    assert len(state.activity.agents) == 2
+    assert len(state.activity.events) == 1
