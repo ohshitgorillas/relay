@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-refresh-empty"}
+{"type":"assistant","message":{"id":"msg-refresh-empty","type":"message","role":"assistant","content":[{"type":"text","text":"No changed paths remain in scope."}],"usage":{"input_tokens":1,"output_tokens":1}},"session_id":"sess-refresh-empty"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"result":"MAP\nLINKS\nEND MAP","session_id":"sess-refresh-empty","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}

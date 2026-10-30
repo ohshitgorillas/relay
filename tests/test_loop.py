@@ -27,7 +27,7 @@ from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
 from relay.loop import run
 from relay.queue import parse_queue
-from relay.research import Map, block
+from relay.research import Map, block, changed, digest, load, parse_map, save, stamp
 from relay.state import State
 from harness import RECORD as _RECORD
 from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
@@ -3752,9 +3752,9 @@ def _map_block(commit: str) -> str:
     return block(Map(sid="s1", commit=commit, files=MAPPED_FILES, body=MAP_BODY))
 
 
-def _mapped_worktree(repo: GitRepo) -> str:
+def _mapped_worktree(repo: GitRepo, cwd: Path | None = None) -> str:
     """Commit every file the map names in the `lead/s1` worktree; return that worktree's HEAD."""
-    wt = repo.worktrees["s1"]
+    wt = cwd or repo.worktrees["s1"]
     for name in MAPPED_FILES:
         path = wt / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3892,45 +3892,204 @@ def test_a_fresh_lead_after_a_retire_reuses_the_map_when_its_files_are_unchanged
     assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "lead"]
 
 
-def test_a_fresh_lead_after_a_retire_that_changed_a_mapped_file_gets_a_fresh_map(
+@pytest.mark.parametrize("edit", ["committed", "uncommitted", "untracked"])
+def test_a_fresh_lead_after_a_retire_refreshes_only_the_changed_mapped_file(
+    edit: str,
     cfg: Config,
     tmp_path: Path,
     git_repo: GitRepo,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Breaks when: the second pass reuses a map whose file the retired lead changed, the
-    # refreshing research runs outside the section worktree, or the refreshed map keeps the stale
-    # map's commit instead of the HEAD read again before the researcher reran.
+    # Breaks when: one changed file causes a full remap, untracked or uncommitted edits are
+    # missed, unchanged entries are discarded, or the lead receives the old entry for git.py.
     commit = _mapped_worktree(git_repo)
     queue = _research_queue(git_repo)
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
     wt = git_repo.worktrees["s1"]
+    if edit == "untracked":
+        git_repo.git("rm", "--cached", "relay/git.py", cwd=wt)
+        commit = git_repo.commit(cwd=wt, message="leave mapped file untracked")
     edited = tmp_path / "edited-git.py"
     edited.write_text("# relay/git.py, edited by the lead\n")
     changed = (edited, wt / "relay" / "git.py")
     # The retired lead commits its edit in the `lead/s1` worktree, so HEAD moves on.
     committed = [*_GIT, "-C", str(wt), "commit", "-q", "-a", "-m", "lead edit"]
-    leads_plan = [_step(RETIRED_LEAD, write=changed, then=committed), _step(DONE_LEAD)]
+    leads_plan = [_step(RETIRED_LEAD, write=changed, then=committed if edit == "committed" else None), _step(DONE_LEAD)]
     cfg = _researched(cfg, tmp_path, leads_plan)
+    refreshes = [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")]
+    cfg = dataclasses.replace(
+        cfg, research_command=_plan(tmp_path, cfg.lead_command[0], "research", refreshes, False)
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     head = git_repo.git("rev-parse", "HEAD", cwd=wt).strip()
-    assert head != commit
+    assert (head != commit) == (edit == "committed")
     research = _research_runs(tmp_path)
     assert len(research) == 2
     for record in research:
         assert Path(str(record["cwd"])).resolve() == git_repo.worktrees["s1"]
+    kept = Map("s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip())
+    assert block(kept) in str(research[1]["prompt"])
+    assert "relay/git.py" in str(research[1]["prompt"])
+    assert "relay/loop.py" not in str(research[1]["prompt"])
     leads = _runs(tmp_path, "lead")
     assert len(leads) == 2
     assert f"map s1 at {commit}" in str(leads[0]["prompt"])
     assert f"map s1 at {head}" in str(leads[1]["prompt"])
-    assert f"map s1 at {commit}" not in str(leads[1]["prompt"])
-    assert MAP_BODY in str(leads[1]["prompt"])
-    assert _map_block(head) in str(leads[1]["prompt"])
+    merged = Map("s1", head, MAPPED_FILES, (FIXTURES / "research-merged.txt").read_text().strip())
+    assert block(merged) in str(leads[1]["prompt"])
+    assert "relay/git.py:12 | head runs git rev-parse HEAD" not in str(leads[1]["prompt"])
     texts = _texts(capsys.readouterr().out)
     assert not any(t.endswith("still current, reused") for t in texts), texts
     assert [e["kind"] for e in _run_entries(queue, cfg)] == ["research", "lead", "research", "lead"]
+
+
+def test_a_map_drawn_in_main_is_reused_in_a_new_lead_worktree_with_matching_bytes(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: changing from the main checkout to lead/s1 triggers research despite
+    # identical mapped bytes, or a newly researched map is saved without its file digests.
+    wt = git_repo.worktrees["s1"]
+    git_repo.git("worktree", "remove", str(wt))
+    git_repo.git("branch", "-D", "lead/s1")
+    commit = _mapped_worktree(git_repo, git_repo.root)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", "lead/s1", str(wt)]
+    seen = tmp_path / "main-map-seen.map"
+    state = State.open(queue, cfg)
+    cfg = _researched(
+        cfg, tmp_path,
+        [_step(RETIRED_LEAD, then=create), _step(DONE_LEAD, write=(state.map_path("s1"), seen))],
+    )
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    records = _research_runs(tmp_path)
+    assert len(records) == 1
+    assert Path(str(records[0]["cwd"])).resolve() == git_repo.root.resolve()
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 2
+    assert all(Path(str(lead["cwd"])).resolve() == git_repo.root.resolve() for lead in leads)
+    assert all(_map_block(commit) in str(lead["prompt"]) for lead in leads)
+    saved = load(seen, "s1")
+    assert saved is not None
+    assert saved.digests == tuple(digest(wt, path) for path in saved.files)
+
+
+def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_next_pass(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the freshness interval starts again just before researcher launch,
+    # trusting retained entries whose file changed after the freshness check.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    wt = git_repo.worktrees["s1"]
+    state = State.open(queue, cfg)
+    checked_at = time.time_ns()
+    for path in MAPPED_FILES:
+        os.utime(wt / path, ns=(checked_at - 100, checked_at - 100))
+    mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
+    assert mapped is not None
+    save(stamp(mapped, wt, checked_at), state.map_path("s1"))
+    (wt / "relay/git.py").write_text("# changed before freshness checking\n")
+    os.utime(wt / "relay/git.py", ns=(checked_at - 50, checked_at - 50))
+    clock = [checked_at]
+    monkeypatch.setattr(time, "time_ns", lambda: clock[0])
+    edited = False
+
+    def edit_after_check(mapped: Map, cwd: Path) -> frozenset[str]:
+        nonlocal edited
+        result = changed(mapped, cwd)
+        if not edited:
+            retained = cwd / "relay/research.py"
+            retained.write_text("# changed after freshness checking\n")
+            os.utime(retained, ns=(checked_at + 1, checked_at + 1))
+            clock[0] = checked_at + 2
+            edited = True
+        return result
+
+    monkeypatch.setattr("relay.research.changed", edit_after_check)
+    seen = tmp_path / "first-refresh.map"
+    cfg = _researched(
+        cfg, tmp_path,
+        [_step(RETIRED_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD)],
+    )
+    refreshes = [_step("stream-research-refresh.jsonl"), _step("stream-research-empty-refresh.jsonl")]
+    cfg = dataclasses.replace(
+        cfg, research_command=_plan(tmp_path, cfg.lead_command[0], "research", refreshes, False)
+    )
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    first = load(seen, "s1")
+    assert first is not None
+    assert dict(zip(first.files, first.digests))["relay/research.py"] == "-"
+    records = _research_runs(tmp_path)
+    assert len(records) == 2
+    second_prompt = str(records[1]["prompt"])
+    assert "relay/research.py" in second_prompt
+    assert "relay/research.py:30-41" not in second_prompt
+    assert "relay/git.py:18-22" in second_prompt
+
+
+@pytest.mark.parametrize("failure", ["failed", "invalid", "over-cap"])
+def test_an_unsuccessful_refresh_keeps_the_saved_map_and_rechecks_it_on_the_next_pass(
+    failure: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a bad refresh drops or replaces the saved map, hands stale pointers to
+    # the lead, or the next load reuses stale disk contents instead of refreshing again.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    wt = git_repo.worktrees["s1"]
+    state = State.open(queue, cfg)
+    mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
+    assert mapped is not None
+    original = stamp(mapped, wt, time.time_ns())
+    save(original, state.map_path("s1"))
+    (wt / "relay/git.py").write_text("# edited after the saved map\n")
+    snapshots: list[Map | None] = []
+    append = Ledger.append
+
+    def observe(self: Ledger, *args: Any, **kwargs: Any) -> None:
+        if (args[0] if args else kwargs.get("kind")) == "lead":
+            snapshots.append(load(state.map_path("s1"), "s1"))
+        append(self, *args, **kwargs)
+
+    monkeypatch.setattr(Ledger, "append", observe)
+    if failure == "over-cap":
+        cfg = dataclasses.replace(cfg, map_max_lines=4)
+    leads = [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_LEAD)]
+    cfg = _researched(cfg, tmp_path, leads)
+    bad = _step(
+        "stream-research-invalid-refresh.jsonl" if failure == "invalid" else "stream-research-refresh.jsonl",
+        exit=1 if failure == "failed" else 0,
+    )
+    refreshes = [bad, bad, _step("stream-research-empty-refresh.jsonl")]
+    cfg = dataclasses.replace(
+        cfg, research_command=_plan(tmp_path, cfg.lead_command[0], "research", refreshes, False)
+    )
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    records = _research_runs(tmp_path)
+    assert len(records) == 3
+    kept = Map("s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip())
+    assert all(block(kept) in str(record["prompt"]) for record in records)
+    leads = _runs(tmp_path, "lead")
+    assert len(leads) == 3
+    assert all("map s1 at" not in str(lead["prompt"]) for lead in leads[:2])
+    assert snapshots[:2] == [original, original]
+    assert block(kept) in str(leads[2]["prompt"])
+    assert snapshots[2] is not None
+    assert snapshots[2].digests == tuple(digest(wt, path) for path in snapshots[2].files)
 
 
 # Research behavior 4: a failed or over-cap research: the lead starts without a map, no failure
