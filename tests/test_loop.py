@@ -1895,6 +1895,8 @@ _PROGRESS = [
     re.compile(_STARTED),
     re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
     re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    # relay-cache-cost-design.md:156: empty inventories report their observation limit.
+    re.compile(r".*no subagents observed.*"),
     re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
     re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
     re.compile(r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"),
@@ -2062,33 +2064,43 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
             f"relay go {name}: started; no token budget, no dollar budget",
             f"lead {a}: started fresh",
             f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+            "no subagents observed",
             f"section {a}: failed (1 of 2)",
             f"lead {a}: started, resuming sess-lead-2",
             f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
             _running(a, 1, top, literal),
             f"check {a}: passed",
             f"lead {b}: started, resuming sess-lead-1",
             f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+            "no subagents observed",
             f"recut {b}: started: {RECUT_REASON}",
             f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
             f"section {b}: failed (1 of 2)",
             f"lead {b}: started, resuming sess-lead-4",
             f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+            "no subagents observed",
             f"section {b}: needs an answer: {QUESTION}",
             f"lead {c}: started, resuming sess-lead-5",
             f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
             _running(c, 3, top, literal),
             f"check {c}: passed",
             f"waiting for answers on {b}",
             f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
             f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
         ]
 
     tail = [
         "<ping.stopped>",
         f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
     ]
-    assert _texts(captured.out) in [
+    # The new row's phrase is specified; its surrounding label is presentation.
+    assert [
+        "no subagents observed" if "no subagents observed" in text else text
+        for text in _texts(captured.out)
+    ] in [
         expected
         for literal in (False, True)
         for expected in (
@@ -3740,9 +3752,18 @@ MAP_BODY = _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len
 # Every path the map names (relay-research-design.md:43).
 MAPPED_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
 # The lead's subagents in AGENTS_LEAD as a ledger line records them (relay-research-design.md:143).
+# relay-cache-cost-design.md:76,154 adds unavailable measurement defaults.
 LEAD_AGENTS = [
-    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
-    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+    {
+        "name": "builder", "task_id": "a1", "total_tokens": 21844,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
+    {
+        "name": "test-writer", "task_id": "a2", "total_tokens": 41000,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
 ]
 
 
@@ -5791,3 +5812,163 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
     pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
     assert pings == [f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"], _pings(tmp_path)
+
+
+def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_replay(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop relies on lead-written cost rows, loses final descendants,
+    # bills cache as full input, doubles detail spend, or replay loses final report rows.
+    queue = _queue_of(tmp_path / "cached-queue.md", "cached-section")
+    from relay.backends.codex import CodexBackend
+    from relay.backends.codex_session import SessionReader
+    from relay.pricing import dollars
+
+    fixture = json.loads((FIXTURES / "cache-cost/end-to-end-billing.json").read_text())
+    home = tmp_path / "synthetic-codex"
+    sessions = {row["id"]: row for row in fixture["sessions"]}
+    folder = home / "sessions" / "2026" / "10" / "29"
+    folder.mkdir(parents=True)
+    for sid, row in sessions.items():
+        counts = {
+            "input_tokens": row["input"], "cached_input_tokens": row["cached"],
+            "cache_write_input_tokens": 0, "output_tokens": row["output"],
+            "reasoning_output_tokens": 0, "total_tokens": row["input"] + row["output"],
+        }
+        records = [
+            {"type": "session_meta", "payload": {"id": sid}},
+            {"type": "turn_context", "payload": {"model": row["model"], "effort": row["effort"]}},
+            {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": counts, "last_token_usage": counts,
+                "model_context_window": 258400,
+            }}},
+        ]
+        (folder / f"rollout-2026-10-29T01-52-00-{sid}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records)
+        )
+
+    polls = []
+
+    class BillingEvidenceReader(SessionReader):
+        """Use real wire normalization; supplement only explicitly synthetic dimensions."""
+
+        def __init__(self, home, session_id, *, boundary=None):
+            super().__init__(home, session_id, boundary=boundary)
+            self.sid = session_id
+
+        def poll(self, state, *, force_scan=False):
+            state = super().poll(state, force_scan=force_scan)
+            polls.append((self.sid, force_scan))
+            if self.sid in sessions:
+                self.usage = tuple(dataclasses.replace(
+                    usage, cache_write_30m=0, cache_write_12h=0, unavailable=None,
+                ) for usage in self.usage)
+                self.unavailable = None
+                self.children = tuple(sessions[self.sid]["children"])
+            return state
+
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr("relay.backends.codex.SessionReader", BillingEvidenceReader)
+    calls = []
+    final_states = []
+
+    def finished_run(argv, stdin_text, cwd, run_dir, on_event, retire_flag, **kwargs):
+        calls.append(stdin_text)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log = run_dir / "1.jsonl"
+        log.write_text("")
+        backend = CodexBackend()
+        state = StreamState(None, 0, Spend(0, 0.0), None, False)
+        state = backend.parse(state, json.dumps({"type": "thread.started", "thread_id": fixture["lead"]}))
+        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
+            "id": "synthetic-discovery", "type": "collab_tool_call", "tool": "spawn_agent",
+            "sender_thread_id": fixture["lead"],
+            "receiver_thread_ids": [fixture["worker"], fixture["missing"]],
+            "prompt": "Synthetic fixture work", "status": "completed",
+            "agents_states": {fixture["worker"]: {"status": "completed", "message": None}},
+        }}))
+        state = backend.poll(state)
+        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
+            "id": "synthetic-descendant-status", "type": "collab_tool_call", "tool": "spawn_agent",
+            "sender_thread_id": fixture["worker"], "receiver_thread_ids": [fixture["descendant"]],
+            "prompt": "", "status": "completed",
+            "agents_states": {fixture["descendant"]: {"status": "failed", "message": "Synthetic failure"}},
+        }}))
+        # Failed is normalized lifecycle evidence, not a claim about CLI status spelling.
+        state = dataclasses.replace(state, activity=dataclasses.replace(
+            state.activity,
+            agents=tuple(dataclasses.replace(agent, status="failed")
+                         if agent.task_id == fixture["descendant"] else agent
+                         for agent in state.activity.agents),
+            live=state.activity.live - {fixture["descendant"]},
+        ))
+        output_file = run_dir / "final.txt"
+        output_file.write_text("All work finished.\nDONE")
+        state = backend.finish(state, output_file)
+        state = dataclasses.replace(state, spend=Spend(3300, dollars(cfg, state.usage)))
+        final_states.append(state)
+        log.with_suffix(".backend.json").write_text(json.dumps({"backend": "codex"}))
+        log.with_suffix(".telemetry.json").write_text(json.dumps(dataclasses.asdict(state), default=list))
+        assert on_event(state) == "go"
+        return relay.runner.RunResult(0, False, state, log)
+
+    monkeypatch.setattr("relay.loop.run_agent", finished_run)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    assert all(sid not in calls[0] for sid in sessions)
+    output = _texts(capsys.readouterr().out)
+    # Independent arithmetic from the design's USD-per-million rates, never stored final costs.
+    expected_costs = {
+        fixture["worker"]: (200 * 2 + 800 * 0.1 + 100 * 10) / 1_000_000,
+        fixture["descendant"]: (500 * 1 + 1500 * 0.05 + 200 * 5) / 1_000_000,
+    }
+    expected_ids = [fixture["worker"], fixture["missing"], fixture["descendant"]]
+    expected = final_states[0].activity.agents
+    assert [agent.task_id for agent in expected] == expected_ids, (expected_ids, expected)
+    assert all((sid, True) in polls for sid in sessions), polls
+    final_rows = [line for line in output if "final cost" in line]
+    assert len(final_rows) == len(expected), output
+    for row, agent in zip(final_rows, expected):
+        assert row.count(agent.task_id) == 1, row
+        if agent.status is not None:
+            assert agent.status in row, row
+        if agent.task_id == fixture["missing"]:
+            assert "model unavailable" in row and "effort unavailable" in row, row
+            assert "final cost unavailable" in row and agent.cost_unavailable, row
+            assert agent.cost_dollars is None, agent
+        else:
+            source = sessions[agent.task_id]
+            assert source["model"] in row and source["effort"] in row, row
+            assert "API-equivalent estimate" in row and "not subscription billing" in row, row
+            amount = re.search(r"\$([0-9.eE+-]+)", row)
+            assert amount is not None
+            assert float(amount.group(1)) == pytest.approx(expected_costs[agent.task_id]), (row, expected_costs)
+    entries = _run_entries(queue, cfg)
+    leads = [entry for entry in entries if entry["kind"] == "lead"]
+    assert len(leads) == 1
+    expected_total = sum(expected_costs.values())
+    assert leads[0]["tokens"] == 3300
+    assert leads[0]["dollars"] == pytest.approx(expected_total), leads[0]
+    assert leads[0]["dollars"] != pytest.approx((1000 * 2 + 100 * 10 + 2000 * 1 + 200 * 5) / 1_000_000)
+    assert len(leads[0]["agents"]) == len(expected)
+    assert [row["task_id"] for row in leads[0]["agents"]] == expected_ids
+    for row, agent in zip(leads[0]["agents"], expected):
+        for field in ("task_id", "models", "efforts", "cost_dollars", "cost_basis", "cost_unavailable"):
+            value = getattr(agent, field)
+            assert field in row and row[field] == (list(value) if isinstance(value, tuple) else value)
+        if agent.task_id in expected_costs:
+            assert row["cost_dollars"] == pytest.approx(expected_costs[agent.task_id])
+    state = State.open(queue, cfg)
+    ledger = Ledger(state.stop_file.parent / "ledger.jsonl")
+    assert ledger.total(None).tokens == 3300
+    assert ledger.total(None).dollars == pytest.approx(expected_total)
+    logs = list((state.stop_file.parent / "runs").glob("*.jsonl"))
+    assert len(logs) == 1
+    restored = relay.backends.replay(logs[0])
+    relay.progress.lead_finished(
+        "cached-section", relay.runner.RunResult(0, False, restored, logs[0]),
+        relay.status.LeadStatus(kind="DONE", text=""),
+    )
+    replayed_rows = [line for line in _texts(capsys.readouterr().out) if "final cost" in line]
+    assert replayed_rows == final_rows, (replayed_rows, final_rows)

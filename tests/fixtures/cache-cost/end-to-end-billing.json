@@ -1,0 +1,12 @@
+{
+  "evidence": "Synthetic billing supplement and session records. Captured Codex token_count and turn_context field names are used, but zero billed writes, standard pricing regime and child relationships here are synthetic normalized evidence, not claims about emitted CLI fields.",
+  "lead": "01a1855b-7ba6-79d3-bf98-98c251634b50",
+  "worker": "01a1855b-7ba6-79d3-bf98-98c251634b51",
+  "descendant": "01a1855b-7ba6-79d3-bf98-98c251634b52",
+  "missing": "01a1855b-7ba6-79d3-bf98-98c251634b53",
+  "sessions": [
+    {"id": "01a1855b-7ba6-79d3-bf98-98c251634b50", "model": "gpt-6.1-sol", "effort": "high", "input": 0, "cached": 0, "output": 0, "children": []},
+    {"id": "01a1855b-7ba6-79d3-bf98-98c251634b51", "model": "gpt-6.1-sol", "effort": "high", "input": 1000, "cached": 800, "output": 100, "children": ["01a1855b-7ba6-79d3-bf98-98c251634b52"]},
+    {"id": "01a1855b-7ba6-79d3-bf98-98c251634b52", "model": "gpt-6.1-terra", "effort": "medium", "input": 2000, "cached": 1500, "output": 200, "children": []}
+  ]
+}
