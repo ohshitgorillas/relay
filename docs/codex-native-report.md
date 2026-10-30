@@ -576,3 +576,382 @@ verified. The predecessor separately supplied absence proof for its PIDs
 31268, 31270, 31271, 31232, 31253, 31259, 31261, 31265, 31267,
 31269, 31272: `ps -p` exited 1 with empty output, and its scratch was
 removed with absence verified. This dispatch created no persistent process.
+
+## F1 — batch 1: model-free hook discovery (2026-10-30)
+
+`git merge main` exited 0: `Merge made by the ort strategy.` Merge commit: `e3120923aff73cc5e0067ea2d20e2b864847506f`. Initial branch `codex-native` was clean; no conflicts.
+
+Scratch: `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4`. Created with `tempfile.mkdtemp(prefix="relay-codex-native-", dir=os.environ["TMPDIR"])`; `git init -q /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo` exited 0, empty output. Copied only `/Users/atom/.codex/config.toml` and `hooks.json` with `shutil.copyfile` into `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home`. Originals are read only for this copy; no hook source is read or executed. All CLI probes below set `CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home` and run in `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo`. No credential/session databases were copied. No model call is authorized or attempted.
+
+Scope: F1 plus the model-free listing half of F2; F3–F9 and F2 runtime execution are deliberately skipped. No `PROVEN` entry can be certified by this batch.
+
+### version
+
+```sh
+codex --version
+```
+
+```text
+codex-cli 0.166.0
+```
+
+Exit 0; stderr: `(empty)`.
+
+### exec-help
+
+```sh
+codex exec --help
+```
+
+```text
+Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  resume  Resume a previous session by id or pick the most recent with --last
+  fork    Fork a previous session by id into a new session
+  review  Run a code review against the current repository
+  help    Print this message or the help of the given subcommand(s)
+
+Arguments:
+  [PROMPT]
+          Initial instructions for the agent. If not provided as an argument (or if `-` is used),
+          instructions are read from stdin. If stdin is piped and a prompt is also provided, stdin
+          is appended as a `<stdin>` block
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value that would otherwise be loaded from `~/.codex/config.toml`.
+          Use a dotted path (`foo.bar.baz`) to override nested values. The `value` portion is parsed
+          as TOML. If it fails to parse as TOML, the raw string is used as a literal.
+          
+          Examples: - `-c model="o3"` - `-c 'sandbox_permissions=["disk-full-read-access"]'` - `-c
+          shell_environment_policy.inherit=all`
+
+      --enable <FEATURE>
+          Enable a feature (repeatable). Equivalent to `-c features.<name>=true`
+
+      --disable <FEATURE>
+          Disable a feature (repeatable). Equivalent to `-c features.<name>=false`
+
+      --strict-config
+          Error out when config.toml contains fields that are not recognized by this version of
+          Codex
+
+  -i, --image <FILE>...
+          Optional image(s) to attach to the initial prompt
+
+  -m, --model <MODEL>
+          Model the agent should use
+
+      --oss
+          Use open-source provider
+
+      --local-provider <OSS_PROVIDER>
+          Specify which local provider to use (lmstudio or ollama). If not specified with --oss,
+          will use config default or show selection
+
+  -p, --profile <CONFIG_PROFILE_V2>
+          Layer $CODEX_HOME/<name>.config.toml on top of the base user config
+
+  -s, --sandbox <SANDBOX_MODE>
+          Select the sandbox policy to use when executing model-generated shell commands
+          
+          [possible values: read-only, workspace-write, danger-full-access]
+
+      --approve-for-me
+          Route approval requests through automatic review using the workspace-write sandbox
+
+      --dangerously-bypass-approvals-and-sandbox
+          Skip all confirmation prompts and execute commands without sandboxing. EXTREMELY
+          DANGEROUS. Intended solely for running in environments that are externally sandboxed
+
+      --dangerously-bypass-hook-trust
+          Run enabled hooks without requiring persisted hook trust for this invocation. DANGEROUS.
+          Intended only for automation that already vets hook sources
+
+  -C, --cd <DIR>
+          Tell the agent to use the specified directory as its working root
+
+      --worktree
+          Run the session in a new managed Git worktree
+
+      --add-dir <DIR>
+          Additional directories that should be writable alongside the primary workspace
+
+      --thread-source <SOURCE>
+          Source classification for newly created or forked threads
+
+      --cyber-access-program <PROGRAM>
+          Request an experimental Cyber access program for this turn (OpenAI provider only). Omit to
+          use server defaults. Not supported with review; fork requires a prompt
+          
+          [possible values: standard, daybreak_blue, daybreak_red]
+
+      --skip-git-repo-check
+          Allow running Codex outside a Git repository
+
+      --ephemeral
+          Run without persisting session files to disk
+
+      --ignore-user-config
+          Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`
+
+      --ignore-rules
+          Do not load user or project execpolicy `.rules` files
+
+      --output-schema <FILE>
+          Path to a JSON Schema file describing the model's final response shape
+
+      --color <COLOR>
+          Specifies color settings for use in the output
+          
+          [default: auto]
+          [possible values: always, never, auto]
+
+      --json
+          Print events to stdout as JSONL
+
+  -o, --output-last-message <FILE>
+          Specifies file where the last message from the agent should be written
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
+
+Exit 0; stderr: `(empty)`.
+
+### startup-baseline
+
+```sh
+codex app-server --print-startup-config
+```
+
+Exit 0. Full output captured in scratch `startup-baseline.stdout`; relevant hook fields will be transcribed below. Stderr: `(empty)`.
+
+**Version gap / FAILED for the requested 0.165 target:** the installed executable reports `codex-cli 0.166.0`, superseding the earlier report’s 0.165.0 inventory. No 0.165 executable was supplied in the permitted inputs. These probes can establish only 0.166.0 behavior; they cannot prove 0.165 behavior. No alternate installation or repository is explored.
+
+Baseline startup listing exact stdout:
+
+```json
+{"appServerVersion":"0.166.0","configRequirements":{"supportsIndependentSpeedModes":true,"requirements":null}}
+```
+
+This contains app-server version and config requirements, with no hook inventory, state keys, source layers, matchers, or commands. Exit 0 is not F1 proof.
+
+### F1 copied-source inventory (configured, not proven loaded)
+
+Exact extraction: `tomllib.loads((home/"config.toml").read_text()).get("hooks")` and `json.loads((home/"hooks.json").read_text())["hooks"]`, using the scratch copies only. Copied config has `features.hooks=true`; its `[hooks]` contains state records, no inline hook definitions.
+
+The rows below exhaust the copied `hooks.json`, not all hooks loaded by `exec`. State-key spelling is corroborated by matching original-path records in the copied config; relocating the file changes the path portion, which remains a candidate until runtime discovery exists. `enabled` is only persisted state; missing means unspecified. Per-run disableability is **unproved for every row**.
+
+| Candidate key suffix after `<home>/hooks.json:` | Layer | Event | Matcher | Exact configured command | Original persisted enabled |
+|---|---|---|---|---|---|
+| `session_start:0:0` | user | SessionStart | `(absent)` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /bin/cat --script-arg=/Users/atom/dev/gauntlet/CLAUDE.md --script-timeout=30` | unspecified |
+| `session_start:1:0` | user | SessionStart | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `session_start:2:0` | user | SessionStart | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/sync-claude.py --rules-hook` | unspecified |
+| `user_prompt_submit:0:0` | user | UserPromptSubmit | `(absent)` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /usr/bin/true --script-timeout=30` | unspecified |
+| `user_prompt_submit:1:0` | user | UserPromptSubmit | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `pre_tool_use:0:0` | user | PreToolUse | `(absent)` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /usr/bin/true --script-timeout=30` | True |
+| `pre_tool_use:1:0` | user | PreToolUse | `^(exec_command\|shell_command\|shell\|Bash)$` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /Users/atom/.codex/hooks/codex-change-budget.py --script-timeout=30` | unspecified |
+| `pre_tool_use:2:0` | user | PreToolUse | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `pre_tool_use:3:0` | user | PreToolUse | `Bash` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.claude/hooks/no-foreground-tests.py --script-timeout 30 --python-arg=-I` | unspecified |
+| `pre_tool_use:4:0` | user | PreToolUse | `Agent\|Task` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.claude/hooks/no-foreground-agents.py --script-timeout 30 --python-arg=-I` | unspecified |
+| `pre_tool_use:5:0` | user | PreToolUse | `Bash` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/dev/gauntlet/.claude/settings.json --scope /Users/atom/dev/gauntlet --script /Users/atom/.claude/hooks/gauntlet-change-budget.py --script-timeout 30` | unspecified |
+| `pre_tool_use:6:0` | user | PreToolUse | `^(?:(?:functions\.)?collaboration[._]*)?(?:list_agents\|wait_agent)$` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -I -B /Users/atom/.codex/hooks/agent-wait-policy.py` | unspecified |
+| `post_tool_use:0:0` | user | PostToolUse | `(absent)` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /usr/bin/true --script-timeout=30` | unspecified |
+| `post_tool_use:1:0` | user | PostToolUse | `^(apply_patch\|Write\|Edit)$` | `python3 -B /Users/atom/.codex/hooks/claude_adapter.py --script /Users/atom/.claude/hooks/gauntlet-doc-budget.py --script-arg=--hook --python-arg=-I --script-timeout=30` | unspecified |
+| `post_tool_use:2:0` | user | PostToolUse | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `post_tool_use:3:0` | user | PostToolUse | `Write\|Edit` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.claude/hooks/gauntlet-doc-budget.py --script-timeout 30 --python-arg=-I --script-arg=--hook` | unspecified |
+| `post_tool_use:4:0` | user | PostToolUse | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.claude/hooks/context-watch --script-timeout 30` | unspecified |
+| `permission_request:0:0` | user | PermissionRequest | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `session_end:0:0` | user | SessionEnd | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `stop:0:0` | user | Stop | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `subagent_stop:0:0` | user | SubagentStop | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/hooks/claude_adapter.py --sync-source /Users/atom/.claude/settings.json --scope '*' --script /Users/atom/.config/iterm2/cc-status --script-timeout 30` | unspecified |
+| `subagent_start:0:0` | user | SubagentStart | `(absent)` | `/opt/homebrew/opt/python@3.15/bin/python3.15 -B /Users/atom/.codex/sync-claude.py --rules-hook` | unspecified |
+
+All listed source commands are text only. No adapter, rules sync, status command, or original-path hook is invoked. Project/inline entries from the actual worktree are not inspected under this batch’s read boundary; runtime completeness cannot be inferred from this copied source.
+
+### F1 seeded multi-layer listing, second attempt
+
+Setup commands were Python standard-library writes, in the scratch only: append a `PreToolUse` group to the copied user JSON; append the following inline TOML to the copied user config; write matching TOML and adjacent JSON in `parent/.codex/`, `parent/repo/.codex/`, and `parent/repo/child/.codex/`; add scratch-only `[projects."<absolute path>"] trust_level="trusted"` records for parent, repo, and child. The git root is `parent/repo`, cwd is its `child`; the outer ancestor fixture is included to test root-boundary discovery, not assumed active.
+
+Representative exact fixture (root project):
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "relay_probe_project_root_inline"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/project_root_inline.marker"
+```
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "relay_probe_project_root_json",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/project_root_json.marker"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+All other fixtures use the same shape and unique `relay_probe_<label>` matcher and `<label>.marker` command, labels `user_json`, `user_inline`, `ancestor_json`, `ancestor_inline`, `project_child_json`, `project_child_inline`; root-project JSON uses `project_root_json` and inline uses `project_root_inline`. No executable hook source is created.
+
+```sh
+cd /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' app-server --print-startup-config
+```
+
+Exit 0.
+
+```text
+stdout: {"appServerVersion":"0.166.0","configRequirements":{"supportsIndependentSpeedModes":true,"requirements":null}}
+stderr: (empty)
+```
+
+**F1 FAILED:** two listing attempts produced no discovered-hook inventory. No further retry of that listing probe is made. A successful process exit does not prove these fixture hooks loaded or that all layers were enumerated.
+
+## F2 — batch 1: listing half only
+
+The second F1 invocation is the seeded baseline. Each probe below adds exactly one candidate per-hook `enabled=false` override to that same fixture/cwd; the copied source suggests the state-key spelling but the listing has not confirmed it. No global hook switch, hook-trust bypass, paid execution, or real configuration edit is used.
+
+### F2 user
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state."/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home/hooks.json:pre_tool_use:7:0".enabled=false' app-server --print-startup-config
+```
+
+Exit 1; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"error":{"code":-32600,"data":{"reason":"configLoad","filePath":null,"line":null,"column":null,"detail":"unknown configuration field `hooks.state.\"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home/hooks.json:pre_tool_use:7:0\"` in -c/--config override"},"message":"failed to load configuration: unknown configuration field `hooks.state.\"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home/hooks.json:pre_tool_use:7:0\"` in -c/--config override"}}
+stderr: Error: startup configuration unavailable
+```
+
+**FAILED (listing evidence):** stdout differs from the baseline; no hook list or disabled state is exposed, so removal of the `user` hook cannot be established. This override probe was run once, with no retry.
+
+### F2 project
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state."/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/.codex/hooks.json:pre_tool_use:0:0".enabled=false' app-server --print-startup-config
+```
+
+Exit 1; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"error":{"code":-32600,"data":{"reason":"configLoad","filePath":null,"line":null,"column":null,"detail":"unknown configuration field `hooks.state.\"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/.codex/hooks` in -c/--config override"},"message":"failed to load configuration: unknown configuration field `hooks.state.\"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/.codex/hooks` in -c/--config override"}}
+stderr: Error: startup configuration unavailable
+```
+
+**FAILED (listing evidence):** stdout differs from the baseline; no hook list or disabled state is exposed, so removal of the `project` hook cannot be established. This override probe was run once, with no retry.
+
+### F2 inline -c
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state."/<session-flags>/config.toml:pre_tool_use:0:0".enabled=false' app-server --print-startup-config
+```
+
+Exit 1; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"error":{"code":-32600,"data":{"reason":"configLoad","filePath":null,"line":null,"column":null,"detail":"unknown configuration field `hooks.state.\"/<session-flags>/config.toml:pre_tool_use:0:0\"` in -c/--config override"},"message":"failed to load configuration: unknown configuration field `hooks.state.\"/<session-flags>/config.toml:pre_tool_use:0:0\"` in -c/--config override"}}
+stderr: Error: startup configuration unavailable
+```
+
+**FAILED (listing evidence):** stdout differs from the baseline; no hook list or disabled state is exposed, so removal of the `inline -c` hook cannot be established. This override probe was run once, with no retry.
+
+### F1/F2 candidate HookSurface and bounded result
+
+| Field | Candidate / evidence status |
+|---|---|
+| `list_args` | `("app-server", "--print-startup-config")`: **FAILED**, prints version/requirements only in both F1 attempts. No replacement listing command appears in the permitted `exec --help` output. |
+| `disable` | `hooks.state."{key}".enabled=false`: candidate inferred from copied state config; the first three F2 invocations exited 1 with `unknown configuration field` errors. **FAILED in this dotted-key form**; no hook removal proved. |
+| `inline` | `hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="<scratch touch command>"}]}]`: concrete candidate used above. General template `hooks.{event}=[{matcher="{matcher}",hooks=[{type="command",command="{command}"}]}]` remains unproved; startup output does not demonstrate parsing/loading, even with `--strict-config`. Proper TOML escaping of substitutions is required. |
+| `trust` | `hooks.state."{key}".trusted_hash="<sha256:content hash>"`: field observed in copied user config, not an established template. Hash construction and inline trust acceptance were not probed (F3 excluded). |
+| `deny` | Unknown; neither `exit2` nor `json` is proved. F4 excluded. |
+
+**DESIGN:** F1 failed to provide the required model-free discovery surface on installed 0.166.0, and the requested 0.165 target is unavailable within the supplied inputs. F2’s listing half is **FAILED / not proved**, with zero hook removals observable; this is not evidence that the overrides fail to disable execution. Neither version receives a `PROVEN` entry. Configured source rows above are not presented as the set actually loaded by `codex exec`. Model execution, F2 runtime marker absence, and F3–F9 were skipped as requested.
+
+Commands were synchronous and completed; no background process or persistent server was launched. Marker files were absent after startup probes; this proves only that this model-free command did not execute the harmless scratch commands, not F2 runtime suppression. No probe command was retried more than twice.
+
+### F2 second and final attempt: override the state map
+
+The first attempts failed with `unknown configuration field` in the dotted quoted-key override; this corrects the earlier preliminary summary. Each final attempt uses an inline TOML map at `hooks.state`, avoiding a quoted path component in the `-c` dotted key. This is the second attempt for each layer, with no further retry.
+
+#### F2 user — final
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state={"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home/hooks.json:pre_tool_use:7:0"={enabled=false}}' app-server --print-startup-config
+```
+
+Exit 0; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"appServerVersion":"0.166.0","configRequirements":{"supportsIndependentSpeedModes":true,"requirements":null}}
+stderr: (empty)
+```
+
+**FAILED (F2 listing):** output is byte-for-byte identical to baseline, exposing no hook inventory or disabled state. No runtime inference or further retry.
+
+#### F2 project — final
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state={"/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/.codex/hooks.json:pre_tool_use:0:0"={enabled=false}}' app-server --print-startup-config
+```
+
+Exit 0; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"appServerVersion":"0.166.0","configRequirements":{"supportsIndependentSpeedModes":true,"requirements":null}}
+stderr: (empty)
+```
+
+**FAILED (F2 listing):** output is byte-for-byte identical to baseline, exposing no hook inventory or disabled state. No runtime inference or further retry.
+
+#### F2 inline -c — final
+
+```sh
+CODEX_HOME=/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/home codex --strict-config -c 'hooks.PreToolUse=[{matcher="relay_probe_cli",hooks=[{type="command",command="/usr/bin/touch /var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/cli.marker"}]}]' -c 'hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:0"={enabled=false}}' app-server --print-startup-config
+```
+
+Exit 0; cwd `/var/folders/w8/42n0_hcx07jbsdd75ttwz3t80000gn/T/relay-codex-native-zsj5v7g4/parent/repo/child`.
+
+```text
+stdout: {"appServerVersion":"0.166.0","configRequirements":{"supportsIndependentSpeedModes":true,"requirements":null}}
+stderr: (empty)
+```
+
+**FAILED (F2 listing):** output is byte-for-byte identical to baseline, exposing no hook inventory or disabled state. No runtime inference or further retry.
+
+Final `disable` candidate: `hooks.state={"{key}"={enabled=false}}`; any CLI acceptance is distinct from proof of disabling. F1 and F2 listing remain FAILED/unproved for the reasons recorded above. F2 runtime and F3–F9 remain skipped.
+
+### F1/F2 cleanup and done-check
+
+Final scratch check: `list(root.glob("*.marker"))` returned `[]`. `shutil.rmtree(root)` removed only the named scratch tree; `assert not root.exists()` passed. Captured outputs were transcribed above before removal. Every subprocess returned synchronously; no background process was launched or left for cleanup. Only `docs/codex-native-report.md` differs from the merge commit.
+
+```sh
+grep -nF 'F2' docs/codex-native-report.md
+```
+
+Exit 0; 18 matching lines. Output trimmed to the first two matches:
+
+```text
+586:Scope: F1 plus the model-free listing half of F2; F3–F9 and F2 runtime execution are deliberately skipped. No `PROVEN` entry can be certified by this batch.
+828:## F2 — batch 1: listing half only
+```
+
+CHOSEN: keep source inventory separate from runtime discovery; report absent evidence as FAILED; do not infer execution suppression from startup output; no model call, code change, configuration-source change, or push.
