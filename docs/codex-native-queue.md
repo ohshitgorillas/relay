@@ -1,21 +1,9 @@
-design docs/superpowers/specs/relay-codex-native-enforcement-design.md | order docs/superpowers/specs/relay-codex-native-enforcement-design.md | main db259df
+design docs/superpowers/specs/relay-codex-native-enforcement-design.md | order docs/superpowers/specs/relay-codex-native-enforcement-design.md | main 544fd92
+landed s1.d1a | 95c2896 | Order step 1 policy grounding portion only
+landed s1.d1b | fc15e25 | Order step 1 cc-status grounding portion only
+landed 3 | 544fd92
+Order step 1 remains partially complete: feasibility (s1.d2, s1.d3) and rollout grounding (s1.d4) remain open.
 section s1 | lead | steps: 1 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s1.d1a | builder | steps: 1 | writes: docs/codex-native-report.md | size: calibration: remaining policy evidence only; no status-command probe; below the stopped combined dispatch | from: s1.d1
-    queue docs/codex-native-queue.md s1.d1a
-    resume 01a18a98-a47a-78f0-ba03-b81c4babf1a5
-    design: docs/superpowers/specs/relay-codex-native-enforcement-design.md
-    step: 1
-    writes: docs/codex-native-report.md
-    part: for `policy.py`: each change/edit budget's limits and command classes, the scratch roots for `rm`, the foreground-test command positions, the exempt agent names, the background form, and the governed docs with their caps;
-    check: grep -nF -e 'classifier' -e 'Foreground' -e 'hygiene' docs/codex-native-report.md
-  s1.d1b | builder | steps: 1 | writes: docs/codex-native-report.md | size: calibration: remaining status-command probe and evidence only; below the stopped combined dispatch | from: s1.d1
-    queue docs/codex-native-queue.md s1.d1b
-    resume 01a18a96-0e59-7c03-beaf-aa42813a04db
-    design: docs/superpowers/specs/relay-codex-native-enforcement-design.md
-    step: 1
-    writes: docs/codex-native-report.md
-    part: `cc-status` behavior;
-    check: grep -nF 'cc-status' docs/codex-native-report.md
   s1.d2 | builder | steps: 1 | writes: docs/codex-native-report.md | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/codex-native-queue.md s1.d2
     design: docs/superpowers/specs/relay-codex-native-enforcement-design.md
@@ -68,16 +56,6 @@ section s2 | lead | steps: 2 | size: lead: tokens: 1395004.9 seconds: 743.7 over
     files: tests/test_ledger.py
     view: stubgen .pyi of relay/loop.py
     view: stubgen .pyi of relay/ledger.py
-section s3 | lead | steps: 3 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s3.d1 | lead | steps: 3 | writes: the writes of docs/research-reuse-queue.md s1 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-    queue docs/codex-native-queue.md s3.d1
-    queue docs/research-reuse-queue.md s1
-  s3.d2 | lead | steps: 3 | writes: the writes of docs/research-reuse-queue.md s2 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-    queue docs/codex-native-queue.md s3.d2
-    queue docs/research-reuse-queue.md s2
-  s3.d3 | lead | steps: 3 | writes: the writes of docs/research-reuse-queue.md s3 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-    queue docs/codex-native-queue.md s3.d3
-    queue docs/research-reuse-queue.md s3
 section s4 | lead | steps: 4, 5, 6 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
   s4.d1 | builder | steps: 4 | writes: relay/pricing.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
     queue docs/codex-native-queue.md s4.d1
