@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"synthetic-lead","model":"parent-only-model","effort":"parent-only-effort"}
+{"type":"system","subtype":"task_started","task_id":"synthetic-worker","subagent_type":"builder","description":"Synthetic measurement task","task_type":"local_agent","model":"worker-model","effort":"high"}
+{"type":"system","subtype":"task_notification","task_id":"synthetic-worker","status":"completed","model":"worker-model","effort":"high","total_cost_usd":0.0}
+{"type":"system","subtype":"task_started","task_id":"synthetic-unmeasured","subagent_type":"test-writer","description":"Synthetic unmeasured task","task_type":"local_agent"}
+{"type":"system","subtype":"task_notification","task_id":"synthetic-unmeasured","status":"failed"}
+{"type":"result","total_cost_usd":0.75,"result":"Synthetic final report","is_error":false}

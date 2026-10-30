@@ -14,6 +14,7 @@ from typing import Callable
 import pytest
 
 from relay.config import Config
+from relay.git import section_branch, section_path
 from harness import RECORD
 from fakes.fake_runner import FakeRunner
 
@@ -146,8 +147,9 @@ _GIT = [
 class GitRepo:
     """A temporary git repository on `main` with one commit and a worktree on `lead/s1`."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, cfg: Config | None = None) -> None:
         self.root = root
+        self.cfg = cfg
         self.worktrees: dict[str, Path] = {}
 
     def git(self, *args: str, cwd: Path | None = None) -> str:
@@ -171,20 +173,22 @@ class GitRepo:
         self.git("commit", "--allow-empty", "-q", "-m", message, cwd=cwd)
         return self.git("rev-parse", "HEAD", cwd=cwd).strip()
 
-    def worktree(self, sid: str) -> Path:
-        """Add a worktree beside the repository on a new branch `lead/<sid>` and return its real path."""
-        path = self.root.parent / f"wt-{sid}"
-        self.git("worktree", "add", "-q", "-b", f"lead/{sid}", str(path))
-        self.worktrees[sid] = path.resolve()
-        return self.worktrees[sid]
+    def worktree(self, sid: str, *, queue: Path | None = None, branch: str | None = None) -> Path:
+        """Add a legacy, custom, or queue-qualified worktree and return its real path."""
+        path = section_path(self.root, queue, sid) if queue else self.root.parent / f"wt-{sid}"
+        name = branch or (section_branch(queue, sid) if queue else f"lead/{sid}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.git("worktree", "add", "-q", "-b", name, str(path))
+        self.worktrees[name if queue or branch else sid] = path.resolve()
+        return path.resolve()
 
 
 @pytest.fixture
-def git_repo(tmp_path: Path) -> GitRepo:
+def git_repo(tmp_path: Path, fake_cfg: Config) -> GitRepo:
     """A temporary git repository with a `lead/s1` worktree (design: Order 2)."""
     root = tmp_path / "repo"
     root.mkdir()
-    repo = GitRepo(root)
+    repo = GitRepo(root, fake_cfg)
     repo.git("init", "-q", "-b", "main")
     repo.commit(message="first")
     repo.worktree("s1")

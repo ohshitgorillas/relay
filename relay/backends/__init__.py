@@ -3,10 +3,12 @@
 import json
 from pathlib import Path
 
-from relay.agents import Activity, Agent, Event
+from relay import agents
+from relay.agents import Activity, Event
 from relay.backends.base import Backend
 from relay.errors import ConfigError
 from relay.ledger import Spend
+from relay.pricing import Usage
 from relay.stream import StreamState
 
 
@@ -34,10 +36,10 @@ def _snapshot(path: Path) -> StreamState:
         spend = Spend(**data["spend"])
         activity = data.get("activity", {})
         activity = Activity(
-            agents=tuple(Agent(**agent) for agent in activity.get("agents", [])),
+            agents=tuple(agents.restore_agent(agent) for agent in activity.get("agents", [])),
             live=frozenset(activity.get("live", [])),
             events=tuple(
-                Event(event["kind"], Agent(**event["agent"]), event["live"])
+                Event(event["kind"], agents.restore_agent(event["agent"]), event["live"])
                 for event in activity.get("events", [])
             ),
         )
@@ -47,6 +49,7 @@ def _snapshot(path: Path) -> StreamState:
                 "spend": spend,
                 "activity": activity,
                 "seen_messages": frozenset(data.get("seen_messages", [])),
+                "usage": tuple(Usage(**usage) for usage in data.get("usage", [])),
             }
         )
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:

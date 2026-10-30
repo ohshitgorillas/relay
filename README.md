@@ -8,7 +8,7 @@ Relay takes its name from how it keeps context small. A lead that passes 100k to
 
 Relay reads a queue written by Guild's `divvyer`: a Markdown file of sections, each one a piece of work for a `lead`. On each pass, `relay go`:
 
-1. Stops if the stop file exists or the budget is spent.
+1. Stops if a drain was requested (see `stop`), the stop file exists or the budget is spent.
 2. Re-reads the queue, wakes any waiting section whose blocker has landed, and picks the first section that is open and not held up by a parked or waiting section.
 3. Parks the section for the owner if its spend is over its dollar cap.
 4. Gets the section a map of its code. A `researcher` reads the section's files and returns `path:line` pointers, which Relay keeps under `maps/` and reuses until a mapped file changes in git. If there is no map, the lead runs without one.
@@ -28,13 +28,17 @@ Relay reads a queue written by Guild's `divvyer`: a Markdown file of sections, e
 
 A `RECUT:` or `DESIGN:` problem may end in ` | guess: <cause>`. Relay passes on only the problem.
 
-A blocker has landed when it is done and its worktree (the one on branch `lead/<id>`, if there is one) has nothing uncommitted. If the blocker was recut out of the queue, it has landed once every section cut from it has.
+A section belongs to its resolved queue path and section id. New worktrees use branch `lead/<queue-id>/<id>` at `<repo>-wt/<queue-id>/<id>` beside the repository, where `<queue-id>` is the full SHA-256 hash of the resolved queue path. Separate queues can therefore both have an `s1` without sharing a worktree. Relay gives the lead the exact branch and path to create or use.
+
+Relay persists a validated branch/path binding for each section. An existing `lead/<id>` or custom branch remains usable when that queue section's saved lead report explicitly identifies it with `BRANCH <branch> <absolute path>` and the pair matches a worktree in the repository. The binding survives later reports without `BRANCH` and remains preferred over a new qualified branch. Relay never adopts an unrecorded legacy worktree just because its section id matches.
+
+A blocker has landed when it is done and its owned worktree, if there is one, has nothing uncommitted. If the blocker was recut out of the queue, it has landed once every section cut from it has.
 
 When only parked and waiting sections are left, Relay waits, checking every `poll_seconds` for an answer, a blocker landing, or the stop file. Every stop sends the owner a ping saying why.
 
 ### Checks
 
-A section's body can carry check lines, `check: <command>` (or `done-check: <command>`). After a lead says `DONE`, Relay runs them in order in the section's worktree (or the repository top if it has none) and stops at the first that fails, with a time limit of `check_timeout` on each:
+A section's body can carry check lines, `check: <command>` (or `done-check: <command>`). After a lead says `DONE`, Relay runs them in order in that queue section's validated worktree (or the queue's repository checkout if it has none) and stops at the first that fails, with a time limit of `check_timeout` on each. Research, refresh, researcher questions and architect code evidence use the same worktree selection:
 
 - Every check passes: the section is done.
 - A check fails: the section stays open, and the next lead gets the failing command and the end of its output. After the third failed check, the section is parked.
@@ -87,12 +91,12 @@ relay stop <queue.md>
 ```
 
 - **`go`** runs the loop until it stops. Progress lines go to stdout, one per event: research, leads and subagents starting and finishing, checks, retires, kills, recuts, design changes, waits and failures. Only one `relay go` can hold a queue at a time. Supported budgets count only the spend of this run; with no budget set, there is no spend limit. The architect cycle limit still applies.
-- **`status`** prints each section's state (`open`, `done`, `parked`, or `waiting on <id>`) with a summary of the subagents its leads spawned, then the spend over the last 7 days and in total.
+- **`status`** prints `run: draining since HH:MM (pid N)` first when a drain is under way, then each section's state (`open`, `done`, `parked`, or `waiting on <id>`) with a summary of the subagents its leads spawned, then the spend over the last 7 days and in total.
 - **`answer`** gives a section the owner's answer, reopens it and clears its architect failure count, including after an architect failure stop. The next lead on that section gets the answer in its prompt, or, if the section was parked on a design decision, the architect does. An answer to a section that is already done is dropped, with a note.
 - **`ask`** puts a question to the section's researcher by resuming its session, and prints only the answer. Leads run it when a worker reports that it needs more than the map gives. It fails if the section has no researcher yet.
-- **`stop`** creates the stop file. A running `relay go` stops at its next check, after the current lead finishes.
+- **`stop`** asks a running `relay go` to drain: it sends SIGTERM, the running agent and its descendants finish and are recorded, nothing new starts, and Relay exits 6. A dispatch the drain holds back (a climb, an architect retry or a design recut) is saved and run first by the next `relay go`. A second `relay stop` on a draining run sends the second SIGTERM and stops it at once. With no live run, `stop` creates the stop file, and the next `relay go` stops at its first check.
 
-Ctrl-C (or SIGTERM) kills the running agent's whole process group before Relay exits.
+Ctrl-C (or a second SIGTERM) kills the running agent's whole process group before Relay exits. The first SIGTERM only starts a drain.
 
 ### Backends and telemetry
 
@@ -106,7 +110,11 @@ Use the researcher's backend when running `relay ask`; a backend mismatch is an 
 | `codex` | Uses `codex exec --json` with generated role instructions, model, reasoning effort and feature settings. Reports tokens and context, and collaboration receiver activity when emitted. Supports token budgets; ignores dollar budgets, including historical dollar spend. |
 | `generic` | Requires an explicit `lead_command`; sends the prompt on stdin and treats plain stdout as the final report. Reports no context, tokens, dollars or subagents, so both budgets and context limits are ignored. Unless set explicitly, research, design and recut commands use the same command. |
 
-Codex context comes from the matching rollout's latest `last_token_usage.total_tokens`; cumulative `total_token_usage.total_tokens` supplies spend. Cumulative tokens are never used as current context, which may fall after compaction. Relay polls the rollout even while stdout is quiet. Missing telemetry at finalization is an explicit error. Codex supplies no dollar costs or per-agent context and duration telemetry here; collaboration activity does not imply those measurements are available. A completed collaboration tool call alone does not mean its receiver agents have finished.
+Codex context comes from the matching rollout's latest `last_token_usage.total_tokens`; cumulative `total_token_usage.total_tokens` supplies spend. Cumulative tokens are never used as current context, which may fall after compaction. Relay polls the rollout even while stdout is quiet. Missing telemetry at finalization is an explicit error. Codex supplies no reported dollar costs or per-agent context and duration telemetry here; collaboration activity does not imply those measurements are available. A completed collaboration tool call alone does not mean its receiver agents have finished.
+
+Every finished lead, including a failed or killed lead, prints each observed subagent's stable ID, name when known, status, observed models and reasoning efforts, and final cost with its basis. Missing measurements say `unavailable` with a reason for missing cost. An empty inventory says `no subagents observed`. Codex discovery follows exposed receiver and child relationships; agents absent from that telemetry cannot be listed. Generic has no subagent telemetry. Saved normalized observations preserve these rows for replay without live session lookup or repricing.
+
+Codex worker costs, when complete billing evidence is available, are API-equivalent estimates, not subscription billing. The shared pricing function distinguishes uncached input, cached reads, each supported billed cache-write duration, and output including reasoning. Cumulative observations replace earlier totals, and resumed runs exclude previously ledgered work. Unknown models, missing cache dimensions or write durations, unsupported pricing regimes, and incomplete or still-running workers leave final cost unavailable; Relay does not guess a price. Actual model and effort come from telemetry, never a role name or parent setting. Claude retains explicitly associated reported worker costs and the reported run total; the run total is never allocated across workers. Ledger agent details preserve measurements without adding them again to aggregate run spend. These worker estimates do not enable Codex dollar budgets.
 
 Codex rotation starts a fresh thread with the previous report as its handoff. The history hint identifies the old thread and the native continuation command, `codex exec resume <id>`, for accessing its history. Relay does not use that command to rotate into the full context it just retired, and it does not send Codex thread IDs to Terminus.
 
@@ -126,7 +134,8 @@ uv run --project ~/dev/relay-wt/codex-fix relay go ~/dev/gauntlet/docs/queue.md 
 | 3 | A budget ran out. |
 | 4 | Stopped by the stop file. |
 | 5 | A section failed twice, or reached two failed architect cycles. |
-| 130 | Interrupted by Ctrl-C or SIGTERM. |
+| 6 | Drained: a drain was requested, and running work finished and was recorded. |
+| 130 | Interrupted by Ctrl-C or a second SIGTERM. |
 
 ## The queue
 
@@ -193,13 +202,13 @@ The default Claude command runs with `bypassPermissions`; Codex uses `--dangerou
 
 ## State on disk
 
-Relay keeps its own record of each queue under `state_root`, in a directory named after the queue's path plus a short hash of it:
+Relay keeps its own record of each queue under `state_root`, in a directory named after the resolved queue path plus its existing short hash. Existing state directories remain discoverable; no queue files or live state need a manual migration:
 
 | Path | What it holds |
 |---|---|
-| `state.json` | Each section's status, lead, architect-cycle and check-failure counts, last architect failure reason, parked question, answer, last session and last report, what it waits on, its researcher session, and where it stands on the ladder. |
+| `state.json` | Each section's status, any dispatch a drain held back, lead, architect-cycle and check-failure counts, last architect failure reason, parked question, answer, last session and last report, validated worktree branch/path binding, what it waits on, its researcher session, and where it stands on the ladder. |
 | `ledger.jsonl` | One line per finished run (lead, research, ask, recut or design) and per check: time, section, session, tokens and dollars. |
-| `maps/<id>.map` | Each section's research map. |
+| `maps/<id>.map` | Each section's research map, including its owning queue identity and original research commit. |
 | `runs/<n>.jsonl` | Each run's stdout, verbatim: Claude stream-json, Codex JSON events or generic plain text. |
 | `runs/<n>.backend.json` | The backend used for the run. Older logs without this metadata are treated as Claude. |
 | `runs/<n>.telemetry.json` | Saved normalized observations for historical replay without live Codex rollout files. |
@@ -207,8 +216,11 @@ Relay keeps its own record of each queue under `state_root`, in a directory name
 | `runs/<n>.stderr`, `runs/<n>.pid` | Each run's stderr and PID. |
 | `runs/<n>.check` | The output of the checks run after that lead's `DONE`. |
 | `runs/retire`, `runs/research-<id>` | The flags a lead and a researcher check at each safe point; Relay creates them to ask for a retire. |
+| `run.json` | The live `relay go`'s pid and whether it is draining, with the time the drain began. Written once the lock is held and removed when the run ends. |
 | `STOP` | The stop file. |
 | `lock`, `write.lock`, `research-<id>.lock` | Held by the running `relay go`, around each state write, and while a section's map is drawn or asked. |
+
+Maps saved before queue ownership was recorded, or attributed to another queue, receive one full remap before reuse, even if their mapped files still match. Relay also discards the old researcher session. A researcher question against such a saved map fails with a request to refresh research first. Correctly owned maps keep the existing file-digest reuse behavior and retain the commit where the research originally ran.
 
 To start a queue over from scratch, delete its directory under `state_root`.
 

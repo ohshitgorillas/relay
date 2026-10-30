@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from relay.backends.base import Capabilities
     from relay.agents import Agent
     from relay.check import CheckResult
+    from relay.pricing import Usage
 
 
 Kind = Literal["lead", "recut", "research", "ask", "design"]
@@ -54,8 +55,11 @@ class Ledger:
         session: str | None,
         spend: Spend,
         map_commit: str | None = None,  # the map the run's prompt carried; null when none
-        agents: tuple["Agent", ...] = (),  # each subagent: {"name", "task_id", "total_tokens"}
+        agents: tuple["Agent", ...] = (),  # detail only; never added to the run's spend
         rung: int | None = None,  # the ladder rung; a line gains "rung" only when set
+        *,
+        basis: str = "reported",
+        usage: tuple[Usage, ...] = (),
     ) -> None:
         entry = {
             "time": time.time(),
@@ -64,13 +68,35 @@ class Ledger:
             "session": session,
             "tokens": spend.tokens,
             "dollars": spend.dollars,
+            "basis": basis,
             "map": map_commit,
             "agents": [
-                {"name": a.name, "task_id": a.task_id, "total_tokens": a.context} for a in agents
+                {
+                    "name": a.name,
+                    "task_id": a.task_id,
+                    "total_tokens": a.context,
+                    "models": a.models,
+                    "efforts": a.efforts,
+                    "cost_dollars": a.cost_dollars,
+                    "cost_basis": a.cost_basis,
+                    "cost_unavailable": a.cost_unavailable,
+                }
+                for a in agents
             ],
         }
         if rung is not None:
             entry["rung"] = rung
+        if usage:
+            entry["usage"] = [
+                {
+                    "thread": row.thread,
+                    "model": row.model,
+                    "input": row.input,
+                    "cached_input": row.cached_input,
+                    "output": row.output,
+                }
+                for row in usage
+            ]
         self._write(entry)
 
     def _write(self, entry: dict) -> None:

@@ -13,6 +13,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +29,7 @@ from dataclasses import replace
 from relay.backends import replay
 import relay.files as publication
 import relay.runner as runner_module
+from relay.errors import ExitCode
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -1251,4 +1253,190 @@ def test_a_signal_landing_mid_kill_leaves_the_child_signalled_and_reaped_once(
         if driver.poll() is None:
             driver.kill()
             driver.wait()
+        _cleanup(grandfile, pidfile)
+
+
+# Graceful drain contract: relay-drain-design.md, Modules / relay.runner.py.
+
+
+@pytest.mark.parametrize("exceptional", [False, True], ids=["return", "exception"])
+def test_drain_first_term_sets_the_switch_once_and_restores_handlers(exceptional: bool) -> None:
+    # Breaks when arming changes SIGINT, calls the callback too early, loses the request,
+    # or leaves its SIGTERM handler installed after either normal or exceptional exit.
+    requested = []
+    previous = signal.getsignal(signal.SIGTERM)
+    interrupt = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        try:
+            with runner_module.drain_armed(lambda: requested.append("draining")) as switch:
+                assert switch.requested is False
+                assert requested == []
+                assert signal.getsignal(signal.SIGINT) is interrupt
+                signal.raise_signal(signal.SIGTERM)
+                assert switch.requested is True
+                assert requested == ["draining"]
+                with pytest.raises(KeyboardInterrupt):
+                    signal.raise_signal(signal.SIGTERM)
+                assert requested == ["draining"]
+                if exceptional:
+                    raise ValueError("leave the armed run")
+        except ValueError:
+            assert exceptional
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGINT) is interrupt
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_drain_pause_returns_when_requested_instead_of_waiting_the_whole_interval() -> None:
+    # Breaks when a parked run sleeps its full poll interval after a drain request.
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    timer = None
+    try:
+        with runner_module.drain_armed(lambda: None) as switch:
+            timer = threading.Timer(0.05, os.kill, args=(os.getpid(), signal.SIGTERM))
+            timer.start()
+            started = time.monotonic()
+            switch.pause(10)
+            assert switch.requested is True
+            assert time.monotonic() - started < 1.5
+            started = time.monotonic()
+            switch.pause(10)
+            assert time.monotonic() - started < 0.5
+    finally:
+        if timer is not None:
+            timer.cancel()
+            timer.join(2)
+        signal.signal(signal.SIGTERM, previous)
+
+
+def test_unrequested_drain_pause_waits_for_its_interval() -> None:
+    # Breaks when pauses return early without a request.
+    switch = runner_module.DrainSwitch()
+    started = time.monotonic()
+    switch.pause(1.05)
+    assert time.monotonic() - started >= 1.04
+    assert switch.requested is False
+
+
+def test_drain_arming_off_the_main_thread_installs_no_handlers() -> None:
+    # Breaks when threaded loop callers try to install a process-wide signal handler.
+    before = signal.getsignal(signal.SIGTERM)
+    observations = []
+    errors = []
+
+    def worker() -> None:
+        try:
+            with runner_module.drain_armed(lambda: observations.append("callback")) as switch:
+                observations.append(switch.requested)
+                switch.pause(0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert errors == []
+    assert observations == [False]
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+@pytest.mark.parametrize("missing", [False, True], ids=["live", "already-gone"])
+def test_signal_drain_sends_term_and_tolerates_a_run_that_just_exited(
+    monkeypatch: pytest.MonkeyPatch, missing: bool
+) -> None:
+    # Breaks when stop sends the wrong signal, targets a group, or races a finished run.
+    sent = []
+
+    def record(pid, signum):
+        sent.append((pid, signum))
+        if missing:
+            raise ProcessLookupError("run finished")
+
+    monkeypatch.setattr(os, "kill", record)
+    runner_module.signal_drain(73591)
+    assert sent == [(73591, signal.SIGTERM)]
+
+
+def test_signal_drain_preserves_other_signalling_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Breaks when stop conceals permission errors as an already-finished run.
+    def denied(pid, signum):
+        raise PermissionError("cannot signal that run")
+
+    monkeypatch.setattr(os, "kill", denied)
+    with pytest.raises(PermissionError, match="cannot signal that run"):
+        runner_module.signal_drain(73591)
+
+
+# This driver invokes the real runner and existing fake; the test body sends each signal.
+DRAIN_DRIVER = DRIVER.replace(
+    "from relay.runner import run_agent",
+    "from relay.runner import run_agent, drain_armed\nfrom relay.errors import ExitCode",
+).replace(
+    '\nrun_agent(a["argv"]',
+    '\nwith drain_armed(lambda: Path(a["requested"]).touch()):\n    result = run_agent(a["argv"]',
+) + '\nPath(a["completed"]).write_text(json.dumps({"exit": result.exit_code, "killed": result.killed, "text": result.stream.result_text}))\nsys.exit(ExitCode.DRAINED)\n'
+
+
+@pytest.mark.parametrize("force", [None, signal.SIGTERM, signal.SIGINT], ids=["finish", "second-term", "ctrl-c"])
+def test_first_term_preserves_the_running_group_and_force_stops_it(
+    force: int | None, fake: list[str], tmp_path: Path, run_dir: Path
+) -> None:
+    # Breaks when the group guard kills on the first TERM, loses the normal result,
+    # or fails to kill the live group on a second TERM or Ctrl-C while draining.
+    pidfile = tmp_path / "pid"
+    grandfile = tmp_path / "grandchild"
+    marker = tmp_path / "streaming"
+    requested = tmp_path / "draining"
+    completed = tmp_path / "completed"
+    argv = (
+        _sh('echo $$ > "$1"; "$2"; sleep 1', pidfile, fake[0])
+        if force is None
+        else _sh(LONG, pidfile, grandfile, fake[0])
+    )
+    args = {
+        "argv": argv, "cwd": str(tmp_path), "run_dir": str(run_dir),
+        "retire": str(tmp_path / "retire"), "marker": str(marker),
+        "requested": str(requested), "completed": str(completed),
+    }
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO), env.get("PYTHONPATH", "")) if p)
+    with (tmp_path / "drain-driver.out").open("wb") as out:
+        driver = subprocess.Popen(
+            [sys.executable, "-c", DRAIN_DRIVER, json.dumps(args)], cwd=REPO, env=env,
+            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+        )
+    try:
+        deadline = time.monotonic() + 10
+        while (not marker.exists() or not pidfile.exists()) and driver.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists() and pidfile.exists(), "armed runner never started its child"
+        child = _pid(pidfile)
+        assert _alive(child)
+        driver.send_signal(signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while not requested.exists() and driver.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert requested.exists(), "first TERM did not request a drain"
+        assert _alive(child), "first TERM killed the running child"
+        assert not (tmp_path / "retire").exists()
+        if force is not None:
+            grandchild = _pid(grandfile)
+            assert _alive(grandchild)
+            driver.send_signal(force)
+        driver.wait(timeout=10)
+        assert _gone_within(child)
+        if force is None:
+            assert driver.returncode == ExitCode.DRAINED == 6
+            assert json.loads(completed.read_text()) == {"exit": 0, "killed": False, "text": "DONE"}
+        else:
+            assert not completed.exists()
+            assert _gone_within(grandchild)
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+            driver.wait(timeout=5)
         _cleanup(grandfile, pidfile)

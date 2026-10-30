@@ -28,6 +28,67 @@ if TYPE_CHECKING:
 _GRACE_SECONDS = 2.0
 
 
+class DrainSwitch:
+    """Set by the first SIGTERM and read at each dispatch boundary."""
+
+    def __init__(self) -> None:
+        self._requested = False
+
+    @property
+    def requested(self) -> bool:
+        return self._requested
+
+    def _request(self, on_request: Callable[[], None]) -> None:
+        if self._requested:
+            raise KeyboardInterrupt
+        self._requested = True
+        on_request()
+
+    def pause(self, seconds: float) -> None:
+        """Sleep in slices of at most 0.5 seconds, returning once requested."""
+        deadline = time.monotonic() + seconds
+        while not self.requested:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.5))
+
+
+_armed_drain: tuple[DrainSwitch, Callable[[], None]] | None = None
+
+
+@contextmanager
+def drain_armed(on_request: Callable[[], None]) -> Iterator[DrainSwitch]:
+    """Arm graceful SIGTERM handling for one run, restoring the handler on exit."""
+    global _armed_drain
+    switch = DrainSwitch()
+    if threading.current_thread() is not threading.main_thread():
+        yield switch
+        return
+
+    def on_signal(signum: int, frame: object) -> None:
+        switch._request(on_request)
+
+    with _signals_deferred():
+        previous_drain = _armed_drain
+        previous_handler = signal.signal(signal.SIGTERM, on_signal)
+        _armed_drain = (switch, on_request)
+    try:
+        yield switch
+    finally:
+        with _signals_deferred():
+            signal.signal(signal.SIGTERM, previous_handler)
+            _armed_drain = previous_drain
+
+
+def signal_drain(pid: int) -> None:
+    """Send SIGTERM to the run, swallowing ProcessLookupError."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+
 @dataclass(frozen=True)
 class RunResult:
     exit_code: int | None
@@ -353,6 +414,11 @@ def _group_guard(live: list[subprocess.Popen]) -> Iterator[None]:
     previous: dict[int, object] = {}
 
     def on_signal(signum: int, _frame: object) -> None:
+        if signum == signal.SIGTERM and _armed_drain is not None:
+            switch, on_request = _armed_drain
+            if not switch.requested:
+                switch._request(on_request)
+                return
         _kill_live(live)
         signal.signal(signum, previous[signum])
         os.kill(os.getpid(), signum)

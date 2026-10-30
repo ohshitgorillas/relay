@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from relay.errors import ConfigError
+from relay.pricing import Rate, Unpriced, validate_rate
 
 _DEFAULT_LEAD = [
     "claude", "-p", "--output-format", "stream-json", "--verbose", "--agent", "lead",
@@ -53,6 +54,7 @@ class Config:
     design_approval: str = _STANDING_APPROVAL  # quoted on the architect's approve: line
 
     backend: str = "claude"
+    prices: dict[str, Rate] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.design_command:
@@ -98,8 +100,35 @@ _KEYS = frozenset(
         "design_command",
         "section_dollar_cap",
         "design_approval",
+        "prices",
     }
 )
+
+
+def _prices(value: object) -> dict[str, Rate]:
+    if not isinstance(value, dict):
+        raise ConfigError("config value 'prices' must be a table")
+    required = {"input", "cached_input", "output"}
+    allowed = required | {"cache_write_30m", "cache_write_12h"}
+    result = {}
+    for model, fields in value.items():
+        if not isinstance(model, str) or not model.strip() or not isinstance(fields, dict):
+            raise ConfigError("each prices entry must name a model and contain a rate table")
+        unknown = fields.keys() - allowed
+        missing = required - fields.keys()
+        if unknown:
+            raise ConfigError(f"unknown price key for {model!r}: {next(iter(unknown))!r}")
+        if missing:
+            raise ConfigError(f"missing price key for {model!r}: {sorted(missing)[0]!r}")
+        # An omitted optional rate is unavailable; an explicitly supplied value
+        # must be a number, including for programmatic config overrides.
+        if any(number is None for number in fields.values()):
+            raise ConfigError(f"price rates for {model!r} must be finite nonnegative numbers")
+        try:
+            result[model] = validate_rate(Rate(**fields), model)
+        except Unpriced as exc:
+            raise ConfigError(str(exc)) from exc
+    return result
 
 
 def _int(merged: dict[str, object], key: str, default: int | None) -> int | None:
@@ -221,6 +250,7 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         ),
         state_root=state_root,
         backend=backend,
+        prices=_prices(merged.get("prices", {})),
         idle_ceiling=idle_ceiling,
         check_timeout=check_timeout,
         check_outside=_patterns(merged, "check_outside", list(_DEFAULT_CHECK_OUTSIDE)),

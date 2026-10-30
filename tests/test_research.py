@@ -815,3 +815,104 @@ def test_block_names_the_section_and_commit_of_its_map(fake_cfg: Config) -> None
     # Breaks when block's header line is fixed rather than taken from the map.
     m = _fixture_map(fake_cfg, sid="s7", commit="2" * 40)
     assert f"map s7 at {'2' * 40}" in block(m).splitlines()
+
+
+def test_save_places_queue_provenance_before_file_records(
+    fake_cfg: Config, tmp_path: Path
+) -> None:
+    # Breaks when storage drops provenance or places it among file records or map text.
+    original = _fixture_map(fake_cfg)
+    hashes = _materialize_map(original, tmp_path)
+    m = dataclasses.replace(original, queue="a" * 64, digests=hashes)
+    path = tmp_path / "owned.map"
+    save(m, path)
+    assert path.read_text().splitlines() == [
+        f"map {SID} at {COMMIT}",
+        f"queue {m.queue}",
+        *[f"file {value} {name}" for name, value in zip(m.files, hashes, strict=True)],
+        *m.body.splitlines(),
+    ]
+
+
+@pytest.mark.parametrize("with_digests", [False, True])
+def test_load_restores_queue_without_exposing_metadata_to_agents(
+    fake_cfg: Config, tmp_path: Path, with_digests: bool
+) -> None:
+    # Breaks when loading loses ownership, rejects old maps, or exposes storage metadata.
+    original = _fixture_map(fake_cfg)
+    hashes = _materialize_map(original, tmp_path) if with_digests else ()
+    original = dataclasses.replace(original, digests=hashes)
+    records = [f"file {value} {name}" for name, value in zip(original.files, hashes)]
+    path = tmp_path / "owned.map"
+    path.write_text("\n".join([f"map {SID} at {COMMIT}", *records, original.body, ""]))
+    legacy = load(path, SID)
+    assert legacy == original
+    assert legacy.queue is None
+    key = "b" * 64
+    path.write_text(
+        "\n".join([f"map {SID} at {COMMIT}", f"queue {key}", *records, original.body, ""])
+    )
+    restored = load(path, SID)
+    assert restored == dataclasses.replace(original, queue=key)
+    assert block(restored) == block(original)
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        "queue",
+        "queue ",
+        "queue not-a-queue-id",
+        f"queue {'c' * 63}",
+        f"queue {'g' * 64}",
+        f"queue {'c' * 64} extra",
+        f"queue {'c' * 64}\nqueue {'c' * 64}",
+        f"queue {'c' * 64}\nqueue {'d' * 64}",
+    ],
+    ids=[
+        "no-value",
+        "empty",
+        "not-digest",
+        "short",
+        "non-hex",
+        "extra-token",
+        "duplicate",
+        "two-owners",
+    ],
+)
+def test_load_rejects_malformed_or_duplicate_queue_records(
+    fake_cfg: Config, tmp_path: Path, records: str
+) -> None:
+    # Breaks when malformed ownership or multiple provenance records are silently accepted.
+    m = _fixture_map(fake_cfg)
+    path = tmp_path / "invalid-owner.map"
+    path.write_text(f"map {SID} at {COMMIT}\n{records}\n{m.body}\n")
+    assert load(path, SID) is None
+
+
+def test_split_retains_queue_provenance(fake_cfg: Config) -> None:
+    # Breaks when keeping unchanged entries strips the owner of their research map.
+    original = _fixture_map(fake_cfg)
+    m = dataclasses.replace(original, queue="d" * 64)
+    kept = split(m, frozenset({"relay/git.py"}))
+    assert kept is not None
+    assert kept.queue == m.queue
+    assert kept.sid == m.sid
+    assert kept.commit == m.commit
+
+
+def test_refresh_retains_queue_provenance(fake_cfg: Config) -> None:
+    # Breaks when a partial map refresh loses its kept map's queue owner.
+    original = _fixture_map(fake_cfg)
+    kept = dataclasses.replace(original, queue="e" * 64)
+    merged = parse_refresh(
+        kept,
+        "next-commit",
+        frozenset({"new.py"}),
+        "MAP\nnew.py:8 | refreshed code\nEND MAP",
+        fake_cfg,
+    )
+    assert merged is not None
+    assert merged.queue == kept.queue
+    assert merged.sid == kept.sid
+    assert merged.commit == "next-commit"

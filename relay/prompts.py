@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 
+from relay import git
 from relay.config import Config
 from relay.ladder import GUESS
 from relay.check import CheckResult, outcome_text
@@ -28,12 +29,21 @@ def lead_prompt(
     handoff_hint: str | None = None,
     backend: str = "claude",
     guidance: str | None = None,
+    worktree: git.SectionWorktree | None = None,
 ) -> str:
     parts = [
         "You are a lead. Carry the queue section below through development until it is done.",
         f"Queue: {queue}\nSection: {section.id}",
         f"Section body:\n{section.body}",
     ]
+    if worktree is not None:
+        parts.append(
+            f"Worktree assignment: use exactly branch {worktree.branch} at {worktree.path}. "
+            "Create the worktree there if absent, and perform this section's work there. "
+            "This assignment takes precedence over generic naming in the section body or "
+            "a recalled session. Include this line in your final report:\n"
+            f"BRANCH {worktree.branch} {worktree.path}"
+        )
     if handoff_hint is not None:
         parts.append(handoff_hint)
     elif resume is not None:

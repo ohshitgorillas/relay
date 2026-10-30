@@ -104,3 +104,85 @@ def test_duration_reads_in_seconds_minutes_or_hours() -> None:
     assert agents.duration(36943) == "36.9s"
     assert agents.duration(177_000) == "2m57s"
     assert agents.duration(3_780_000) == "1h03m"
+
+
+def test_measurements_keep_distinct_settings_and_replace_final_cost() -> None:
+    # Breaks when measurements add cumulative costs, discard settings or change lifecycle.
+    activity = _fold([_started("a1"), _started("a2")])
+    before = activity
+    activity = agents.measured(
+        activity, "a1", models=("observed-one",), efforts=("high",),
+        cost_dollars=0.7, cost_basis="api-estimate", cost_unavailable=None,
+    )
+    activity = agents.measured(
+        activity, "a1", models=("unavailable", "observed-two", "observed-one"),
+        efforts=("unavailable", "medium", "high"), cost_dollars=0.9,
+        cost_basis="api-estimate", cost_unavailable=None,
+    )
+    agent = activity.agents[0]
+    assert agent.models == ("observed-one", "unavailable", "observed-two")
+    assert agent.efforts == ("high", "unavailable", "medium")
+    assert (agent.cost_dollars, agent.cost_basis, agent.cost_unavailable) == (0.9, "api-estimate", None)
+    assert [a.task_id for a in activity.agents] == ["a1", "a2"]
+    assert activity.live == before.live
+    assert activity.events == before.events
+    assert agents.measured(
+        activity, "a1", models=(), efforts=(), cost_dollars=None,
+        cost_basis="none", cost_unavailable=None,
+    ).agents[0] == agent
+
+
+def test_measurement_does_not_discover_an_unseen_agent() -> None:
+    # Breaks when enrichment invents an agent or lifecycle event.
+    activity = _fold([_started("known")])
+    assert agents.measured(
+        activity, "unseen", models=("observed",), efforts=("high",),
+        cost_dollars=0.1, cost_basis="reported", cost_unavailable=None,
+    ) == activity
+
+
+def test_restore_distinguishes_unmeasured_from_known_zero_and_restores_tuples() -> None:
+    # Breaks when old snapshots imply a zero cost or JSON lists are not restored.
+    old = agents.restore_agent({"task_id": "old", "name": "builder", "description": "old"})
+    assert old.models == old.efforts == ()
+    assert (old.cost_dollars, old.cost_basis, old.cost_unavailable) == (None, "none", "not reported")
+    zero = agents.restore_agent({
+        "task_id": "zero", "name": "builder", "description": "zero",
+        "models": ["observed"], "efforts": ["unavailable"],
+        "cost_dollars": 0.0, "cost_basis": "reported", "cost_unavailable": None,
+    })
+    assert zero.models == ("observed",)
+    assert zero.efforts == ("unavailable",)
+    assert (zero.cost_dollars, zero.cost_basis, zero.cost_unavailable) == (0.0, "reported", None)
+
+
+def test_resumed_merge_preserves_measurements_with_later_lifecycle() -> None:
+    # Breaks when later-run lifecycle replacement erases earlier measured metadata.
+    first = Activity((agents.Agent(
+        "a1", "builder", "first", 100, 10, "completed", ("observed-one",),
+        ("high",), 0.25, "reported", None,
+    ),))
+    later = _fold([
+        _started("a1", description="resumed"),
+        _finished("a1", {"total_tokens": 300, "duration_ms": 30}),
+        _started("a2"),
+    ])
+    merged = agents.merge(first, later)
+    assert [a.task_id for a in merged.agents] == ["a1", "a2"]
+    agent = merged.agents[0]
+    assert (agent.description, agent.context, agent.duration_ms, agent.status) == ("resumed", 300, 30, "completed")
+    assert (agent.models, agent.efforts, agent.cost_dollars, agent.cost_basis) == (("observed-one",), ("high",), 0.25, "reported")
+
+
+def test_repeated_task_notifications_keep_one_measured_inventory_row() -> None:
+    # Breaks when repeated lifecycle notifications erase measurements or add costs.
+    activity = _fold([_started("a1")])
+    activity = agents.measured(
+        activity, "a1", models=("observed",), efforts=("high",),
+        cost_dollars=0.4, cost_basis="reported", cost_unavailable=None,
+    )
+    activity = _fold([_finished("a1"), _finished("a1")], activity)
+    assert len(activity.agents) == 1
+    assert activity.agents[0].cost_dollars == 0.4
+    assert activity.agents[0].models == ("observed",)
+    assert activity.live == frozenset()

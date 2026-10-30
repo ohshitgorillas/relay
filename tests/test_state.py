@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
+import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -15,9 +18,180 @@ import relay.state as state_module
 import relay.files as publication
 from relay.config import Config
 from relay.errors import LockedError
-from relay.state import SectionState, State
+from relay.state import LiveRun, Pending, SectionState, State
 
 QUEUE = "workboard-queue.md"
+
+
+def test_legacy_sections_and_new_sections_have_no_pending_dispatch(
+    queue: Path, fake_cfg: Config
+) -> None:
+    # Breaks when: old sections cannot load or an absent pending dispatch is invented.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "old result")
+    path = _dir(state) / "state.json"
+    old = json.loads(path.read_text())
+    old["sections"]["s1"].pop("pending", None)
+    path.write_text(json.dumps(old))
+    reopened = State.open(queue, fake_cfg)
+    assert reopened.section("s1").pending is None
+    assert reopened.section("new-section").pending is None
+    assert reopened.take_pending("s1") is None
+    assert reopened.take_pending("new-section") is None
+    assert State.open(queue, fake_cfg).section("s1").last_report == "old result"
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["free", "held"])
+@pytest.mark.parametrize("draining", [False, True], ids=["running", "draining"])
+def test_live_run_requires_held_lock_and_does_not_change_it(
+    queue: Path, fake_cfg: Config, held: bool, draining: bool
+) -> None:
+    # Breaks when: stale records appear live, lock probes release the owner or retain a free lock.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "preserve")
+    record = _dir(state) / "run.json"
+    since = 123.5 if draining else None
+    record.write_text(json.dumps({"pid": 4321, "draining": draining, "draining_since": since}))
+    with (_dir(state) / "lock").open("a") as owner:
+        if held:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        expected = LiveRun(4321, draining, since) if held else None
+        assert state.live_run() == expected
+        assert State.open(queue, fake_cfg).live_run() == expected
+        with (_dir(state) / "lock").open("a") as probe:
+            if held:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert state.live_run() is None
+
+
+@pytest.mark.parametrize("record_kind", ["missing", "invalid-json", "directory"])
+def test_live_run_returns_none_for_missing_or_unreadable_record_with_lock_held(
+    queue: Path, fake_cfg: Config, record_kind: str
+) -> None:
+    # Breaks when: absent or unreadable live-run records raise or identify a live run.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "preserve")
+    record = _dir(state) / "run.json"
+    if record_kind == "invalid-json":
+        record.write_text("{not json")
+    elif record_kind == "directory":
+        record.mkdir()
+    with (_dir(state) / "lock").open("a") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert state.live_run() is None
+
+
+def test_mark_draining_atomically_keeps_pid_and_records_current_time(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: marking a drain changes the pid, omits its time or exposes a partial record.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "preserve")
+    record = _dir(state) / "run.json"
+    initial = {"pid": 4321, "draining": False, "draining_since": None}
+    record.write_text(json.dumps(initial))
+    replacements = []
+    real_replace = os.replace
+    before = time.time()
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == record:
+            assert Path(os.fsdecode(src)) != record
+            assert json.loads(record.read_text()) == initial
+            replacements.append(json.loads(Path(os.fsdecode(src)).read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    state.mark_draining()
+    after = time.time()
+    saved = json.loads(record.read_text())
+    assert replacements == [saved]
+    assert saved["pid"] == 4321
+    assert saved["draining"] is True
+    assert before <= saved["draining_since"] <= after
+    assert State.open(queue, fake_cfg).section("s1").last_report == "preserve"
+
+
+def test_publish_run_atomically_overwrites_stale_drain_state(
+    queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: publication exposes a partial record or carries a stale drain into a new run.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "preserve")
+    record = _dir(state) / "run.json"
+    stale = {"pid": 91, "draining": True, "draining_since": 1.0}
+    record.write_text(json.dumps(stale))
+    replacements = []
+    real_replace = os.replace
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == record:
+            candidate = Path(os.fsdecode(src))
+            assert candidate != record
+            assert json.loads(record.read_text()) == stale
+            replacements.append(json.loads(candidate.read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    with (_dir(state) / "lock").open("a") as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state.publish_run(4321)
+    expected = {"pid": 4321, "draining": False, "draining_since": None}
+    assert replacements == [expected]
+    assert json.loads(record.read_text()) == expected
+    assert State.open(queue, fake_cfg).section("s1").last_report == "preserve"
+
+
+@pytest.mark.parametrize(
+    "pending",
+    [
+        Pending("climb", "lead.log", "revise λ", status="RECUT", text="exact\nRECUT"),
+        Pending("design-retry", "architect.log", "no report", design="plan.md", brief="retry\nλ"),
+        Pending("design-recut", "approved.log", "approved", design="new-plan.md"),
+    ],
+    ids=["climb", "design-retry", "design-recut"],
+)
+def test_pending_dispatch_survives_reopen_and_is_consumed_per_section(
+    queue: Path, fake_cfg: Config, pending: Pending
+) -> None:
+    # Breaks when: a deferred dispatch loses fields, crosses sections or is replayed twice.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "result already recorded")
+    state.set_pending("s1", pending)
+    other = Pending("climb", "other.log", "other", status="DESIGN", text="DESIGN")
+    state.set_pending("s2", other)
+    reopened = State.open(queue, fake_cfg)
+    saved = reopened.section("s1").pending
+    assert saved is not None
+    expected = {
+        "kind": pending.kind,
+        "lead_log": pending.lead_log,
+        "problem": pending.problem,
+        "status": pending.status,
+        "text": pending.text,
+        "design": pending.design,
+        "brief": pending.brief,
+    }
+    assert {field: saved.get(field) for field in expected} == expected
+    assert reopened.take_pending("s1") == pending
+    assert State.open(queue, fake_cfg).take_pending("s1") is None
+    assert State.open(queue, fake_cfg).section("s1").pending is None
+    assert State.open(queue, fake_cfg).section("s1").last_report == "result already recorded"
+    assert State.open(queue, fake_cfg).take_pending("s2") == other
+
+
+def test_run_record_path_and_clear_leave_section_state_intact(queue: Path, fake_cfg: Config) -> None:
+    # Breaks when: run records use another path or clearing them removes section state.
+    state = State.open(queue, fake_cfg)
+    state.set_last_report("s1", "finished work")
+    assert state.run_record == _dir(state) / "run.json"
+    state.run_record.write_text('{"pid": 4321, "draining": false, "draining_since": null}')
+    state.clear_run()
+    assert not state.run_record.exists()
+    assert State.open(queue, fake_cfg).section("s1").last_report == "finished work"
 
 
 def test_design_cycle_failures_persist_independently_and_old_records_default(
@@ -1064,3 +1238,137 @@ def test_a_record_saved_before_last_report_existed_loads_with_it_none(queue: Pat
     assert section.last_session == "session-a"
     assert section.failures == 1
     assert getattr(section, "last_report", "missing") is None
+
+
+# Queue ownership design, Order 2: shared identity and durable section bindings.
+
+
+def test_queue_id_is_the_full_hash_of_the_resolved_queue_path(
+    queue: Path, other_queue: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: identity is truncated, basename-only, or computed before resolving aliases.
+    expected = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    alias = tmp_path / "queue-alias.md"
+    alias.symlink_to(queue)
+    monkeypatch.chdir(queue.parent)
+    assert state_module.queue_id(queue) == expected
+    assert state_module.queue_id(alias) == expected
+    assert state_module.queue_id(Path(queue.name)) == expected
+    assert state_module.queue_id(other_queue) != expected
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_queue_key_preserves_the_existing_state_directory_name(
+    tmp_path: Path, fake_cfg: Config, nested: bool
+) -> None:
+    # Breaks when: extracting identity changes sanitization, suffix length, or the state path.
+    directory = tmp_path / ("long-directory-" * 8 if nested else "short")
+    directory.mkdir()
+    queue = directory / "queue..with spaces λ.md"
+    queue.write_text("section s1\n")
+    absolute = str(queue.resolve())
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "-", absolute).strip("-")
+    expected = f"{readable[-80:]}-{hashlib.sha256(absolute.encode()).hexdigest()[:16]}"
+    legacy = fake_cfg.state_root / expected
+    legacy.mkdir(parents=True)
+    (legacy / "state.json").write_text(
+        '{"sections": {"s1": {"status": "parked", "failures": 2, '
+        '"question": "keep this", "answer": null, "last_session": "old-lead"}}, '
+        '"last_any": "old-lead"}'
+    )
+    assert state_module.queue_key(queue) == expected
+    reopened = State.open(queue, fake_cfg)
+    assert _dir(reopened) == legacy
+    assert reopened.section("s1").last_session == "old-lead"
+    assert reopened.section("s1").question == "keep this"
+
+
+def test_worktree_binding_is_absolute_durable_and_scoped_to_the_queue_section(
+    queue: Path, other_queue: Path, fake_cfg: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: binding stores a relative path, loses section state, or reaches another owner.
+    state = State.open(queue, fake_cfg)
+    state.record_failure("s1")
+    state.set_last_session("s1", "old-lead")
+    monkeypatch.chdir(queue.parent)
+    relative = Path("worktrees") / "queue-s1"
+    state.bind_worktree("s1", "lead/legacy-s1", relative)
+    reopened = State.open(queue, fake_cfg)
+    section = reopened.section("s1")
+    assert section.worktree_branch == "lead/legacy-s1"
+    assert section.worktree_path == str(relative.resolve())
+    assert (section.failures, section.last_session) == (1, "old-lead")
+    for untouched in (reopened.section("s2"), State.open(other_queue, fake_cfg).section("s1")):
+        assert (untouched.worktree_branch, untouched.worktree_path) == (None, None)
+
+
+def test_binding_replaces_branch_and_path_in_one_atomic_publication(
+    queue: Path, fake_cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Breaks when: new branch and old path can be observed in separate state publications.
+    state = State.open(queue, fake_cfg)
+    state.bind_worktree("s1", "lead/old", tmp_path / "old")
+    state_path = _dir(state) / "state.json"
+    publications: list[dict] = []
+    real_replace = os.replace
+
+    def observe(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(dst)) == state_path:
+            publications.append(json.loads(Path(os.fsdecode(src)).read_text()))
+        real_replace(src, dst, *args, **kwargs)
+
+    _patch_replace(monkeypatch, observe)
+    state.bind_worktree("s1", "lead/new", tmp_path / "new")
+    assert publications
+    for publication in publications:
+        published = publication["sections"]["s1"]
+        assert (published["worktree_branch"], published["worktree_path"]) == (
+            "lead/new", str((tmp_path / "new").resolve())
+        )
+    reopened = State.open(queue, fake_cfg).section("s1")
+    assert (reopened.worktree_branch, reopened.worktree_path) == (
+        "lead/new", str((tmp_path / "new").resolve())
+    )
+
+
+@pytest.mark.parametrize("report", ["More work remains.\nRETIRED", None])
+def test_reports_without_branch_and_completion_keep_the_saved_binding(
+    queue: Path, fake_cfg: Config, tmp_path: Path, report: str | None
+) -> None:
+    # Breaks when: a report without BRANCH or marking done forgets the blocker worktree.
+    state = State.open(queue, fake_cfg)
+    tree = tmp_path / "existing-legacy-tree"
+    state.bind_worktree("s1", "custom-existing-branch", tree)
+    state.set_last_report("s1", report)
+    after_report = State.open(queue, fake_cfg).section("s1")
+    assert (after_report.worktree_branch, after_report.worktree_path) == (
+        "custom-existing-branch", str(tree.resolve())
+    )
+    state.mark_done("s1")
+    completed = State.open(queue, fake_cfg).section("s1")
+    assert completed.status == "done"
+    assert (completed.worktree_branch, completed.worktree_path) == (
+        "custom-existing-branch", str(tree.resolve())
+    )
+
+
+def test_legacy_record_defaults_bindings_and_can_gain_one_without_losing_its_state(
+    queue: Path, fake_cfg: Config, tmp_path: Path
+) -> None:
+    # Breaks when: old records require binding keys or migration erases the saved run state.
+    state = State.open(queue, fake_cfg)
+    (_dir(state) / "state.json").write_text(
+        '{"sections": {"s1": {"status": "parked", "failures": 2, '
+        '"question": "old question", "answer": null, "last_session": "legacy-lead"}}, '
+        '"last_any": "legacy-lead"}'
+    )
+    old = State.open(queue, fake_cfg).section("s1")
+    assert (old.worktree_branch, old.worktree_path) == (None, None)
+    state.bind_worktree("s1", "lead/s1", tmp_path / "legacy")
+    migrated = State.open(queue, fake_cfg).section("s1")
+    assert (migrated.status, migrated.failures, migrated.question, migrated.last_session) == (
+        "parked", 2, "old question", "legacy-lead"
+    )
+    assert (migrated.worktree_branch, migrated.worktree_path) == (
+        "lead/s1", str((tmp_path / "legacy").resolve())
+    )

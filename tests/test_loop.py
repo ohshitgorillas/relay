@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import inspect
 import json
 import os
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -25,11 +27,15 @@ from relay.stream import StreamState
 from relay.config import Config
 from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
-from relay.loop import run
+from relay.loop import ask, run
 from relay.queue import parse_queue
-from relay.research import Map, block, changed, digest, load, parse_map, save, stamp
+from relay.research import Map, attribute, block, changed, digest, load, owned, parse_map, save, stamp
 from relay.state import State
+from relay.git import section_branch
+from harness import checked_queue
 from harness import RECORD as _RECORD
+from harness import request_drain as _request_drain
+from harness import drain_after_role as _drain_after_role
 from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
 
 from tests.conftest import _GIT, GitRepo
@@ -43,6 +49,193 @@ M2 = "m2-rest-queue.md"
 DONE_LEAD = "stream-lead.jsonl"
 NO_STATUS_LEAD = "stream-error.jsonl"
 
+
+
+@pytest.mark.parametrize("ownership", [
+    "qualified", "reported-legacy", "reported-custom", "bound-custom",
+    "bound-before-report", "invalid-binding", "stale-report", "foreign-report",
+    "other-section-report", "previous-session", "bare-legacy",
+])
+def test_pending_checks_resolve_only_this_queue_sections_ownership(
+    ownership: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: pending checks trust a bare sid, foreign evidence, or a report over a binding.
+    record = tmp_path / "ownership-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1", "s2")
+    state = State.open(queue, cfg)
+    state.mark_done("s2")
+    state.set_check_pending("s1", True)
+    expected = git_repo.root.resolve()
+    branch = None
+    if ownership not in {"other-section-report", "previous-session", "bare-legacy"}:
+        expected = git_repo.worktree("s1", queue=queue)
+        branch = section_branch(queue, "s1")
+    legacy = git_repo.worktrees["s1"]
+    if ownership == "reported-legacy":
+        expected, branch = legacy, "lead/s1"
+        state.set_last_report("s1", f"BRANCH {branch} {expected}\nEND LEAD")
+    elif ownership in {"reported-custom", "bound-custom", "bound-before-report"}:
+        expected = git_repo.worktree("custom", branch="fix/owned-section")
+        branch = "fix/owned-section"
+        if ownership == "reported-custom":
+            state.set_last_report("s1", f"BRANCH {branch} {expected}\nEND LEAD")
+        else:
+            state.bind_worktree("s1", branch, expected)
+            state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD" if ownership == "bound-before-report" else None)
+    elif ownership == "invalid-binding":
+        state.bind_worktree("s1", "lead/s1", tmp_path / "missing")
+        state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD")
+    elif ownership == "stale-report":
+        state.set_last_report("s1", f"BRANCH lead/s1 {tmp_path / 'missing'}\nEND LEAD")
+    elif ownership == "foreign-report":
+        other = checked_queue(git_repo.root / "other.md", tmp_path / "other-checks", "s1")
+        foreign = git_repo.worktree("s1", queue=other)
+        state.set_last_report("s1", f"BRANCH {section_branch(other, 's1')} {foreign}\nEND LEAD")
+    elif ownership == "other-section-report":
+        state.set_last_report("s2", f"BRANCH lead/s1 {legacy}\nEND LEAD")
+    elif ownership == "previous-session":
+        state.set_last_session("s2", "other-sections-session")
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected)]
+    saved = State.open(queue, cfg).section("s1")
+    assert saved.worktree_branch == branch
+    assert saved.worktree_path == (str(expected) if branch else None)
+
+
+@pytest.mark.parametrize("reported", [True, False], ids=["first-legacy-report", "qualified-no-branch"])
+def test_a_leads_new_worktree_is_bound_before_its_immediate_check(
+    reported: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: resolution waits until after DONE handling or requires every report to name BRANCH.
+    record = tmp_path / "immediate-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1")
+    scenario(_lines(DONE_LEAD))
+    branch = "fix/fresh-legacy" if reported else section_branch(queue, "s1")
+    expected = git_repo.root.parent / "created-by-lead"
+    create = [*_GIT, "worktree", "add", "-q", "-b", branch, str(expected)]
+    report = f"BRANCH {branch} {expected}\nEND LEAD\nDONE" if reported else "DONE"
+    stream = _status_lead(tmp_path, "fresh-worktree", report)
+    cfg = _sequenced(cfg, tmp_path, [_step(str(stream), then=create)])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected.resolve())]
+    saved = State.open(queue, cfg).section("s1")
+    assert (saved.worktree_branch, saved.worktree_path) == (branch, str(expected.resolve()))
+
+
+def test_a_report_without_branch_keeps_the_bound_custom_worktree_on_restart(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: a later report erases the binding or a restarted pending check reconstructs lead/s1.
+    record = tmp_path / "restart-checks.txt"
+    queue = checked_queue(git_repo.root / "queue.md", record, "s1")
+    expected = git_repo.worktree("custom", branch="fix/persisted-owner")
+    state = State.open(queue, cfg)
+    state.bind_worktree("s1", "fix/persisted-owner", expected)
+    state.set_last_report("s1", "STOPPED\nEND LEAD")
+    state.set_check_pending("s1", True)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(expected)]
+    assert State.open(queue, cfg).section("s1").worktree_branch == "fix/persisted-owner"
+
+
+def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: research or a follow-up resolves by queue basename or bare section id.
+    record = tmp_path / "queue-checks.txt"
+    queues = [checked_queue(git_repo.root / name / "queue.md", record, "s1") for name in ("one", "two")]
+    trees = [git_repo.worktree("s1", queue=queue) for queue in queues]
+    for tree in trees:
+        _mapped_worktree(git_repo, tree)
+    commits = [git_repo.commit(cwd=tree, message=queue.parent.name) for queue, tree in zip(queues, trees)]
+    assert len(set(commits)) == 2
+    records = []
+    for queue, tree in zip(queues, trees):
+        plans = tmp_path / queue.parent.name
+        edit = plans / "edited-git.py"
+        edit.parent.mkdir(parents=True, exist_ok=True)
+        edit.write_text("# edited in this queue's worktree\n")
+        current = _researched(cfg, plans, [
+            _step(RETIRED_LEAD, write=(edit, tree / "relay/git.py")), _stop_lead(queue, cfg),
+        ])
+        current = dataclasses.replace(current, research_command=_plan(
+            plans, cfg.lead_command[0], "research",
+            [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")], False,
+        ))
+        assert run(queue, current) == ExitCode.STOP_FILE
+        current = dataclasses.replace(current, research_command=_plan(
+            plans, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
+        ))
+        ask(queue, current, "s1", "Which files describe this section?")
+        records.append(_research_runs(plans))
+    assert [[Path(str(item["cwd"])).resolve() for item in runs] for runs in records] == [[tree] * 3 for tree in trees]
+    for queue, tree, commit in zip(queues, trees, commits):
+        state = State.open(queue, cfg)
+        assert state.section("s1").worktree_path == str(tree)
+        saved = load(state.map_path("s1"), "s1")
+        assert saved is not None
+        assert owned(saved, queue)
+        assert saved.commit == commit
+        entries = [entry for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"]
+        assert [entry["map"] for entry in entries] == [commit, commit]
+        state.stop_file.unlink()
+        state.set_check_pending("s1", True)
+        assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert record.read_text().splitlines() == [str(tree) for tree in trees]
+
+
+def test_architect_evidence_rejects_a_report_path_from_another_repository(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the architect trusts the report's arbitrary path instead of the owned branch and HEAD.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    repo = GitRepo(tmp_path)
+    repo.commit(message="queue repository")
+    tree = repo.worktree("s1", queue=queue)
+    commit = repo.commit(cwd=tree, message="owned evidence")
+    foreign = git_repo.worktrees["s1"]
+    scenario(_lines(DONE_LEAD))
+    status = f"BRANCH lead/s1 {foreign}\nEND LEAD\nDESIGN: {PROBLEM}"
+    cfg = _sequenced(cfg, tmp_path, [
+        _step(str(_status_lead(tmp_path, "foreign-report", status))), _step(NO_STATUS_LEAD),
+    ])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_REJECTED)])
+    assert run(queue, cfg) == ExitCode.FAILED_TWICE
+    brief = str(_runs(tmp_path, "design")[0]["prompt"])
+    assert f"branch {section_branch(queue, 's1')} at {commit} in this repository" in brief
+    assert str(foreign) not in brief
+    assert State.open(queue, cfg).section("s1").worktree_path == str(tree)
+
+
+@pytest.mark.parametrize("recut", [False, True], ids=["direct", "recursive-recut"])
+def test_another_queues_dirty_legacy_blocker_does_not_hold_this_queue(
+    recut: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path], stop_after: Callable[[Path, Config], None],
+) -> None:
+    # Breaks when: blocker cleanliness adopts a bare legacy branch belonging to another queue.
+    queue = _repo_queue(git_repo)
+    foreign = git_repo.worktree("s2a" if recut else "s2")
+    (foreign / "uncommitted.txt").write_text("another queue's work\n")
+    scenario(_lines(DONE_LEAD))
+    leads = [_waiting_lead(tmp_path, "waiting-on-owned-blocker", "s2")]
+    recuts = None
+    if recut:
+        siblings = tmp_path / "siblings.md"
+        siblings.write_text(
+            "section s1 | lead | steps: 1\n  s1 work\n"
+            "section s2a | lead | steps: 1 | from: s2\n  s2a work\n"
+            "section s2b | lead | steps: 1 | from: s2\n  s2b work\n"
+        )
+        leads += [_step(RECUT_LEAD), _step(DONE_LEAD)]
+        recuts = [_step(DIVVYER_RUN, write=(siblings, queue))]
+    leads += [_step(DONE_LEAD), _step(DONE_LEAD)]
+    cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
+    stop_after(queue, cfg)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert State.open(queue, cfg).section("s1").status == "done"
+    assert len(_runs(tmp_path, "lead")) == len(leads)
 
 
 def _lines(name: str) -> list[str]:
@@ -1895,6 +2088,8 @@ _PROGRESS = [
     re.compile(_STARTED),
     re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
     re.compile(r"lead \S+: finished .+ \(\d+ tokens, \$\d+\.\d{2}\)"),
+    # relay-cache-cost-design.md:156: empty inventories report their observation limit.
+    re.compile(r".*no subagents observed.*"),
     re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
     re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
     re.compile(r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"),
@@ -2062,33 +2257,43 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
             f"relay go {name}: started; no token budget, no dollar budget",
             f"lead {a}: started fresh",
             f"lead {a}: finished with no status line {_finished(NO_STATUS_SPEND)}",
+            "no subagents observed",
             f"section {a}: failed (1 of 2)",
             f"lead {a}: started, resuming sess-lead-2",
             f"lead {a}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
             _running(a, 1, top, literal),
             f"check {a}: passed",
             f"lead {b}: started, resuming sess-lead-1",
             f"lead {b}: finished RECUT: {RECUT_REASON} {_finished(RECUT_SPEND)}",
+            "no subagents observed",
             f"recut {b}: started: {RECUT_REASON}",
             f"recut {b}: finished with the queue unchanged {_finished(DIVVYER_SPEND)}",
             f"section {b}: failed (1 of 2)",
             f"lead {b}: started, resuming sess-lead-4",
             f"lead {b}: finished NEEDS-OWNER {_finished(NEEDS_OWNER_SPEND)}",
+            "no subagents observed",
             f"section {b}: needs an answer: {QUESTION}",
             f"lead {c}: started, resuming sess-lead-5",
             f"lead {c}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
             _running(c, 3, top, literal),
             f"check {c}: passed",
             f"waiting for answers on {b}",
             f"lead {b}: started, resuming sess-lead-5, with the owner's answer",
             f"lead {b}: finished DONE {_finished(DONE_SPEND)}",
+            "no subagents observed",
         ]
 
     tail = [
         "<ping.stopped>",
         f"relay go {name}: ended {reason}: {detail} (exit {int(ExitCode.QUEUE_EMPTY)})",
     ]
-    assert _texts(captured.out) in [
+    # The new row's phrase is specified; its surrounding label is presentation.
+    assert [
+        "no subagents observed" if "no subagents observed" in text else text
+        for text in _texts(captured.out)
+    ] in [
         expected
         for literal in (False, True)
         for expected in (
@@ -3740,9 +3945,18 @@ MAP_BODY = _MAP_TEXT[_MAP_TEXT.index("MAP\n") : _MAP_TEXT.index("END MAP") + len
 # Every path the map names (relay-research-design.md:43).
 MAPPED_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
 # The lead's subagents in AGENTS_LEAD as a ledger line records them (relay-research-design.md:143).
+# relay-cache-cost-design.md:76,154 adds unavailable measurement defaults.
 LEAD_AGENTS = [
-    {"name": "builder", "task_id": "a1", "total_tokens": 21844},
-    {"name": "test-writer", "task_id": "a2", "total_tokens": 41000},
+    {
+        "name": "builder", "task_id": "a1", "total_tokens": 21844,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
+    {
+        "name": "test-writer", "task_id": "a2", "total_tokens": 41000,
+        "models": [], "efforts": [], "cost_dollars": None,
+        "cost_basis": "none", "cost_unavailable": "not reported",
+    },
 ]
 
 
@@ -3767,6 +3981,9 @@ def _research_queue(repo: GitRepo) -> Path:
     """The check fixture queue (sections s1 and s2) in the repository's main checkout."""
     queue = repo.root / CHECK_QUEUE
     queue.write_bytes((FIXTURES / CHECK_QUEUE).read_bytes())
+    if "lead/s1" in repo.git("branch", "--list", "lead/s1"):
+        assert repo.cfg is not None
+        State.open(queue, repo.cfg).bind_worktree("s1", "lead/s1", repo.worktrees["s1"])
     return queue
 
 
@@ -3788,6 +4005,153 @@ def _run_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
     path = State.open(queue, cfg).stop_file.parent / "ledger.jsonl"
     entries = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
     return [e for e in entries if e.get("kind") != "check"]
+
+
+@pytest.mark.parametrize("provenance", ["old", "foreign"])
+def test_matching_bytes_do_not_reuse_an_unowned_map_or_researcher(
+    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: matching digests let an old or foreign map bypass a full remap.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    if provenance == "foreign":
+        mapped = attribute(mapped, git_repo.root / "other-queue.md")
+    save(mapped, state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    seen = tmp_path / "replacement.map"
+    cfg = _researched(cfg, tmp_path, [
+        _step(RETIRED_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD),
+    ])
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    records = _research_runs(tmp_path)
+    assert len(records) == 1
+    assert Path(str(records[0]["cwd"])).resolve() == git_repo.worktrees["s1"]
+    assert "unverified-researcher" not in json.dumps(records[0])
+    assert block(mapped) not in str(records[0]["prompt"])
+    replacement = load(seen, "s1")
+    assert replacement is not None
+    assert owned(replacement, queue)
+    assert replacement.commit == commit
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+
+
+def test_new_map_ownership_and_commit_are_saved_before_a_moving_research_head(
+    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: new maps lack provenance or research/byte-identical reuse relabels their commit.
+    queue = _research_queue(git_repo)
+    tree = git_repo.worktrees["s1"]
+    commit = _mapped_worktree(git_repo)
+    state = State.open(queue, cfg)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    seen = tmp_path / "attributed.map"
+    cfg = _researched(cfg, tmp_path, [
+        _step(RETIRED_LEAD), _step(DONE_LEAD, write=(state.map_path("s1"), seen)),
+    ])
+    move_head = [*_GIT, "commit", "--allow-empty", "-q", "-m", "research moved HEAD"]
+    cfg = dataclasses.replace(cfg, research_command=_plan(
+        tmp_path, cfg.lead_command[0], "research", [_step(RESEARCH_RUN, then=move_head)], False,
+    ))
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert git_repo.git("rev-parse", "HEAD", cwd=tree).strip() != commit
+    assert len(_research_runs(tmp_path)) == 1
+    mapped = load(seen, "s1")
+    assert mapped is not None
+    assert owned(mapped, queue)
+    assert mapped.commit == commit
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+
+
+@pytest.mark.parametrize("provenance", ["old", "foreign"])
+def test_ask_drops_an_unowned_map_and_session_before_followup(
+    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+) -> None:
+    # Breaks when: ask resumes a researcher attached to an unverified map.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    if provenance == "foreign":
+        mapped = attribute(mapped, git_repo.root / "other-queue.md")
+    save(mapped, state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    cfg = dataclasses.replace(cfg, research_command=_plan(
+        tmp_path, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
+    ))
+    with pytest.raises(relay.loop.ResearchError, match="(?i)refresh"):
+        ask(queue, cfg, "s1", "Which files describe this section?")
+    assert not state.map_path("s1").exists()
+    assert State.open(queue, cfg).section("s1").research_session is None
+    assert _research_runs(tmp_path) == []
+
+
+@pytest.mark.parametrize("operation", ["research", "ask"])
+@pytest.mark.parametrize("additional_read", [False, True])
+def test_unowned_map_storage_is_loaded_and_invalidated_under_the_research_lock(
+    operation: str, additional_read: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: map loading or invalidation escapes the existing research lock.
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    state = State.open(queue, cfg)
+    save(stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()), state.map_path("s1"))
+    state.set_research_session("s1", "unverified-researcher")
+    events: list[str] = []
+    original_load = load
+    original_drop = State.drop_map
+    original_save = save
+
+    def check_lock() -> None:
+        with (state.stop_file.parent / "research-s1.lock").open("a") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def observed_load(path: Path, sid: str) -> Map | None:
+        check_lock()
+        events.append("load")
+        if additional_read:
+            original_load(path, sid)
+            check_lock()
+            events.append("load")
+        return original_load(path, sid)
+
+    def observed_drop(current: State, sid: str) -> None:
+        check_lock()
+        events.append("drop")
+        original_drop(current, sid)
+
+    def observed_save(mapped: Map, path: Path) -> None:
+        check_lock()
+        assert owned(mapped, queue)
+        assert State.open(queue, cfg).section("s1").research_session != "unverified-researcher"
+        events.append("save")
+        original_save(mapped, path)
+
+    monkeypatch.setattr("relay.research.load", observed_load)
+    monkeypatch.setattr("relay.research.save", observed_save)
+    monkeypatch.setattr(State, "drop_map", observed_drop)
+    cfg = _researched(cfg, tmp_path, [_stop_lead(queue, cfg)])
+    if operation == "ask":
+        with pytest.raises(relay.loop.ResearchError, match="(?i)refresh"):
+            ask(queue, cfg, "s1", "Which files describe this section?")
+        assert "save" not in events
+    else:
+        assert run(queue, cfg) == ExitCode.STOP_FILE
+        assert "save" in events
+    assert events[0] == "load"
+    assert "drop" in events
+    assert all(
+        events.index("drop") < index
+        for index, event in enumerate(events)
+        if event == "save"
+    )
 
 
 # Research behavior 1: research before a lead, its map in the lead prompt, the lead's ledger
@@ -3957,7 +4321,7 @@ def test_a_map_drawn_in_main_is_reused_in_a_new_lead_worktree_with_matching_byte
     queue = _research_queue(git_repo)
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
-    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", "lead/s1", str(wt)]
+    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", section_branch(queue, "s1"), str(wt)]
     seen = tmp_path / "main-map-seen.map"
     state = State.open(queue, cfg)
     cfg = _researched(
@@ -3996,7 +4360,7 @@ def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_n
         os.utime(wt / path, ns=(checked_at - 100, checked_at - 100))
     mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
     assert mapped is not None
-    save(stamp(mapped, wt, checked_at), state.map_path("s1"))
+    save(attribute(stamp(mapped, wt, checked_at), queue), state.map_path("s1"))
     (wt / "relay/git.py").write_text("# changed before freshness checking\n")
     os.utime(wt / "relay/git.py", ns=(checked_at - 50, checked_at - 50))
     clock = [checked_at]
@@ -4008,6 +4372,7 @@ def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_n
         result = changed(mapped, cwd)
         if not edited:
             retained = cwd / "relay/research.py"
+            retained.parent.mkdir(parents=True, exist_ok=True)
             retained.write_text("# changed after freshness checking\n")
             os.utime(retained, ns=(checked_at + 1, checked_at + 1))
             clock[0] = checked_at + 2
@@ -4054,7 +4419,7 @@ def test_an_unsuccessful_refresh_keeps_the_saved_map_and_rechecks_it_on_the_next
     state = State.open(queue, cfg)
     mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
     assert mapped is not None
-    original = stamp(mapped, wt, time.time_ns())
+    original = attribute(stamp(mapped, wt, time.time_ns()), queue)
     save(original, state.map_path("s1"))
     (wt / "relay/git.py").write_text("# edited after the saved map\n")
     snapshots: list[Map | None] = []
@@ -4608,13 +4973,11 @@ def test_rung_3_a_rejected_or_unapproved_design_report_hands_the_section_back_to
 
 
 def _lead_tree(tmp_path: Path) -> tuple[Path, str]:
-    """A git repository standing in for the lead's worktree, one commit in; (tree, head commit)."""
-    tree = tmp_path / "lead-tree"
-    tree.mkdir()
-    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "step 21"]):
-        subprocess.run([*_GIT, *args], cwd=tree, check=True, capture_output=True)
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True).stdout.strip()
-    return tree, commit
+    """A registered custom-branch worktree of the queue repository and its HEAD."""
+    repo = GitRepo(tmp_path)
+    repo.commit(message="queue repository")
+    tree = repo.worktree("lead-tree", branch="lead/m2-images")
+    return tree, repo.rev("lead/m2-images")
 
 
 REPORTLESS = "Blocked: the cited Relay log is outside the repository.\n\nEND DESIGN"
@@ -5563,7 +5926,7 @@ def test_a_waiting_section_wakes_once_its_blocker_is_done_with_a_clean_worktree_
     # Breaks when: a blocker done in state with a clean `lead/<sid>` worktree does not wake its
     # waiter, the wake pings the owner, or no "woken" line is written.
     queue = _repo_queue(git_repo)
-    git_repo.worktree("s2")
+    git_repo.worktree("s2", queue=queue)
     scenario(_lines(DONE_LEAD))
     leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads)
@@ -5590,7 +5953,7 @@ def test_a_waiting_section_stays_held_while_its_done_blockers_worktree_is_dirty_
     # Breaks when: `_landed` takes a done blocker as landed though `git.clean` on its section
     # worktree is False, or never tests it again, so the waiter wakes early or never.
     queue = _repo_queue(git_repo)
-    stray = git_repo.worktree("s2") / "stray.txt"
+    stray = git_repo.worktree("s2", queue=queue) / "stray.txt"
     stray.write_text("uncommitted\n")
     scenario(_lines(DONE_LEAD))
     leads = [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(DONE_LEAD), _step(DONE_LEAD)]
@@ -5950,3 +6313,905 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
     pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
     assert pings == [f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"], _pings(tmp_path)
+
+
+def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_replay(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: the loop relies on lead-written cost rows, loses final descendants,
+    # bills cache as full input, doubles detail spend, or replay loses final report rows.
+    queue = _queue_of(tmp_path / "cached-queue.md", "cached-section")
+    from relay.backends.codex import CodexBackend
+    from relay.backends.codex_session import SessionReader
+    from relay.pricing import dollars
+
+    fixture = json.loads((FIXTURES / "cache-cost/end-to-end-billing.json").read_text())
+    home = tmp_path / "synthetic-codex"
+    sessions = {row["id"]: row for row in fixture["sessions"]}
+    folder = home / "sessions" / "2026" / "10" / "29"
+    folder.mkdir(parents=True)
+    for sid, row in sessions.items():
+        counts = {
+            "input_tokens": row["input"], "cached_input_tokens": row["cached"],
+            "cache_write_input_tokens": 0, "output_tokens": row["output"],
+            "reasoning_output_tokens": 0, "total_tokens": row["input"] + row["output"],
+        }
+        records = [
+            {"type": "session_meta", "payload": {"id": sid}},
+            {"type": "turn_context", "payload": {"model": row["model"], "effort": row["effort"]}},
+            {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                "total_token_usage": counts, "last_token_usage": counts,
+                "model_context_window": 258400,
+            }}},
+        ]
+        (folder / f"rollout-2026-10-29T01-52-00-{sid}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records)
+        )
+
+    polls = []
+
+    class BillingEvidenceReader(SessionReader):
+        """Use real wire normalization; supplement only explicitly synthetic dimensions."""
+
+        def __init__(self, home, session_id, *, boundary=None):
+            super().__init__(home, session_id, boundary=boundary)
+            self.sid = session_id
+
+        def poll(self, state, *, force_scan=False):
+            state = super().poll(state, force_scan=force_scan)
+            polls.append((self.sid, force_scan))
+            if self.sid in sessions:
+                self.usage = tuple(dataclasses.replace(
+                    usage, cache_write_30m=0, cache_write_12h=0, unavailable=None,
+                ) for usage in self.usage)
+                self.unavailable = None
+                self.children = tuple(sessions[self.sid]["children"])
+            return state
+
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr("relay.backends.codex.SessionReader", BillingEvidenceReader)
+    calls = []
+    final_states = []
+
+    def finished_run(argv, stdin_text, cwd, run_dir, on_event, retire_flag, **kwargs):
+        calls.append(stdin_text)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log = run_dir / "1.jsonl"
+        log.write_text("")
+        backend = CodexBackend()
+        state = StreamState(None, 0, Spend(0, 0.0), None, False)
+        state = backend.parse(state, json.dumps({"type": "thread.started", "thread_id": fixture["lead"]}))
+        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
+            "id": "synthetic-discovery", "type": "collab_tool_call", "tool": "spawn_agent",
+            "sender_thread_id": fixture["lead"],
+            "receiver_thread_ids": [fixture["worker"], fixture["missing"]],
+            "prompt": "Synthetic fixture work", "status": "completed",
+            "agents_states": {fixture["worker"]: {"status": "completed", "message": None}},
+        }}))
+        state = backend.poll(state)
+        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
+            "id": "synthetic-descendant-status", "type": "collab_tool_call", "tool": "spawn_agent",
+            "sender_thread_id": fixture["worker"], "receiver_thread_ids": [fixture["descendant"]],
+            "prompt": "", "status": "completed",
+            "agents_states": {fixture["descendant"]: {"status": "failed", "message": "Synthetic failure"}},
+        }}))
+        # Failed is normalized lifecycle evidence, not a claim about CLI status spelling.
+        state = dataclasses.replace(state, activity=dataclasses.replace(
+            state.activity,
+            agents=tuple(dataclasses.replace(agent, status="failed")
+                         if agent.task_id == fixture["descendant"] else agent
+                         for agent in state.activity.agents),
+            live=state.activity.live - {fixture["descendant"]},
+        ))
+        output_file = run_dir / "final.txt"
+        output_file.write_text("All work finished.\nDONE")
+        state = backend.finish(state, output_file)
+        state = dataclasses.replace(state, spend=Spend(3300, dollars(cfg, state.usage)))
+        final_states.append(state)
+        log.with_suffix(".backend.json").write_text(json.dumps({"backend": "codex"}))
+        log.with_suffix(".telemetry.json").write_text(json.dumps(dataclasses.asdict(state), default=list))
+        assert on_event(state) == "go"
+        return relay.runner.RunResult(0, False, state, log)
+
+    monkeypatch.setattr("relay.loop.run_agent", finished_run)
+    assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
+    assert len(calls) == 1
+    assert all(sid not in calls[0] for sid in sessions)
+    output = _texts(capsys.readouterr().out)
+    # Independent arithmetic from the design's USD-per-million rates, never stored final costs.
+    expected_costs = {
+        fixture["worker"]: (200 * 2 + 800 * 0.1 + 100 * 10) / 1_000_000,
+        fixture["descendant"]: (500 * 1 + 1500 * 0.05 + 200 * 5) / 1_000_000,
+    }
+    expected_ids = [fixture["worker"], fixture["missing"], fixture["descendant"]]
+    expected = final_states[0].activity.agents
+    assert [agent.task_id for agent in expected] == expected_ids, (expected_ids, expected)
+    assert all((sid, True) in polls for sid in sessions), polls
+    final_rows = [line for line in output if "final cost" in line]
+    assert len(final_rows) == len(expected), output
+    for row, agent in zip(final_rows, expected):
+        assert row.count(agent.task_id) == 1, row
+        if agent.status is not None:
+            assert agent.status in row, row
+        if agent.task_id == fixture["missing"]:
+            assert "model unavailable" in row and "effort unavailable" in row, row
+            assert "final cost unavailable" in row and agent.cost_unavailable, row
+            assert agent.cost_dollars is None, agent
+        else:
+            source = sessions[agent.task_id]
+            assert source["model"] in row and source["effort"] in row, row
+            assert "API-equivalent estimate" in row and "not subscription billing" in row, row
+            amount = re.search(r"\$([0-9.eE+-]+)", row)
+            assert amount is not None
+            assert float(amount.group(1)) == pytest.approx(expected_costs[agent.task_id]), (row, expected_costs)
+    entries = _run_entries(queue, cfg)
+    leads = [entry for entry in entries if entry["kind"] == "lead"]
+    assert len(leads) == 1
+    expected_total = sum(expected_costs.values())
+    assert leads[0]["tokens"] == 3300
+    assert leads[0]["dollars"] == pytest.approx(expected_total), leads[0]
+    assert leads[0]["dollars"] != pytest.approx((1000 * 2 + 100 * 10 + 2000 * 1 + 200 * 5) / 1_000_000)
+    assert len(leads[0]["agents"]) == len(expected)
+    assert [row["task_id"] for row in leads[0]["agents"]] == expected_ids
+    for row, agent in zip(leads[0]["agents"], expected):
+        for field in ("task_id", "models", "efforts", "cost_dollars", "cost_basis", "cost_unavailable"):
+            value = getattr(agent, field)
+            assert field in row and row[field] == (list(value) if isinstance(value, tuple) else value)
+        if agent.task_id in expected_costs:
+            assert row["cost_dollars"] == pytest.approx(expected_costs[agent.task_id])
+    state = State.open(queue, cfg)
+    ledger = Ledger(state.stop_file.parent / "ledger.jsonl")
+    assert ledger.total(None).tokens == 3300
+    assert ledger.total(None).dollars == pytest.approx(expected_total)
+    logs = list((state.stop_file.parent / "runs").glob("*.jsonl"))
+    assert len(logs) == 1
+    restored = relay.backends.replay(logs[0])
+    relay.progress.lead_finished(
+        "cached-section", relay.runner.RunResult(0, False, restored, logs[0]),
+        relay.status.LeadStatus(kind="DONE", text=""),
+    )
+    replayed_rows = [line for line in _texts(capsys.readouterr().out) if "final cost" in line]
+    assert replayed_rows == final_rows, (replayed_rows, final_rows)
+
+
+@pytest.mark.parametrize("exceptional", [False, True], ids=["normal", "exception"])
+def test_drain_run_publishes_fresh_identity_under_armed_lock_and_clears_on_exit(
+    exceptional: bool,
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: arming follows locking, publication is omitted or delayed, stale drain
+    # state survives a restart, or either return or exception leaves the run record behind.
+    import signal
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    state.publish_run(os.getpid() + 1)
+    state.mark_draining()
+    state.stop_file.touch()
+    events: list[str] = []
+    lock = State.lock
+    publish = State.publish_run
+    clear = State.clear_run
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def locked(self: State) -> Any:
+        assert signal.getsignal(signal.SIGTERM) != previous, "lock preceded drain arming"
+        events.append("lock")
+        return lock(self)
+
+    def published(self: State, pid: int) -> None:
+        assert events == ["lock"]
+        publish(self, pid)
+        record = self.live_run()
+        assert record is not None
+        assert record.pid == os.getpid()
+        assert record.draining is False
+        assert record.draining_since is None
+        events.append("publish")
+
+    def cleared(self: State) -> None:
+        events.append("clear")
+        clear(self)
+
+    parse = relay.loop.parse_queue
+
+    def parsed(*args: Any, **kwargs: Any) -> Any:
+        assert events[:2] == ["lock", "publish"], "queue read before fresh publication"
+        if exceptional:
+            raise RuntimeError("queue read interrupted")
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(State, "lock", locked)
+    monkeypatch.setattr(State, "publish_run", published)
+    monkeypatch.setattr(State, "clear_run", cleared)
+    monkeypatch.setattr(relay.loop, "parse_queue", parsed)
+    if exceptional:
+        # An empty queue reaches parsing on both normal and exceptional paths.
+        state.stop_file.unlink()
+        with pytest.raises(RuntimeError, match="queue read interrupted"):
+            run(queue, cfg)
+    else:
+        assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert events == ["lock", "publish", "clear"]
+    assert not state.run_record.exists()
+    assert signal.getsignal(signal.SIGTERM) == previous
+
+
+def test_drain_request_marks_the_live_run_and_announces_once(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: on_request omits mark_draining or the progress announcement.
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    before = time.time()
+    seen: list[object] = []
+
+    def started(*args: Any, **kwargs: Any) -> None:
+        _request_drain()
+        seen.append(state.live_run())
+
+    monkeypatch.setattr(relay.loop.progress, "started", started)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert len(seen) == 1
+    record = seen[0]
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.draining is True
+    assert before <= record.draining_since <= time.time()
+    assert _texts(capsys.readouterr().out).count(
+        "drain requested: finishing the running agent, starting nothing new"
+    ) == 1
+    assert not state.run_record.exists()
+
+
+def test_drain_at_pass_top_precedes_stop_file_and_sends_the_drained_stop(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fake_run,
+) -> None:
+    # Breaks when: STOP wins over an already requested drain or drained bypasses stopped ping.
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    state.stop_file.touch()
+    monkeypatch.setattr(relay.loop.progress, "started", lambda *args: _request_drain())
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert fake_run.calls == []
+    assert len(_pings(tmp_path)) == 1
+    assert "drained" in _pings(tmp_path)[0][0]
+    assert "a drain was requested; running work finished and was recorded" in capsys.readouterr().out
+    _untouched(queue, cfg)
+
+
+@pytest.mark.parametrize("waiting", [False, True], ids=["parked", "waiting"])
+def test_drain_interrupts_the_parked_or_waiting_pause_without_dispatching_again(
+    waiting: bool,
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the parked/waiting branch sleeps after drain or misses the next pass check.
+    import relay.loop
+
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    cfg = dataclasses.replace(cfg, poll_seconds=30.0)
+    scenario(_lines(DONE_LEAD))
+    state = State.open(queue, cfg)
+    if waiting:
+        cfg = _sequenced(
+            cfg, tmp_path, [_waiting_lead(tmp_path, "waiting-drain", "s2"), _step(NEEDS_OWNER_LEAD)]
+        )
+    else:
+        state.park("s1", "First choice?")
+        state.park("s2", "Second choice?")
+    requested: list[bool] = []
+
+    def slept(seconds: float) -> None:
+        raise AssertionError("wait slept after drain was requested")
+
+    def about_to_wait(*args: Any, **kwargs: Any) -> None:
+        _request_drain()
+        requested.append(True)
+        monkeypatch.setattr(time, "sleep", slept)
+
+    monkeypatch.setattr(relay.loop.progress, "waiting", about_to_wait)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert requested == [True]
+    if waiting:
+        assert len(_runs(tmp_path, "lead")) == 2
+        assert state.section("s1").status == "waiting"
+    else:
+        _untouched(queue, cfg)
+
+
+@pytest.mark.parametrize("dispatch", ["pending", "design-answer", "research"])
+def test_drain_before_section_dispatch_preserves_pending_and_answer_and_starts_nothing(
+    dispatch: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_run,
+) -> None:
+    # Breaks when: the section dispatch boundary consumes Pending or a design answer,
+    # or starts research, after the pass's queue selection has requested a drain.
+    import relay.loop
+
+    if dispatch == "research":
+        _mapped_worktree(git_repo)
+        queue = _research_queue(git_repo)
+        _done_in_state(queue, cfg, "s2")
+    else:
+        queue = _ladder(queue_file, cfg, tmp_path)
+    state = State.open(queue, cfg)
+    pending = relay.loop.Pending(kind="climb", lead_log="held-lead.log", problem="Retain this dispatch")
+    if dispatch == "pending":
+        state.set_pending("s1", pending)
+    elif dispatch == "design-answer":
+        state.park("s1", "Which choice?", design=(DESIGN_PATH, (1,)))
+        assert state.set_answer("s1", "Proceed with the decision.")
+    taken: list[str] = []
+    for name in ("take_pending", "take_answer"):
+        original = getattr(State, name)
+
+        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+            taken.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(State, name, observed)
+    parse = relay.loop.parse_queue
+    requested: list[bool] = []
+
+    def selected(*args: Any, **kwargs: Any) -> Any:
+        sections = parse(*args, **kwargs)
+        if not requested:
+            _request_drain()
+            requested.append(True)
+        return sections
+
+    monkeypatch.setattr(relay.loop, "parse_queue", selected)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert requested == [True]
+    assert taken == []
+    assert fake_run.calls == []
+    if dispatch == "pending":
+        assert state.section("s1").pending == dataclasses.asdict(pending)
+    elif dispatch == "design-answer":
+        assert state.take_answer("s1") == "Proceed with the decision."
+
+
+def test_drain_after_research_takes_no_lead_inputs_and_starts_no_lead(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a completed research run's drain is checked after taking any
+    # answer, check feedback or guidance, or after dispatching the lead.
+    import relay.loop
+
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    requested: list[bool] = []
+    taken: list[str] = []
+    finished = relay.loop.progress.research_finished
+
+    def research_finished(*args: Any, **kwargs: Any) -> None:
+        finished(*args, **kwargs)
+        _request_drain()
+        requested.append(True)
+
+    for name in ("take_answer", "take_check_feedback", "take_guidance"):
+        original = getattr(State, name)
+
+        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+            if requested:
+                taken.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(State, name, observed)
+    monkeypatch.setattr(relay.loop.progress, "research_finished", research_finished)
+    code = run(queue, cfg)
+    assert requested == [True]
+    assert taken == []
+    assert _runs(tmp_path, "lead") == []
+    assert len(_research_runs(tmp_path)) == 1
+    assert code == ExitCode.DRAINED
+
+
+def test_draining_progress_prints_the_documented_message_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: draining omits, duplicates or changes the documented announcement.
+    from relay.progress import draining
+
+    draining()
+    captured = capsys.readouterr()
+    assert _texts(captured.out) == [
+        "drain requested: finishing the running agent, starting nothing new"
+    ]
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("status", ["RECUT", "DESIGN"])
+def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
+    status: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the finished lead climbs during drain, loses its exact status text/log,
+    # or restart runs another lead instead of the saved climb.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    report = f"{status}: {PROBLEM}"
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", report))), _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("lead"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    pending = state.section("s1").pending
+    assert code == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert _runs(tmp_path, "design") == []
+    assert pending is not None
+    assert pending["kind"] == "climb"
+    assert pending["status"] == status
+    assert pending["text"] == PROBLEM
+    assert Path(pending["lead_log"]).is_file()
+    assert state.section("s1").last_session == "held-lead"
+    assert state.section("s1").last_report == f"Stuck.\n{report}"
+    assert len(_entries(queue, cfg, "lead")) == 1
+    order: list[str] = []
+
+    def record(original):
+        def dispatched(*args, **kwargs):
+            order.append(kwargs.get("role", "lead"))
+            return original(*args, **kwargs)
+        return dispatched
+
+    _every_run_agent(monkeypatch, record)
+    run(queue, cfg)
+    assert order[0] == ("recut" if status == "RECUT" else "design")
+    assert state.section("s1").pending is None
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["reportless", "failed"])
+def test_drain_saves_the_built_architect_retry_and_restart_dispatches_it_verbatim(
+    failed: bool, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: retry starts during drain, its built brief is lost, or restart
+    # rebuilds that brief from changed state instead of using the pending dispatch.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    lead = _step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [lead, _step(NO_STATUS_LEAD)])
+    architect = _step(str(_architect_run(tmp_path, "held-architect", "No final report.")), exit=int(failed))
+    cfg = _with_architect(cfg, tmp_path, [architect, _step(ARCHITECT_UNAPPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("design"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    pending = state.section("s1").pending
+    assert code == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert pending is not None
+    assert pending["kind"] == "design-retry"
+    assert pending["design"] == str((tmp_path / DESIGN_PATH).resolve())
+    brief = pending["brief"]
+    assert isinstance(brief, str) and brief
+    first = str(_runs(tmp_path, "design")[0]["prompt"]).splitlines()
+    retry = brief.splitlines()
+    assert retry[:-2] == first[:-1]
+    assert retry[-1] == first[-1]
+    assert retry[-2].startswith("lead new: ")
+    run(queue, cfg)
+    assert str(_runs(tmp_path, "design")[1]["prompt"]) == brief
+    assert state.section("s1").pending is None
+
+
+def test_drain_records_design_approval_before_holding_its_recut_and_resumes_that_recut(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: approval is not recorded before deferral, the recut still starts,
+    # or restart reruns the architect or a lead ahead of the pending rung-2 recut.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("design"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    section = state.section("s1")
+    assert code == ExitCode.DRAINED
+    assert section.design_open is None
+    assert section.design_changed is True
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert section.pending is not None
+    assert section.pending["kind"] == "design-recut"
+    assert section.pending["design"] == str((tmp_path / DESIGN_PATH).resolve())
+    assert len(_entries(queue, cfg, "design")) == 1
+    order: list[str] = []
+
+    def record(original):
+        def dispatched(*args, **kwargs):
+            order.append(kwargs.get("role", "lead"))
+            return original(*args, **kwargs)
+        return dispatched
+
+    _every_run_agent(monkeypatch, record)
+    cfg = _stop_on_ping(cfg, queue)
+    run(queue, cfg)
+    assert order[0] == "recut"
+    assert len(_runs(tmp_path, "design")) == 1
+    assert state.section("s1").pending is None
+    assert state.section("s1").status == "parked"
+
+
+@pytest.mark.parametrize("ending", ["DONE", "WAITING: s2", "NEEDS-OWNER: Which choice?", "RETIRED", "invalid", "budget"])
+def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
+    ending: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: drain skips ordinary result processing, or replaces a returned
+    # FAILED_TWICE/BUDGET section stop with DRAINED.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    status = "DONE" if ending == "budget" else ending
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "finished-lead", status)))])
+    state = State.open(queue, cfg)
+    if ending == "invalid":
+        state.record_failure("s1")
+    if ending == "budget":
+        cfg = dataclasses.replace(cfg, dollar_budget=0.005)
+    _every_run_agent(monkeypatch, _drain_after_role("lead", during=True))
+    code = run(queue, cfg)
+    section = state.section("s1")
+    expected = ExitCode.FAILED_TWICE if ending == "invalid" else ExitCode.BUDGET if ending == "budget" else ExitCode.DRAINED
+    assert code == expected
+    assert len(_runs(tmp_path, "lead")) == 1
+    if ending != "budget":
+        assert _runs(tmp_path, "lead")[0]["retire-flag-seen"] is False
+    assert section.last_session == "finished-lead"
+    assert section.last_report == f"Stuck.\n{status}"
+    entries = _entries(queue, cfg, "lead")
+    assert len(entries) == 1
+    assert entries[0]["dollars"] == 0.01
+    assert section.pending is None
+    if ending in ("DONE", "budget"):
+        assert section.status == "done"
+        assert len(_entries(queue, cfg, "check")) == 1
+    elif ending.startswith("WAITING"):
+        assert section.status == "waiting"
+    elif ending.startswith("NEEDS-OWNER"):
+        assert section.status == "parked"
+        assert section.question == "Which choice?"
+    elif ending == "invalid":
+        assert section.failures == 2
+
+
+def test_drain_keeps_the_finished_architects_rung_three_decision_and_owner_ping(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: drain suppresses the architect's product-choice park or ping,
+    # records it as a design change, or dispatches the recut despite the decision.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    lead = _step(str(_status_lead(tmp_path, "choice-lead", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [lead])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_DECISION)])
+    _every_run_agent(monkeypatch, _drain_after_role("design"))
+    assert run(queue, cfg) == ExitCode.DRAINED
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.design_open == str((tmp_path / DESIGN_PATH).resolve())
+    assert section.design_changed is False
+    assert section.pending is None
+    assert section.failures == 0
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert any(section.question in p[0] for p in _pings(tmp_path))
+
+
+@pytest.mark.parametrize("guard", ["cap", "design-failures"])
+def test_pending_climb_keeps_the_design_guards_when_resumed(
+    guard: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a resumed climb bypasses the cap or repeated architect failure
+    # guard, or loses the held dispatch by running research/a lead instead.
+    from relay.loop import Pending
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    state = State.open(queue, cfg)
+    state.set_pending("s1", Pending(kind="climb", lead_log="held.log", problem=PROBLEM, status="DESIGN", text=PROBLEM))
+    take = State.take_pending
+
+    def taken(self, sid):
+        pending = take(self, sid)
+        if pending is not None:
+            if guard == "cap":
+                _section_spent(queue, cfg, sid, 6.0)
+            else:
+                _seed_design_failures(queue, cfg, 2)
+        return pending
+
+    monkeypatch.setattr(State, "take_pending", taken)
+    if guard == "cap":
+        # A parked run ends after its ordinary needs-owner ping.
+        cfg = _stop_on_ping(cfg, queue)
+    code = run(queue, cfg)
+    assert _runs(tmp_path, "lead") == []
+    assert _runs(tmp_path, "design") == []
+    assert code == (ExitCode.STOP_FILE if guard == "cap" else ExitCode.FAILED_TWICE)
+
+
+def test_drain_in_the_dispatch_window_still_runs_the_child_and_saves_its_followup(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a late drain consumes guidance but cancels its lead, or lets
+    # that lead's follow-up start instead of saving it at the next boundary.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD)])
+    state = State.open(queue, cfg)
+    state.set_guidance("s1", "Retain this guidance through dispatch.")
+    take = State.take_guidance
+    requested: list[bool] = []
+
+    def taken(self, sid):
+        result = take(self, sid)
+        if not requested:
+            _request_drain()
+            requested.append(True)
+        return result
+
+    monkeypatch.setattr(State, "take_guidance", taken)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert "Retain this guidance through dispatch." in str(_runs(tmp_path, "lead")[0]["prompt"])
+    assert _runs(tmp_path, "recut") == []
+    assert state.section("s1").last_session == "sess-lead-4"
+    assert state.section("s1").pending["kind"] == "climb"
+
+
+def test_drain_preserves_a_running_real_child_until_its_result_is_recorded(
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: first SIGTERM kills the live child, loses its completed result,
+    # or dispatches the next section before stopping the drained run.
+    from harness import DrainRealChild
+
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    scenario(_lines(DONE_LEAD))
+    gate = tmp_path / "child-gate"
+    gate.mkdir()
+    monkeypatch.setenv("RELAY_FAKE_GATE", str(gate))
+    cfg = dataclasses.replace(fake_cfg, ping_command=[sys.executable, "-c", "pass"])
+    state = State.open(queue, cfg)
+    child = DrainRealChild(gate, state)
+    try:
+        code = run(queue, cfg)
+    finally:
+        child.finish()
+    assert (gate / "finished").exists()
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").status == "done"
+    assert state.section("s1").last_session == "sess-lead-1"
+    assert state.section("s1").last_report == "Step committed.\nDONE"
+    assert state.section("s2").last_session is None
+    assert len(_entries(queue, cfg, "lead")) == 1
+
+
+@pytest.mark.parametrize("refresh", [False, True], ids=["initial", "refresh"])
+@pytest.mark.parametrize("preparation", ["lock", "brief"])
+def test_drain_during_research_preparation_preserves_map_and_session(
+    refresh: bool, preparation: str, cfg: Config, tmp_path: Path,
+    git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: acquisition or brief preparation authorizes research despite a
+    # drain received during preparation, or held refresh replaces its saved map.
+    import relay.loop
+    from harness import DrainResearchLock
+
+    commit = _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    state = State.open(queue, cfg)
+    if refresh:
+        state.set_research_session("s1", "saved-research-session")
+        mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
+        assert mapped is not None
+        save(attribute(stamp(mapped, git_repo.worktrees["s1"], time.time_ns()), queue), state.map_path("s1"))
+        (git_repo.worktrees["s1"] / "relay/git.py").write_text("# needs refresh\n")
+    before_map = state.map_path("s1").read_bytes() if refresh else None
+    before_session = state.section("s1").research_session
+    prepared: list[bool] = []
+    holder = DrainResearchLock(state, "s1") if preparation == "lock" else None
+    with monkeypatch.context() as patch:
+        if preparation == "lock":
+            original = State.research_lock
+
+            @contextmanager
+            def acquired(self, sid):
+                holder.waiting.set()
+                with original(self, sid):
+                    prepared.append(True)
+                    yield
+
+            patch.setattr(State, "research_lock", acquired)
+        else:
+            name = "refresh_brief" if refresh else "research_brief"
+            original = getattr(relay.loop, name)
+
+            def built(*args, **kwargs):
+                result = original(*args, **kwargs)
+                _request_drain()
+                prepared.append(True)
+                return result
+
+            patch.setattr(relay.loop, name, built)
+        try:
+            code = run(queue, cfg)
+        finally:
+            if holder is not None:
+                holder.finish()
+    assert prepared == [True], "research preparation hook was not reached exactly once"
+    assert _research_runs(tmp_path) == [], "research launched after drain during preparation"
+    assert _runs(tmp_path, "lead") == []
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").research_session == before_session
+    assert (state.map_path("s1").read_bytes() if state.map_path("s1").exists() else None) == before_map
+
+
+@pytest.mark.parametrize(
+    "dispatch", ["lead", "design-answer", "climb", "design-retry", "design-recut"]
+)
+def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
+    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: blocking brief preparation is treated as the late-signal window,
+    # or a held dispatch loses its answer, guidance or consumed pending record.
+    import relay.loop
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    state = State.open(queue, cfg)
+    answer = "Preserve the owner's answer through preparation."
+    guidance = "Preserve the lead's guidance through preparation."
+    state.set_answer("s1", answer)
+    state.set_guidance("s1", guidance)
+    feedback = "Preserve check feedback through preparation."
+    state.record_check_failure("s1", feedback)
+    pending = None
+    if dispatch == "design-answer":
+        state.park("s1", "Which choice?", design=(DESIGN_PATH, (1,)))
+        state.set_answer("s1", answer)
+        state.set_last_log("s1", _status_lead(tmp_path, "earlier-lead", f"DESIGN: {PROBLEM}"))
+    elif dispatch != "lead":
+        pending = relay.loop.Pending(
+            kind=dispatch, lead_log="held-lead.log", problem=PROBLEM,
+            status="RECUT" if dispatch == "climb" else None,
+            text=PROBLEM if dispatch == "climb" else None,
+            design=str((tmp_path / DESIGN_PATH).resolve()) if dispatch != "climb" else None,
+            brief="Retain this exact retry brief." if dispatch == "design-retry" else None,
+        )
+        state.set_pending("s1", pending)
+    name = {
+        "lead": "lead_prompt", "design-answer": "design_answer_brief",
+        "climb": "recut_brief", "design-retry": "design_brief",
+        "design-recut": "recut_brief",
+    }[dispatch]
+    original = getattr(relay.loop, name)
+    prepared: list[bool] = []
+
+    def built(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not prepared:
+            _request_drain()
+            prepared.append(True)
+        return result
+
+    with monkeypatch.context() as patch:
+        if dispatch == "design-retry":
+            take_pending = State.take_pending
+
+            def consumed(self, sid):
+                result = take_pending(self, sid)
+                if result is not None and not prepared:
+                    _request_drain()
+                    prepared.append(True)
+                return result
+
+            patch.setattr(State, "take_pending", consumed)
+        else:
+            patch.setattr(relay.loop, name, built)
+        code = run(queue, cfg)
+    assert prepared == [True], "dispatch preparation hook was not reached exactly once"
+    assert _runs(tmp_path, "lead") == [], "lead launched after drain during preparation"
+    assert _runs(tmp_path, "design") == [], "architect launched after drain during preparation"
+    assert _runs(tmp_path, "recut") == [], "recut launched after drain during preparation"
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").failures == 0
+    assert state.section("s1").design_failures == 0
+    if pending is not None:
+        assert state.section("s1").pending == dataclasses.asdict(pending)
+    else:
+        assert state.take_answer("s1") == answer
+        assert state.take_guidance("s1") == guidance
+        assert state.take_check_feedback("s1") == feedback
+
+
+@pytest.mark.parametrize("dispatch", ["design", "climb", "design-recut"])
+def test_drain_during_new_ladder_preparation_saves_the_followup(
+    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: new ladder work launches after blocking brief preparation, or
+    # holding it back discards the follow-up of the already recorded child.
+    import relay.loop
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    status = "RECUT" if dispatch == "climb" else "DESIGN"
+    cfg = _sequenced(cfg, tmp_path, [
+        _step(str(_status_lead(tmp_path, "finished-lead", f"{status}: {PROBLEM}")))
+    ])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _stop_on_ping(cfg, queue)
+    name = "design_brief" if dispatch == "design" else "recut_brief"
+    original = getattr(relay.loop, name)
+    prepared: list[bool] = []
+
+    def built(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not prepared:
+            _request_drain()
+            prepared.append(True)
+        return result
+
+    monkeypatch.setattr(relay.loop, name, built)
+    code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    assert prepared == [True], "new ladder preparation hook was not reached exactly once"
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert len(_runs(tmp_path, "design")) == int(dispatch == "design-recut"), "architect launched after drain during preparation"
+    assert _runs(tmp_path, "recut") == [], "recut launched after drain during preparation"
+    assert code == ExitCode.DRAINED
+    section = state.section("s1")
+    assert section.last_session == "finished-lead"
+    assert section.pending is not None
+    assert section.pending["kind"] == ("design-recut" if dispatch == "design-recut" else "climb")
+    assert section.failures == 0
+    assert section.design_failures == 0

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import time
 from dataclasses import dataclass, replace
@@ -26,12 +27,70 @@ from relay.prompts import (
     research_brief,
 )
 from relay.queue import Section, blocked_by, parse_queue, queue_design, same_entry
-from relay.runner import RunResult, error_line, run_agent, run_failed
-from relay.state import CHECK_LIMIT, DESIGN_FAILURE_LIMIT, FAILURE_LIMIT, State
+from relay.runner import DrainSwitch, RunResult, drain_armed, error_line, run_agent, run_failed
+from relay.state import CHECK_LIMIT, DESIGN_FAILURE_LIMIT, FAILURE_LIMIT, Pending, State
 from relay.status import parse_status
 from relay.stream import StreamState
 
 _Stop = tuple[int, str, str]  # (exit code, reason, detail)
+
+
+def _drained() -> _Stop:
+    return ExitCode.DRAINED, "drained", "a drain was requested; running work finished and was recorded"
+
+
+def _resume_pending(
+    queue: Path,
+    cfg: Config,
+    state: State,
+    ledger: Ledger,
+    since: float,
+    cwd: Path,
+    retire_flag: Path,
+    section: Section,
+    pending: Pending,
+    drain: DrainSwitch,
+) -> _Stop | None:
+    if drain.requested:
+        state.set_pending(section.id, pending)
+        return _drained()
+    current = state.section(section.id)
+    if _over_cap(cfg, queue, state, ledger, section):
+        return None
+    if current.design_failures >= DESIGN_FAILURE_LIMIT:
+        return _design_failed_stop(section.id, current.design_failures, current.design_failure)
+    lead_log = Path(pending.lead_log)
+    if pending.kind == "climb":
+        assert pending.status is not None and pending.text is not None
+        return _climb(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section,
+            pending.status, pending.text, lead_log, drain,
+        )
+    assert pending.design is not None
+    design = Path(pending.design)
+    if pending.kind == "design-retry":
+        assert pending.brief is not None
+        ran = _architect_run(
+            cfg, state, ledger, since, retire_flag, section, design, pending.brief, pending.problem, drain
+        )
+        if ran is None:
+            state.set_pending(section.id, pending)
+            return _drained()
+        result, report = ran
+        return _design_outcome(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, design,
+            pending.problem, lead_log, result, report, drain,
+        )
+    failed = _recut(
+        queue, cfg, state, ledger, since, cwd, retire_flag, section,
+        pending.problem, lead_log, design, 2, drain=drain,
+    )
+    if isinstance(failed, tuple):
+        state.set_pending(section.id, pending)
+        return failed
+    if failed:
+        _park(cfg, queue, state, section.id, ladder.failed_text(section.id, design, failed))
+    return None
 
 
 def _git_top(directory: Path) -> Path:
@@ -45,20 +104,30 @@ def _git_top(directory: Path) -> Path:
 
 def run(queue: Path, cfg: Config) -> int:
     state = State.open(queue, cfg)
-    state.lock()
-    progress.started(queue, cfg)
-    try:
-        code, reason, detail = _loop(queue, cfg, state)
-    except Exception as exc:
-        ping.stopped(cfg, queue, "crashed", f"{type(exc).__name__}: {exc}")
-        progress.ended(queue, ExitCode.ERROR, "crashed", f"{type(exc).__name__}: {exc}")
-        raise
-    ping.stopped(cfg, queue, reason, detail)
-    progress.ended(queue, code, reason, detail)
-    return code
+
+    def on_request() -> None:
+        state.mark_draining()
+        progress.draining()
+
+    with drain_armed(on_request) as drain:
+        state.lock()
+        try:
+            state.publish_run(os.getpid())
+            progress.started(queue, cfg)
+            try:
+                code, reason, detail = _loop(queue, cfg, state, drain)
+            except Exception as exc:
+                ping.stopped(cfg, queue, "crashed", f"{type(exc).__name__}: {exc}")
+                progress.ended(queue, ExitCode.ERROR, "crashed", f"{type(exc).__name__}: {exc}")
+                raise
+            ping.stopped(cfg, queue, reason, detail)
+            progress.ended(queue, code, reason, detail)
+            return code
+        finally:
+            state.clear_run()
 
 
-def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
+def _loop(queue: Path, cfg: Config, state: State, drain: DrainSwitch) -> _Stop:
     since = time.time()
     ledger = Ledger(state.ledger_path)
     cwd = _git_top(queue.parent)
@@ -67,6 +136,8 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
     last_waiting: list[str] | None = None
 
     while True:
+        if drain.requested:
+            return _drained()
         if state.stop_file.exists():
             return ExitCode.STOP_FILE, "by stop file", "the stop file exists"
         over = ledger.over(cfg, Spend(0, 0.0), since)
@@ -74,7 +145,7 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
             return ExitCode.BUDGET, "over budget", f"the {over} budget is spent"
 
         sections = parse_queue(queue)
-        _wake(sections, state, cwd)
+        _wake(sections, state, cwd, queue)
         parked = {s.id for s in sections if state.section(s.id).status == "parked"}
         waiting_ids = {s.id for s in sections if state.section(s.id).status == "waiting"}
         blocked = blocked_by(sections, parked | waiting_ids)
@@ -90,10 +161,10 @@ def _loop(queue: Path, cfg: Config, state: State) -> _Stop:
             if waiting != last_waiting:
                 progress.waiting(waiting)
                 last_waiting = waiting
-            time.sleep(cfg.poll_seconds)
+            drain.pause(cfg.poll_seconds)
             continue
 
-        stop = _run_section(queue, cfg, state, ledger, since, cwd, retire_flag, sections, runnable[0])
+        stop = _run_section(queue, cfg, state, ledger, since, cwd, retire_flag, sections, runnable[0], drain)
         if stop is not None:
             return stop
 
@@ -108,6 +179,7 @@ def _run_section(
     retire_flag: Path,
     sections: list[Section],
     section: Section,
+    drain: DrainSwitch,
 ) -> _Stop | None:
     sid = section.id
     current = state.section(sid)
@@ -118,21 +190,29 @@ def _run_section(
         return None
     if current.design_failures >= DESIGN_FAILURE_LIMIT:
         return _design_failed_stop(sid, current.design_failures, current.design_failure)
+    if drain.requested:
+        return _drained()
+    pending = state.take_pending(sid)
+    if pending is not None:
+        return _resume_pending(queue, cfg, state, ledger, since, cwd, retire_flag, section, pending, drain)
     if current.design_open is not None:
-        answer = state.take_answer(sid)
+        answer = current.answer
         if answer is not None:
             return _design_answer(
-                queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer
+                queue, cfg, state, ledger, since, cwd, retire_flag, section, current.design_open, answer, drain
             )
-    m, spent = _research(cfg, state, ledger, since, cwd, queue, section)
+    m, spent = _research(cfg, state, ledger, since, cwd, queue, section, drain)
     if spent:
         return ExitCode.BUDGET, "over budget", "a researcher was retired when the budget ran out"
+    if drain.requested:
+        return _drained()
     resume = current.last_session or state.last_session_any
     previous_backend = current.last_backend if current.last_session else state.last_backend_any
     backend = backends.get_backend(previous_backend)
-    answer = state.take_answer(sid)
-    feedback = state.take_check_feedback(sid)
-    guidance = state.take_guidance(sid)
+    current = state.section(sid)
+    answer = current.answer
+    feedback = current.check_feedback
+    guidance = current.guidance
     prompt = lead_prompt(
         queue,
         section,
@@ -145,9 +225,16 @@ def _run_section(
         handoff_hint=backend.resume_hint(resume) if resume is not None else None,
         backend=cfg.backend,
         guidance=guidance,
+        worktree=_section_worktree(cwd, queue, sid, state)
+        or git.SectionWorktree(git.section_branch(queue, sid), git.section_path(cwd, queue, sid)),
     )
 
     retire_flag.unlink(missing_ok=True)
+    if drain.requested:
+        return _drained()
+    state.take_answer(sid)
+    state.take_check_feedback(sid)
+    state.take_guidance(sid)
     progress.lead_started(sid, resume, answer is not None)
     result, watch = _run(
         cfg,
@@ -169,6 +256,7 @@ def _run_section(
         state.set_last_session(sid, session, cfg.backend)
         state.set_last_report(sid, result.stream.result_text or None)
 
+    _section_worktree(cwd, queue, sid, state)
     status = parse_status(result.stream.result_text)
     progress.lead_finished(sid, result, status)
     failed = run_failed(result, require_tokens=False) or status is None
@@ -182,8 +270,16 @@ def _run_section(
     elif status.kind == "DONE":
         _verify(cfg, queue, state, ledger, cwd, section, state.check_log(result.log))
     elif status.kind in ("RECUT", "DESIGN"):
+        if drain.requested:
+            state.set_pending(sid, Pending(
+                kind="climb", lead_log=str(result.log), problem=ladder.split_reason(status.text)[0],
+                status=status.kind, text=status.text,
+            ))
+            if watch.budget_hit:
+                return ExitCode.BUDGET, "over budget", "a lead was retired when the budget ran out"
+            return _drained()
         stop = _climb(
-            queue, cfg, state, ledger, since, cwd, retire_flag, section, status.kind, status.text, result.log
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, status.kind, status.text, result.log, drain
         )
         if stop is not None:
             return stop
@@ -198,24 +294,24 @@ def _run_section(
     return None
 
 
-def _landed(blocker: str, sections: list[Section], state: State, cwd: Path) -> bool:
+def _landed(blocker: str, sections: list[Section], state: State, cwd: Path, queue: Path) -> bool:
     """A blocker in the queue has landed when done and its section worktree is not dirty; one
     gone from the queue, when every section recut from it has landed (or none exists)."""
     found = next((s for s in sections if s.id == blocker), None)
     if found is None:
-        return all(_landed(s.id, sections, state, cwd) for s in sections if s.came_from == blocker)
+        return all(_landed(s.id, sections, state, cwd, queue) for s in sections if s.came_from == blocker)
     if state.section(blocker).status != "done" and found.open:
         return False
-    tree = git.section_worktree(cwd, blocker)
-    return tree is None or git.clean(tree) is not False
+    tree = _section_worktree(cwd, queue, blocker, state)
+    return tree is None or git.clean(tree.path) is not False
 
 
-def _wake(sections: list[Section], state: State, cwd: Path) -> None:
+def _wake(sections: list[Section], state: State, cwd: Path, queue: Path) -> None:
     """Reopen each waiting section whose blocker has landed. No ping."""
     for s in sections:
         record = state.section(s.id)
         blocker = record.waits_on
-        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd):
+        if record.status == "waiting" and blocker is not None and _landed(blocker, sections, state, cwd, queue):
             state.wake(s.id)
             progress.woken(s.id, blocker)
 
@@ -232,7 +328,7 @@ def _wait(
         reason = f"it waits on {blocker}, which is not in the queue"
     elif blocker == sid:
         reason = "it waits on itself"
-    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent)):
+    elif _landed(blocker, sections, state, cwd=_git_top(queue.parent), queue=queue):
         reason = f"it waits on {blocker}, which has already landed"
     else:
         seen: set[str] = set()
@@ -258,9 +354,34 @@ def _wait(
     progress.section_waiting(sid, blocker)
 
 
-def _section_cwd(cwd: Path, sid: str) -> Path:
+def _section_worktree(
+    cwd: Path, queue: Path, sid: str, state: State,
+) -> git.SectionWorktree | None:
+    """Resolve and persist this queue section's validated worktree."""
+    current = state.section(sid)
+    recorded = None
+    if current.worktree_branch is not None and current.worktree_path is not None:
+        recorded = git.SectionWorktree(current.worktree_branch, Path(current.worktree_path))
+    else:
+        report = ladder.lead_branch(current.last_report)
+        if report is not None:
+            recorded = git.SectionWorktree(*report)
+    found = git.section_worktree(cwd, queue, sid, recorded)
+    if found is None and recorded is not None:
+        found = git.section_worktree(cwd, queue, sid)
+    if found is not None and (
+        current.worktree_branch != found.branch or current.worktree_path != str(found.path)
+    ):
+        state.bind_worktree(sid, found.branch, found.path)
+    return found
+
+
+def _section_cwd(
+    cwd: Path, queue: Path, sid: str, state: State,
+) -> Path:
     """Where a section's check and research run: its worktree, else `cwd`."""
-    return git.section_worktree(cwd, sid) or cwd
+    tree = _section_worktree(cwd, queue, sid, state)
+    return tree.path if tree is not None else cwd
 
 
 def _run(
@@ -306,16 +427,22 @@ def _research(
     cwd: Path,
     queue: Path,
     section: Section,
+    drain: DrainSwitch,
 ) -> tuple[research.Map | None, bool]:
     """The section's map and whether the budget ran out in research; None on no map.
 
     Holds the section's research lock, so a `relay ask` never meets a map half-refreshed.
     """
     sid = section.id
-    where = _section_cwd(cwd, sid)
+    where = _section_cwd(cwd, queue, sid, state)
     with state.research_lock(sid):
+        if drain.requested:
+            return None, False
         since_ns = time.time_ns()
         saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.owned(saved, queue):
+            state.drop_map(sid)
+            saved = None
         changed = research.changed(saved, where) if saved is not None else frozenset()
         if saved is not None and not changed:
             progress.map_reused(sid, saved)
@@ -332,6 +459,8 @@ def _research(
         else:
             progress.research_started(sid, where)
             text = research_brief(queue, section, flag, cfg)
+        if drain.requested:
+            return None, False
         result, watch = _run(
             cfg,
             state,
@@ -353,7 +482,7 @@ def _research(
             else:
                 m = research.parse_map(sid, commit, result.stream.result_text, cfg)
         if m is not None:
-            m = research.stamp(m, where, since_ns)
+            m = research.attribute(research.stamp(m, where, since_ns), queue)
             research.save(m, state.map_path(sid))
         progress.research_finished(sid, result, m)
         if failed:
@@ -365,6 +494,10 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
     """Put `question` to the section's researcher and return its answer; ResearchError without one."""
     state = State.open(queue, cfg)
     with state.research_lock(sid):
+        saved = research.load(state.map_path(sid), sid)
+        if saved is not None and not research.owned(saved, queue):
+            state.drop_map(sid)
+            raise ResearchError(f"section {sid} research must be refreshed before a follow-up")
         current = state.section(sid)
         session = current.research_session
         if session is None:
@@ -388,7 +521,7 @@ def ask(queue: Path, cfg: Config, sid: str, question: str) -> str:
             sid,
             [*cfg.research_command, "--resume", session],
             ask_brief(question, flag, cfg),
-            _section_cwd(cwd, sid),
+            _section_cwd(cwd, queue, sid, state),
             flag,
         )
         if run_failed(result):
@@ -480,7 +613,7 @@ def _verify(
 ) -> None:
     """Run the section's checks and act on the verdict; a fail below the limit leaves it open."""
     sid = section.id
-    where = _section_cwd(cwd, sid)
+    where = _section_cwd(cwd, queue, sid, state)
     progress.check_started(sid, len(section.checks), where)
     result = run_checks(cfg, section, where, check_log)
     ledger.append_check(sid, result)
@@ -529,6 +662,7 @@ def _climb(
     kind: Literal["RECUT", "DESIGN"],
     text: str,
     lead_log: Path,
+    drain: DrainSwitch,
 ) -> _Stop | None:
     """The ladder's move for a RECUT or DESIGN: rung 1 a recut, rung 2 a design change, rung 3 a park."""
     sid = section.id
@@ -536,7 +670,15 @@ def _climb(
     step = ladder.climb(kind, state.section(sid), design, sid)
     problem = ladder.split_reason(text)[0]
     if step.rung == 1:
-        if _recut(queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log):
+        failed = _recut(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, drain=drain
+        )
+        if isinstance(failed, tuple):
+            state.set_pending(sid, Pending(
+                kind="climb", lead_log=str(lead_log), problem=problem, status=kind, text=text,
+            ))
+            return failed
+        if failed:
             second, count = _fail(state, sid)
             progress.failed(sid, count)
             if second:
@@ -545,9 +687,14 @@ def _climb(
         _park(cfg, queue, state, sid, step.why)
     else:
         # ladder.climb gives rung 2 only with a design in hand.
-        return _design_change(
-            queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log
+        stop = _design_change(
+            queue, cfg, state, ledger, since, cwd, retire_flag, section, cast(Path, design), problem, lead_log, drain
         )
+        if stop == _drained() and state.section(sid).pending is None:
+            state.set_pending(sid, Pending(
+                kind="climb", lead_log=str(lead_log), problem=problem, status=kind, text=text,
+            ))
+        return stop
     return None
 
 
@@ -563,6 +710,7 @@ def _design_change(
     design: Path,
     problem: str,
     lead_log: Path,
+    drain: DrainSwitch,
 ) -> _Stop | None:
     """Run the architect on `design` for `problem`, then act on its report."""
     if _over_cap(cfg, queue, state, ledger, section):
@@ -572,23 +720,15 @@ def _design_change(
     current = state.section(section.id)
     brief = design_brief(
         design, queue, section, problem, evidence, cfg.design_approval,
-        current.answers, _lead_code(cwd, section.id, current.last_report),
+        current.answers, _lead_code(cwd, queue, section.id, state),
     )
-    return _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log)
+    return _architect(queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem, lead_log, drain)
 
 
-def _lead_code(cwd: Path, sid: str, report: str | None) -> tuple[str, str | None] | None:
-    """(branch, head commit) of the lead's code: the BRANCH line of its report, else the worktree
-    on lead/<sid>; None when neither is found. The architect reads it through git by branch and
-    commit, never by the worktree's path, which lies outside its repository."""
-    found = ladder.lead_branch(report)
-    if found is None:
-        tree = git.section_worktree(cwd, sid)
-        if tree is None:
-            return None
-        found = (f"lead/{sid}", tree)
-    branch, tree = found
-    return branch, git.head(tree) if tree.is_dir() else None
+def _lead_code(cwd: Path, queue: Path, sid: str, state: State) -> tuple[str, str | None] | None:
+    """The validated lead branch and its current worktree HEAD for architect evidence."""
+    tree = _section_worktree(cwd, queue, sid, state)
+    return (tree.branch, git.head(tree.path)) if tree is not None else None
 
 
 def _design_answer(
@@ -602,6 +742,7 @@ def _design_answer(
     section: Section,
     design_open: str,
     answer: str,
+    drain: DrainSwitch,
 ) -> _Stop | None:
     """Run the architect with the owner's `answer` to the open decisions, then act on its report."""
     sid = section.id
@@ -619,7 +760,7 @@ def _design_answer(
     problem = f"the owner ruled on the open design decisions: {answer}"
     return _architect(
         queue, cfg, state, ledger, since, cwd, retire_flag, section, design, brief, problem,
-        Path(current.last_log),
+        Path(current.last_log), drain, on_dispatch=lambda: state.take_answer(sid),
     )
 
 
@@ -648,12 +789,22 @@ def _architect(
     brief: str,
     problem: str,
     lead_log: Path,
+    drain: DrainSwitch,
+    on_dispatch: Callable[[], object] | None = None,
 ) -> _Stop | None:
     """The architect run on `design` with `brief`, run once more when it failed or filed no report
     (the reason and its final message added to the brief) unless the budget or the section's cap is
     spent; then act on its report."""
     sid = section.id
-    result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, brief, problem)
+    current = state.section(sid)
+    if current.design_failures >= DESIGN_FAILURE_LIMIT:
+        return _design_failed_stop(sid, current.design_failures, current.design_failure)
+    ran = _architect_run(
+        cfg, state, ledger, since, retire_flag, section, design, brief, problem, drain, on_dispatch
+    )
+    if ran is None:
+        return _drained()
+    result, report = ran
     failed = run_failed(result)
     if failed or report is None:
         if _over_cap(cfg, queue, state, ledger, section):
@@ -663,9 +814,18 @@ def _architect(
             what = f"it failed: {error}" if failed else "it filed no report"
             progress.design_retrying(sid, what)
             retry = design_retry_brief(brief, ladder.said(result.stream.result_text), error)
-            result, report = _architect_run(cfg, state, ledger, since, retire_flag, section, design, retry, problem)
+            ran = _architect_run(
+                cfg, state, ledger, since, retire_flag, section, design, retry, problem, drain
+            )
+            if ran is None:
+                state.set_pending(sid, Pending(
+                    kind="design-retry", lead_log=str(lead_log), problem=problem,
+                    design=str(design), brief=retry,
+                ))
+                return _drained()
+            result, report = ran
     return _design_outcome(
-        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, design, problem, lead_log, result, report, drain
     )
 
 
@@ -679,12 +839,19 @@ def _architect_run(
     design: Path,
     brief: str,
     problem: str,
-) -> tuple[RunResult, ladder.DesignReport | None]:
+    drain: DrainSwitch,
+    on_dispatch: Callable[[], object] | None = None,
+) -> tuple[RunResult, ladder.DesignReport | None] | None:
     """One architect run on `design` with `brief`: its result and its parsed report."""
+    where = _git_top(design.parent)
+    if drain.requested:
+        return None
+    if on_dispatch is not None:
+        on_dispatch()
     progress.design_started(section.id, design, section.steps, problem)
     result, _ = _run(
         cfg, state, ledger, since, "design", section.id, cfg.design_command, brief,
-        _git_top(design.parent), retire_flag, None, 2,
+        where, retire_flag, None, 2,
     )
     report = ladder.parse_report(result.stream.result_text)
     progress.design_finished(section.id, result, report)
@@ -721,6 +888,7 @@ def _design_outcome(
     lead_log: Path,
     result: RunResult,
     report: ladder.DesignReport | None,
+    drain: DrainSwitch,
 ) -> _Stop | None:
     """Reset the failure bound on usable progress; otherwise count the completed unusable
     cycle, handing back below the limit and stopping at it without a product-choice park."""
@@ -744,9 +912,19 @@ def _design_outcome(
         return
     state.set_design_open(sid, None)
     state.mark_design_changed(sid)
+    if drain.requested:
+        state.set_pending(sid, Pending(
+            kind="design-recut", lead_log=str(lead_log), problem=problem, design=str(design),
+        ))
+        return _drained()
     failed = _recut(
-        queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2
+        queue, cfg, state, ledger, since, cwd, retire_flag, section, problem, lead_log, design, 2, drain=drain
     )
+    if isinstance(failed, tuple):
+        state.set_pending(sid, Pending(
+            kind="design-recut", lead_log=str(lead_log), problem=problem, design=str(design),
+        ))
+        return failed
     if failed:
         _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
 
@@ -764,12 +942,16 @@ def _recut(
     lead_log: Path,
     design: Path | None = None,
     rung: Literal[1, 2] = 1,
-) -> str | None:
+    *,
+    drain: DrainSwitch,
+) -> str | _Stop | None:
     """Run a transactional recut; why it failed, else None, with failure policy owned by the caller."""
     brief = recut_brief(queue, section, reason, lead_log, design)
     original_queue = queue.read_bytes()
     original_mode = stat.S_IMODE(queue.stat().st_mode)
     before = parse_queue(queue)
+    if drain.requested:
+        return _drained()
     progress.recut_started(section.id, reason)
     changed = False
     after = before

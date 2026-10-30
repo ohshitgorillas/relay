@@ -5,6 +5,7 @@ The repositories come from the `git_repo` fixture in `tests/conftest.py`.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ import pytest
 
 import relay.git
 import relay.runner
+import relay.state
 from relay.git import heads, section_worktree
 
 if TYPE_CHECKING:
@@ -74,54 +76,71 @@ def _fake_capture(
     return calls
 
 
-# Behavior 5: The worktree `git worktree list --porcelain` (run in `repo`) shows on branch
-# refs/heads/lead/<sid>, or None when there is none or git fails.
+# Queue worktree design, Modules `relay/git.py`: only the exact qualified branch
+# is discovered without an explicit binding; git failure still yields None.
 
 
 def test_section_worktree_is_the_worktree_on_lead_sid(git_repo: GitRepo) -> None:
-    found = section_worktree(git_repo.root, "s1")
+    queue = git_repo.root / "queue.md"
+    expected = git_repo.worktree("s1", queue=queue)
+    found = section_worktree(git_repo.root, queue, "s1")
     assert found is not None
-    assert Path(found).resolve() == git_repo.worktrees["s1"]
+    assert found.path.resolve() == expected
 
 
 def test_section_worktree_picks_the_branch_of_that_sid_among_several(git_repo: GitRepo) -> None:
-    git_repo.worktree("s10")
-    git_repo.worktree("s2")
+    queue = git_repo.root / "queue.md"
+    expected = {sid: git_repo.worktree(sid, queue=queue) for sid in ("s1", "s10", "s2")}
     for sid in ("s1", "s10", "s2"):
-        found = section_worktree(git_repo.root, sid)
+        found = section_worktree(git_repo.root, queue, sid)
         assert found is not None
-        assert Path(found).resolve() == git_repo.worktrees[sid]
+        assert found.path.resolve() == expected[sid]
 
 
 def test_section_worktree_answers_the_same_when_run_in_a_worktree(git_repo: GitRepo) -> None:
-    git_repo.worktree("s2")
-    found = section_worktree(git_repo.worktrees["s1"], "s2")
+    queue = git_repo.root / "queue.md"
+    first = git_repo.worktree("s1", queue=queue)
+    second = git_repo.worktree("s2", queue=queue)
+    found = section_worktree(first, queue, "s2")
     assert found is not None
-    assert Path(found).resolve() == git_repo.worktrees["s2"]
+    assert found.path.resolve() == second
 
 
 @pytest.mark.parametrize("sid", ["s9", "s", "s1.1", "1"])
 def test_section_worktree_is_none_when_no_worktree_is_on_that_branch(
     git_repo: GitRepo, sid: str
 ) -> None:
-    git_repo.worktree("s10")
-    assert section_worktree(git_repo.root, sid) is None
+    queue = git_repo.root / "queue.md"
+    git_repo.worktree("s10", queue=queue)
+    assert section_worktree(git_repo.root, queue, sid) is None
 
 
 def test_section_worktree_is_none_for_a_branch_no_worktree_has_checked_out(
     git_repo: GitRepo,
 ) -> None:
-    git_repo.git("branch", "lead/s3")
-    assert section_worktree(git_repo.root, "s3") is None
+    queue = git_repo.root / "queue.md"
+    git_repo.git("branch", relay.git.section_branch(queue, "s3"))
+    assert section_worktree(git_repo.root, queue, "s3") is None
 
 
 def test_section_worktree_parses_the_porcelain_capture_returns(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls = _fake_capture(monkeypatch, (0, PORCELAIN))
-    assert section_worktree(tmp_path, "s4") == Path("/nowhere/wt-s4")
-    assert section_worktree(tmp_path, "s10") == Path("/nowhere/wt-s10")
-    assert section_worktree(tmp_path, "s1") is None
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    for name in ("main", "wt-s4", "wt-s10", "detached"):
+        (tmp_path / name).mkdir()
+    porcelain = PORCELAIN.replace("/nowhere/", f"{tmp_path}/").replace(
+        "refs/heads/lead/", f"refs/heads/lead/{identity}/"
+    )
+    calls = _fake_capture(monkeypatch, (0, porcelain))
+    assert section_worktree(tmp_path, queue, "s4") == relay.git.SectionWorktree(
+        f"lead/{identity}/s4", tmp_path / "wt-s4"
+    )
+    assert section_worktree(tmp_path, queue, "s10") == relay.git.SectionWorktree(
+        f"lead/{identity}/s10", tmp_path / "wt-s10"
+    )
+    assert section_worktree(tmp_path, queue, "s1") is None
     assert calls
     for argv, cwd, _timeout in calls:
         assert argv[0] == "git"
@@ -206,9 +225,13 @@ def test_heads_is_the_same_run_in_any_worktree(git_repo: GitRepo) -> None:
 def test_a_failed_capture_gives_none_and_empty_heads(
     monkeypatch: pytest.MonkeyPatch, git_repo: GitRepo, answer: tuple[int | None, str]
 ) -> None:
+    queue = git_repo.root / "queue.md"
+    git_repo.worktree("s1", queue=queue)
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    answer = (answer[0], answer[1].replace("refs/heads/lead/", f"refs/heads/lead/{identity}/"))
     calls = _fake_capture(monkeypatch, answer)
-    # The real repository has a lead/s1 worktree, so only the capture's answer can give None.
-    assert section_worktree(git_repo.root, "s1") is None
+    # A qualified worktree exists, so only the capture's answer can give None.
+    assert section_worktree(git_repo.root, queue, "s1") is None
     assert heads(git_repo.root) == {}
     assert len(calls) >= 2
     assert all(argv[0] == "git" and cwd == git_repo.root for argv, cwd, _t in calls)
@@ -217,13 +240,13 @@ def test_a_failed_capture_gives_none_and_empty_heads(
 def test_neither_raises_outside_a_repository(tmp_path: Path) -> None:
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
-    assert section_worktree(plain, "s1") is None
+    assert section_worktree(plain, tmp_path / "queue.md", "s1") is None
     assert heads(plain) == {}
 
 
 def test_neither_raises_on_a_directory_that_does_not_exist(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
-    assert section_worktree(missing, "s1") is None
+    assert section_worktree(missing, tmp_path / "queue.md", "s1") is None
     assert heads(missing) == {}
 
 
@@ -401,3 +424,198 @@ def test_clean_is_none_outside_a_repository(tmp_path: Path) -> None:
 
 def test_clean_is_none_on_a_directory_that_does_not_exist(tmp_path: Path) -> None:
     assert relay.git.clean(tmp_path / "missing") is None
+
+
+# Queue worktree design, Modules `relay/git.py`: truncating or independently
+# slugging queue identities would make this test fail.
+def test_qualified_branch_uses_full_resolved_queue_identity(tmp_path: Path) -> None:
+    queue = tmp_path / "queue..with invalid ref characters.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    assert relay.git.section_branch(queue, "s1") == f"lead/{identity}/s1"
+    assert relay.git.section_branch(tmp_path / "unused" / ".." / queue.name, "s1") == (
+        f"lead/{identity}/s1"
+    )
+    other = tmp_path / "other" / queue.name
+    other_identity = hashlib.sha256(str(other.resolve()).encode()).hexdigest()
+    assert relay.git.section_branch(other, "s1") == f"lead/{other_identity}/s1"
+    assert identity != other_identity
+
+
+# Recomputing an otherwise correct hash outside state.queue_id would break this
+# controlled identity's propagation into both names and worktree selection.
+def test_worktree_names_and_lookup_use_the_shared_queue_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = "b" * 64
+
+    def controlled_identity(path: Path) -> str:
+        assert path == queue
+        return identity
+
+    original = relay.state.queue_id
+    monkeypatch.setattr(relay.state, "queue_id", controlled_identity)
+    for name, value in list(vars(relay.git).items()):
+        if value is original:
+            monkeypatch.setattr(relay.git, name, controlled_identity)
+
+    branch = f"lead/{identity}/s1"
+    path = tmp_path.parent / (tmp_path.name + "-wt") / identity / "s1"
+    path.mkdir(parents=True)
+    _fake_capture(
+        monkeypatch,
+        (0, f"worktree {path}\nHEAD {'1' * 40}\nbranch refs/heads/{branch}\n\n"),
+    )
+    assert relay.git.section_branch(queue, "s1") == branch
+    assert relay.git.section_path(tmp_path, queue, "s1") == path
+    assert section_worktree(tmp_path, queue, "s1") == relay.git.SectionWorktree(branch, path)
+
+
+# A second lookup or accepting a prefix branch would break this exact selection.
+def test_qualified_lookup_reads_porcelain_once_through_capture(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    branch = f"lead/{identity}/s1"
+    path = tmp_path / "owned tree"
+    path.mkdir()
+    calls = _fake_capture(
+        monkeypatch,
+        (
+            0,
+            f"worktree {tmp_path}\nHEAD {'1' * 40}\nbranch refs/heads/main\n\n"
+            f"worktree {path}\nHEAD {'2' * 40}\nbranch refs/heads/{branch}\n\n",
+        ),
+    )
+    assert section_worktree(tmp_path, queue, "s1") == relay.git.SectionWorktree(branch, path)
+    assert len(calls) == 1
+    argv, cwd, _timeout = calls[0]
+    assert argv == ["git", "worktree", "list", "--porcelain"]
+    assert cwd == tmp_path
+
+
+# Accepting bindings by path alone, branch alone, or foreign qualified ownership
+# would break these rejections.
+@pytest.mark.parametrize(
+    "mismatch",
+    ["path", "branch", "split-records", "detached", "missing", "foreign-queue", "foreign-section"],
+)
+def test_explicit_binding_requires_the_owned_branch_and_resolved_path_together(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mismatch: str
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    branch = f"lead/{identity}/s1"
+    path = tmp_path / "owned"
+    path.mkdir()
+    listed_path = path
+    listed_branch = branch
+    if mismatch in {"path", "split-records"}:
+        listed_path = tmp_path
+    elif mismatch == "branch":
+        listed_branch = "custom/changed"
+    elif mismatch == "missing":
+        path = tmp_path / "stale"
+        listed_path = path
+    elif mismatch == "foreign-queue":
+        foreign = hashlib.sha256(str((tmp_path / "other.md").resolve()).encode()).hexdigest()
+        branch = listed_branch = f"lead/{foreign}/s1"
+    elif mismatch == "foreign-section":
+        branch = listed_branch = f"lead/{identity}/s2"
+    branch_line = "detached" if mismatch == "detached" else f"branch refs/heads/{listed_branch}"
+    output = f"worktree {listed_path}\nHEAD {'1' * 40}\n{branch_line}\n\n"
+    if mismatch == "split-records":
+        output += f"worktree {path}\nHEAD {'2' * 40}\nbranch refs/heads/custom/changed\n\n"
+    _fake_capture(
+        monkeypatch,
+        (0, output),
+    )
+    assert section_worktree(tmp_path, queue, "s1", relay.git.SectionWorktree(branch, path)) is None
+
+
+# Trusting partial stdout from failed git would break this rejection.
+@pytest.mark.parametrize("returncode", [1, 128, None])
+def test_queue_lookup_rejects_partial_output_when_git_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, returncode: int | None
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    branch = f"lead/{identity}/s1"
+    _fake_capture(
+        monkeypatch,
+        (returncode, f"worktree {tmp_path}\nHEAD {'1' * 40}\nbranch refs/heads/{branch}\n\n"),
+    )
+    assert section_worktree(tmp_path, queue, "s1") is None
+    assert section_worktree(tmp_path, queue, "s1", relay.git.SectionWorktree(branch, tmp_path)) is None
+
+
+# Reading another repository's worktree list would make this foreign binding pass.
+def test_explicit_binding_does_not_adopt_a_worktree_from_another_repository(
+    git_repo: GitRepo, tmp_path: Path
+) -> None:
+    other = tmp_path / "other-repository"
+    other.mkdir()
+    git_repo.git("init", "-q", "-b", "main", str(other))
+    queue = other / "queue.md"
+    recorded = relay.git.SectionWorktree("lead/s1", git_repo.worktrees["s1"])
+    assert section_worktree(other, queue, "s1", recorded) is None
+
+
+# Requiring a literal path spelling instead of resolving aliases would reject this binding.
+def test_explicit_legacy_binding_resolves_path_aliases(git_repo: GitRepo) -> None:
+    path = git_repo.worktrees["s1"]
+    recorded = relay.git.SectionWorktree("lead/s1", path / ".." / path.name)
+    assert section_worktree(git_repo.root, git_repo.root / "queue.md", "s1", recorded) == (
+        relay.git.SectionWorktree("lead/s1", path)
+    )
+
+
+# Requiring legacy branches to be renamed, or preferring qualified discovery over
+# an explicit legacy binding, would break this compatibility claim.
+@pytest.mark.parametrize("legacy", ["lead/s1", "custom/old-work"])
+def test_recorded_legacy_branch_stays_usable_beside_a_qualified_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, legacy: str
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    qualified = f"lead/{identity}/s1"
+    path = tmp_path / "old-location"
+    path.mkdir()
+    _fake_capture(
+        monkeypatch,
+        (
+            0,
+            f"worktree {path}\nHEAD {'1' * 40}\nbranch refs/heads/{legacy}\n\n"
+            f"worktree {tmp_path}\nHEAD {'2' * 40}\nbranch refs/heads/{qualified}\n\n",
+        ),
+    )
+    recorded = relay.git.SectionWorktree(legacy, path)
+    assert section_worktree(tmp_path, queue, "s1", recorded) == recorded
+
+
+# Guessing ownership from a bare sid, queue basename, worktree basename, or the
+# sole listed worktree would break these no-binding rejections.
+@pytest.mark.parametrize(
+    "candidate",
+    ["lead/s1", "lead/queue/s1", "custom/s1", "foreign-queue", "foreign-section"],
+)
+def test_unrecorded_lookup_accepts_no_legacy_or_foreign_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, candidate: str
+) -> None:
+    queue = tmp_path / "queue.md"
+    identity = hashlib.sha256(str(queue.resolve()).encode()).hexdigest()
+    if candidate == "foreign-queue":
+        foreign = hashlib.sha256(
+            str((tmp_path / "elsewhere" / queue.name).resolve()).encode()
+        ).hexdigest()
+        candidate = f"lead/{foreign}/s1"
+    elif candidate == "foreign-section":
+        candidate = f"lead/{identity}/s10"
+    path = tmp_path / "s1"
+    path.mkdir()
+    _fake_capture(
+        monkeypatch,
+        (0, f"worktree {path}\nHEAD {'1' * 40}\nbranch refs/heads/{candidate}\n\n"),
+    )
+    assert section_worktree(tmp_path, queue, "s1") is None
