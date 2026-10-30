@@ -30,6 +30,8 @@ from relay.queue import parse_queue
 from relay.research import Map, block, changed, digest, load, parse_map, save, stamp
 from relay.state import State
 from harness import RECORD as _RECORD
+from harness import request_drain as _request_drain
+from harness import drain_after_role as _drain_after_role
 from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
 
 from tests.conftest import _GIT, GitRepo
@@ -5950,3 +5952,558 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
     pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
     assert pings == [f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"], _pings(tmp_path)
+
+
+@pytest.mark.parametrize("exceptional", [False, True], ids=["normal", "exception"])
+def test_drain_run_publishes_fresh_identity_under_armed_lock_and_clears_on_exit(
+    exceptional: bool,
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: arming follows locking, publication is omitted or delayed, stale drain
+    # state survives a restart, or either return or exception leaves the run record behind.
+    import signal
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    state.publish_run(os.getpid() + 1)
+    state.mark_draining()
+    state.stop_file.touch()
+    events: list[str] = []
+    lock = State.lock
+    publish = State.publish_run
+    clear = State.clear_run
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def locked(self: State) -> Any:
+        assert signal.getsignal(signal.SIGTERM) != previous, "lock preceded drain arming"
+        events.append("lock")
+        return lock(self)
+
+    def published(self: State, pid: int) -> None:
+        assert events == ["lock"]
+        publish(self, pid)
+        record = self.live_run()
+        assert record is not None
+        assert record.pid == os.getpid()
+        assert record.draining is False
+        assert record.draining_since is None
+        events.append("publish")
+
+    def cleared(self: State) -> None:
+        events.append("clear")
+        clear(self)
+
+    parse = relay.loop.parse_queue
+
+    def parsed(*args: Any, **kwargs: Any) -> Any:
+        assert events[:2] == ["lock", "publish"], "queue read before fresh publication"
+        if exceptional:
+            raise RuntimeError("queue read interrupted")
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(State, "lock", locked)
+    monkeypatch.setattr(State, "publish_run", published)
+    monkeypatch.setattr(State, "clear_run", cleared)
+    monkeypatch.setattr(relay.loop, "parse_queue", parsed)
+    if exceptional:
+        # An empty queue reaches parsing on both normal and exceptional paths.
+        state.stop_file.unlink()
+        with pytest.raises(RuntimeError, match="queue read interrupted"):
+            run(queue, cfg)
+    else:
+        assert run(queue, cfg) == ExitCode.STOP_FILE
+    assert events == ["lock", "publish", "clear"]
+    assert not state.run_record.exists()
+    assert signal.getsignal(signal.SIGTERM) == previous
+
+
+def test_drain_request_marks_the_live_run_and_announces_once(
+    cfg: Config,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: on_request omits mark_draining or the progress announcement.
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    before = time.time()
+    seen: list[object] = []
+
+    def started(*args: Any, **kwargs: Any) -> None:
+        _request_drain()
+        seen.append(state.live_run())
+
+    monkeypatch.setattr(relay.loop.progress, "started", started)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert len(seen) == 1
+    record = seen[0]
+    assert record is not None
+    assert record.pid == os.getpid()
+    assert record.draining is True
+    assert before <= record.draining_since <= time.time()
+    assert _texts(capsys.readouterr().out).count(
+        "drain requested: finishing the running agent, starting nothing new"
+    ) == 1
+    assert not state.run_record.exists()
+
+
+def test_drain_at_pass_top_precedes_stop_file_and_sends_the_drained_stop(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fake_run,
+) -> None:
+    # Breaks when: STOP wins over an already requested drain or drained bypasses stopped ping.
+    import relay.loop
+
+    queue = queue_file(M2)
+    state = State.open(queue, cfg)
+    state.stop_file.touch()
+    monkeypatch.setattr(relay.loop.progress, "started", lambda *args: _request_drain())
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert fake_run.calls == []
+    assert len(_pings(tmp_path)) == 1
+    assert "drained" in _pings(tmp_path)[0][0]
+    assert "a drain was requested; running work finished and was recorded" in capsys.readouterr().out
+    _untouched(queue, cfg)
+
+
+@pytest.mark.parametrize("waiting", [False, True], ids=["parked", "waiting"])
+def test_drain_interrupts_the_parked_or_waiting_pause_without_dispatching_again(
+    waiting: bool,
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: the parked/waiting branch sleeps after drain or misses the next pass check.
+    import relay.loop
+
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    cfg = dataclasses.replace(cfg, poll_seconds=30.0)
+    scenario(_lines(DONE_LEAD))
+    state = State.open(queue, cfg)
+    if waiting:
+        cfg = _sequenced(
+            cfg, tmp_path, [_waiting_lead(tmp_path, "waiting-drain", "s2"), _step(NEEDS_OWNER_LEAD)]
+        )
+    else:
+        state.park("s1", "First choice?")
+        state.park("s2", "Second choice?")
+    requested: list[bool] = []
+
+    def slept(seconds: float) -> None:
+        raise AssertionError("wait slept after drain was requested")
+
+    def about_to_wait(*args: Any, **kwargs: Any) -> None:
+        _request_drain()
+        requested.append(True)
+        monkeypatch.setattr(time, "sleep", slept)
+
+    monkeypatch.setattr(relay.loop.progress, "waiting", about_to_wait)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert requested == [True]
+    if waiting:
+        assert len(_runs(tmp_path, "lead")) == 2
+        assert state.section("s1").status == "waiting"
+    else:
+        _untouched(queue, cfg)
+
+
+@pytest.mark.parametrize("dispatch", ["pending", "design-answer", "research"])
+def test_drain_before_section_dispatch_preserves_pending_and_answer_and_starts_nothing(
+    dispatch: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_run,
+) -> None:
+    # Breaks when: the section dispatch boundary consumes Pending or a design answer,
+    # or starts research, after the pass's queue selection has requested a drain.
+    import relay.loop
+
+    if dispatch == "research":
+        _mapped_worktree(git_repo)
+        queue = _research_queue(git_repo)
+        _done_in_state(queue, cfg, "s2")
+    else:
+        queue = _ladder(queue_file, cfg, tmp_path)
+    state = State.open(queue, cfg)
+    pending = relay.loop.Pending(kind="climb", lead_log="held-lead.log", problem="Retain this dispatch")
+    if dispatch == "pending":
+        state.set_pending("s1", pending)
+    elif dispatch == "design-answer":
+        state.park("s1", "Which choice?", design=(DESIGN_PATH, (1,)))
+        assert state.set_answer("s1", "Proceed with the decision.")
+    taken: list[str] = []
+    for name in ("take_pending", "take_answer"):
+        original = getattr(State, name)
+
+        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+            taken.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(State, name, observed)
+    parse = relay.loop.parse_queue
+    requested: list[bool] = []
+
+    def selected(*args: Any, **kwargs: Any) -> Any:
+        sections = parse(*args, **kwargs)
+        if not requested:
+            _request_drain()
+            requested.append(True)
+        return sections
+
+    monkeypatch.setattr(relay.loop, "parse_queue", selected)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert requested == [True]
+    assert taken == []
+    assert fake_run.calls == []
+    if dispatch == "pending":
+        assert state.section("s1").pending == dataclasses.asdict(pending)
+    elif dispatch == "design-answer":
+        assert state.take_answer("s1") == "Proceed with the decision."
+
+
+def test_drain_after_research_takes_no_lead_inputs_and_starts_no_lead(
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a completed research run's drain is checked after taking any
+    # answer, check feedback or guidance, or after dispatching the lead.
+    import relay.loop
+
+    _mapped_worktree(git_repo)
+    queue = _research_queue(git_repo)
+    _done_in_state(queue, cfg, "s2")
+    _check_script(tmp_path, monkeypatch, 0)
+    cfg = _researched(cfg, tmp_path, [_step(DONE_LEAD)])
+    requested: list[bool] = []
+    taken: list[str] = []
+    finished = relay.loop.progress.research_finished
+
+    def research_finished(*args: Any, **kwargs: Any) -> None:
+        finished(*args, **kwargs)
+        _request_drain()
+        requested.append(True)
+
+    for name in ("take_answer", "take_check_feedback", "take_guidance"):
+        original = getattr(State, name)
+
+        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+            if requested:
+                taken.append(_name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(State, name, observed)
+    monkeypatch.setattr(relay.loop.progress, "research_finished", research_finished)
+    code = run(queue, cfg)
+    assert requested == [True]
+    assert taken == []
+    assert _runs(tmp_path, "lead") == []
+    assert len(_research_runs(tmp_path)) == 1
+    assert code == ExitCode.DRAINED
+
+
+def test_draining_progress_prints_the_documented_message_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Breaks when: draining omits, duplicates or changes the documented announcement.
+    from relay.progress import draining
+
+    draining()
+    captured = capsys.readouterr()
+    assert _texts(captured.out) == [
+        "drain requested: finishing the running agent, starting nothing new"
+    ]
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("status", ["RECUT", "DESIGN"])
+def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
+    status: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: the finished lead climbs during drain, loses its exact status text/log,
+    # or restart runs another lead instead of the saved climb.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    report = f"{status}: {PROBLEM}"
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", report))), _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("lead"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    pending = state.section("s1").pending
+    assert code == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert _runs(tmp_path, "design") == []
+    assert pending is not None
+    assert pending["kind"] == "climb"
+    assert pending["status"] == status
+    assert pending["text"] == PROBLEM
+    assert Path(pending["lead_log"]).is_file()
+    assert state.section("s1").last_session == "held-lead"
+    assert state.section("s1").last_report == f"Stuck.\n{report}"
+    assert len(_entries(queue, cfg, "lead")) == 1
+    order: list[str] = []
+
+    def record(original):
+        def dispatched(*args, **kwargs):
+            order.append(kwargs.get("role", "lead"))
+            return original(*args, **kwargs)
+        return dispatched
+
+    _every_run_agent(monkeypatch, record)
+    run(queue, cfg)
+    assert order[0] == ("recut" if status == "RECUT" else "design")
+    assert state.section("s1").pending is None
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["reportless", "failed"])
+def test_drain_saves_the_built_architect_retry_and_restart_dispatches_it_verbatim(
+    failed: bool, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: retry starts during drain, its built brief is lost, or restart
+    # rebuilds that brief from changed state instead of using the pending dispatch.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    lead = _step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [lead, _step(NO_STATUS_LEAD)])
+    architect = _step(str(_architect_run(tmp_path, "held-architect", "No final report.")), exit=int(failed))
+    cfg = _with_architect(cfg, tmp_path, [architect, _step(ARCHITECT_UNAPPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("design"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    pending = state.section("s1").pending
+    assert code == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "design")) == 1
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert pending is not None
+    assert pending["kind"] == "design-retry"
+    assert pending["design"] == str((tmp_path / DESIGN_PATH).resolve())
+    brief = pending["brief"]
+    assert isinstance(brief, str) and brief
+    first = str(_runs(tmp_path, "design")[0]["prompt"]).splitlines()
+    retry = brief.splitlines()
+    assert retry[:-2] == first[:-1]
+    assert retry[-1] == first[-1]
+    assert retry[-2].startswith("lead new: ")
+    run(queue, cfg)
+    assert str(_runs(tmp_path, "design")[1]["prompt"]) == brief
+    assert state.section("s1").pending is None
+
+
+def test_drain_records_design_approval_before_holding_its_recut_and_resumes_that_recut(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: approval is not recorded before deferral, the recut still starts,
+    # or restart reruns the architect or a lead ahead of the pending rung-2 recut.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    with monkeypatch.context() as patch:
+        _every_run_agent(patch, _drain_after_role("design"))
+        code = run(queue, cfg)
+    state = State.open(queue, cfg)
+    section = state.section("s1")
+    assert code == ExitCode.DRAINED
+    assert section.design_open is None
+    assert section.design_changed is True
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert section.pending is not None
+    assert section.pending["kind"] == "design-recut"
+    assert section.pending["design"] == str((tmp_path / DESIGN_PATH).resolve())
+    assert len(_entries(queue, cfg, "design")) == 1
+    order: list[str] = []
+
+    def record(original):
+        def dispatched(*args, **kwargs):
+            order.append(kwargs.get("role", "lead"))
+            return original(*args, **kwargs)
+        return dispatched
+
+    _every_run_agent(monkeypatch, record)
+    cfg = _stop_on_ping(cfg, queue)
+    run(queue, cfg)
+    assert order[0] == "recut"
+    assert len(_runs(tmp_path, "design")) == 1
+    assert state.section("s1").pending is None
+    assert state.section("s1").status == "parked"
+
+
+@pytest.mark.parametrize("ending", ["DONE", "WAITING: s2", "NEEDS-OWNER: Which choice?", "RETIRED", "invalid", "budget"])
+def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
+    ending: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: drain skips ordinary result processing, or replaces a returned
+    # FAILED_TWICE/BUDGET section stop with DRAINED.
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    status = "DONE" if ending == "budget" else ending
+    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "finished-lead", status)))])
+    state = State.open(queue, cfg)
+    if ending == "invalid":
+        state.record_failure("s1")
+    if ending == "budget":
+        cfg = dataclasses.replace(cfg, dollar_budget=0.005)
+    _every_run_agent(monkeypatch, _drain_after_role("lead", during=True))
+    code = run(queue, cfg)
+    section = state.section("s1")
+    expected = ExitCode.FAILED_TWICE if ending == "invalid" else ExitCode.BUDGET if ending == "budget" else ExitCode.DRAINED
+    assert code == expected
+    assert len(_runs(tmp_path, "lead")) == 1
+    if ending != "budget":
+        assert _runs(tmp_path, "lead")[0]["retire-flag-seen"] is False
+    assert section.last_session == "finished-lead"
+    assert section.last_report == f"Stuck.\n{status}"
+    entries = _entries(queue, cfg, "lead")
+    assert len(entries) == 1
+    assert entries[0]["dollars"] == 0.01
+    assert section.pending is None
+    if ending in ("DONE", "budget"):
+        assert section.status == "done"
+        assert len(_entries(queue, cfg, "check")) == 1
+    elif ending.startswith("WAITING"):
+        assert section.status == "waiting"
+    elif ending.startswith("NEEDS-OWNER"):
+        assert section.status == "parked"
+        assert section.question == "Which choice?"
+    elif ending == "invalid":
+        assert section.failures == 2
+
+
+def test_drain_keeps_the_finished_architects_rung_three_decision_and_owner_ping(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: drain suppresses the architect's product-choice park or ping,
+    # records it as a design change, or dispatches the recut despite the decision.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    lead = _step(str(_status_lead(tmp_path, "choice-lead", f"DESIGN: {PROBLEM}")))
+    cfg = _sequenced(cfg, tmp_path, [lead])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_DECISION)])
+    _every_run_agent(monkeypatch, _drain_after_role("design"))
+    assert run(queue, cfg) == ExitCode.DRAINED
+    section = State.open(queue, cfg).section("s1")
+    assert section.status == "parked"
+    assert section.design_open == str((tmp_path / DESIGN_PATH).resolve())
+    assert section.design_changed is False
+    assert section.pending is None
+    assert section.failures == 0
+    assert len(_entries(queue, cfg, "design")) == 1
+    assert len(_runs(tmp_path, "design")) == 1
+    assert _runs(tmp_path, "recut") == []
+    assert any(section.question in p[0] for p in _pings(tmp_path))
+
+
+@pytest.mark.parametrize("guard", ["cap", "design-failures"])
+def test_pending_climb_keeps_the_design_guards_when_resumed(
+    guard: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a resumed climb bypasses the cap or repeated architect failure
+    # guard, or loses the held dispatch by running research/a lead instead.
+    from relay.loop import Pending
+
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    state = State.open(queue, cfg)
+    state.set_pending("s1", Pending(kind="climb", lead_log="held.log", problem=PROBLEM, status="DESIGN", text=PROBLEM))
+    take = State.take_pending
+
+    def taken(self, sid):
+        pending = take(self, sid)
+        if pending is not None:
+            if guard == "cap":
+                _section_spent(queue, cfg, sid, 6.0)
+            else:
+                _seed_design_failures(queue, cfg, 2)
+        return pending
+
+    monkeypatch.setattr(State, "take_pending", taken)
+    if guard == "cap":
+        # A parked run ends after its ordinary needs-owner ping.
+        cfg = _stop_on_ping(cfg, queue)
+    code = run(queue, cfg)
+    assert _runs(tmp_path, "lead") == []
+    assert _runs(tmp_path, "design") == []
+    assert code == (ExitCode.STOP_FILE if guard == "cap" else ExitCode.FAILED_TWICE)
+
+
+def test_drain_in_the_dispatch_window_still_runs_the_child_and_saves_its_followup(
+    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: a late drain consumes guidance but cancels its lead, or lets
+    # that lead's follow-up start instead of saving it at the next boundary.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD)])
+    state = State.open(queue, cfg)
+    state.set_guidance("s1", "Retain this guidance through dispatch.")
+    take = State.take_guidance
+    requested: list[bool] = []
+
+    def taken(self, sid):
+        result = take(self, sid)
+        if not requested:
+            _request_drain()
+            requested.append(True)
+        return result
+
+    monkeypatch.setattr(State, "take_guidance", taken)
+    assert run(queue, cfg) == ExitCode.DRAINED
+    assert len(_runs(tmp_path, "lead")) == 1
+    assert "Retain this guidance through dispatch." in str(_runs(tmp_path, "lead")[0]["prompt"])
+    assert _runs(tmp_path, "recut") == []
+    assert state.section("s1").last_session == "sess-lead-4"
+    assert state.section("s1").pending["kind"] == "climb"
+
+
+def test_drain_preserves_a_running_real_child_until_its_result_is_recorded(
+    fake_cfg: Config,
+    tmp_path: Path,
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Breaks when: first SIGTERM kills the live child, loses its completed result,
+    # or dispatches the next section before stopping the drained run.
+    from harness import DrainRealChild
+
+    queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
+    scenario(_lines(DONE_LEAD))
+    gate = tmp_path / "child-gate"
+    gate.mkdir()
+    monkeypatch.setenv("RELAY_FAKE_GATE", str(gate))
+    cfg = dataclasses.replace(fake_cfg, ping_command=[sys.executable, "-c", "pass"])
+    state = State.open(queue, cfg)
+    child = DrainRealChild(gate, state)
+    try:
+        code = run(queue, cfg)
+    finally:
+        child.finish()
+    assert (gate / "finished").exists()
+    assert code == ExitCode.DRAINED
+    assert state.section("s1").status == "done"
+    assert state.section("s1").last_session == "sess-lead-1"
+    assert state.section("s1").last_report == "Step committed.\nDONE"
+    assert state.section("s2").last_session is None
+    assert len(_entries(queue, cfg, "lead")) == 1
