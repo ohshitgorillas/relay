@@ -102,19 +102,32 @@ section s2 | lead | steps: 4, 5, 6 | size: lead: tokens: 1395004.9 seconds: 743.
     step: 6
     paths: Makefile
     check: make check
-section s3 | lead | steps: 7 | size: lead: tokens: 1395004.9 seconds: 743.7 overruns: 0 refusals: 0
-  s3.d6 | builder | steps: 7 | writes: relay/config.py, relay/ledger.py, relay/ladder.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d6
+section s3 | lead | steps: 7 | size: lead: 8 finished, peak context median 43856, p90 78047, max 78047; 13 overruns
+  s3.d10 | test-writer | steps: 7 | writes: tests/test_check.py, tests/test_progress.py | size: test-writer: 21 finished, peak context median 59963, p90 79638, max 95317; 2 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d10
     resume 01a18a72-6049-7961-aa94-a26000bc8a5f
-    design: docs/superpowers/specs/relay-gates-design.md
-    step: 7
-    paths: relay/config.py, relay/ledger.py, relay/ladder.py
-    check: uv run ruff check relay/config.py relay/ledger.py relay/ladder.py && make check
-  s3.d7a | test-writer | steps: 7 | writes: tests/test_state.py, tests/test_loop.py | size: test-writer: tokens: 621972.3 seconds: 196.4 overruns: 0 refusals: 0 | from: s3.d7
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d7a
     port
     design: docs/superpowers/specs/relay-gates-design.md, Order step 7
-    files: tests/test_state.py, tests/test_loop.py
+    files: tests/test_check.py, tests/test_progress.py
+    view: stubgen .pyi of relay/check.py
+    view: stubgen .pyi of relay/progress.py
+    view: stubgen .pyi of relay/config.py
+    view: stubgen .pyi of relay/runner.py
+    check: uv run pytest tests/test_check.py tests/test_progress.py && make check
+  s3.d11 | test-writer | steps: 7 | writes: tests/test_state.py | size: test-writer: 21 finished, peak context median 59963, p90 79638, max 95317; 2 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d11
+    port
+    design: docs/superpowers/specs/relay-gates-design.md, Order step 7
+    files: tests/test_state.py
+    view: stubgen .pyi of relay/state.py
+    view: stubgen .pyi of relay/config.py
+    view: stubgen .pyi of relay/queue.py
+    check: uv run pytest tests/test_state.py && make check
+  s3.d12 | test-writer | steps: 7 | writes: tests/test_loop.py | size: test-writer: 21 finished, peak context median 59963, p90 79638, max 95317; 2 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d12
+    port
+    design: docs/superpowers/specs/relay-gates-design.md, Order step 7
+    files: tests/test_loop.py
     view: stubgen .pyi of relay/state.py
     view: stubgen .pyi of relay/loop.py
     view: stubgen .pyi of relay/config.py
@@ -127,15 +140,82 @@ section s3 | lead | steps: 7 | size: lead: tokens: 1395004.9 seconds: 743.7 over
     view: stubgen .pyi of relay/check.py
     view: stubgen .pyi of relay/status.py
     view: stubgen .pyi of relay/progress.py
-    check: make check
-  s3.d7b | builder | steps: 7 | writes: relay/state.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0 | from: s3.d7
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d7b
+    check: uv run pytest tests/test_loop.py && make check
+  s3.d13 | builder | steps: 7 | writes: pyproject.toml, gates/__init__.py, gates/exemptions.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d13
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: pyproject.toml, gates/__init__.py, gates/exemptions.py
+    check: uv run ruff check gates && make check
+  s3.d14 | builder | steps: 7 | writes: relay/__init__.py, relay/errors.py, relay/files.py, relay/git.py, relay/agents.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d14
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/__init__.py, relay/errors.py, relay/files.py, relay/git.py, relay/agents.py
+    check: uv run ruff check relay/__init__.py relay/errors.py relay/files.py relay/git.py relay/agents.py && make check
+  s3.d15 | builder | steps: 7 | writes: relay/ping.py, relay/runner.py, relay/stream.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d15
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/ping.py, relay/runner.py, relay/stream.py
+    check: uv run ruff check relay/ping.py relay/runner.py relay/stream.py && make check
+  s3.d16 | builder | steps: 7 | writes: relay/queue.py, relay/prompts.py, relay/status.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d16
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/queue.py, relay/prompts.py, relay/status.py
+    check: uv run ruff check relay/queue.py relay/prompts.py relay/status.py && make check
+  s3.d17 | builder | steps: 7 | writes: relay/backends/__init__.py, relay/backends/base.py, relay/backends/claude.py, relay/backends/generic.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d17
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/backends/__init__.py, relay/backends/base.py, relay/backends/claude.py, relay/backends/generic.py
+    check: uv run ruff check relay/backends/__init__.py relay/backends/base.py relay/backends/claude.py relay/backends/generic.py && make check
+  s3.d18 | builder | steps: 7 | writes: relay/backends/codex.py, relay/backends/codex_session.py, relay/research.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d18
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/backends/codex.py, relay/backends/codex_session.py, relay/research.py
+    check: uv run ruff check relay/backends/codex.py relay/backends/codex_session.py relay/research.py && make check
+  s3.d19 | builder | steps: 7 | writes: relay/config.py, relay/ledger.py, relay/ladder.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d19
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/config.py, relay/ledger.py, relay/ladder.py
+    finding: relay/ledger.py:13 circular import through backends.claude and stream
+    check: uv run ruff check relay/config.py relay/ledger.py relay/ladder.py && make check
+  s3.d20 | builder | steps: 7 | writes: relay/codex_launch.py, relay/retire_gate.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d20
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/codex_launch.py, relay/retire_gate.py
+    check: uv run ruff check relay/codex_launch.py relay/retire_gate.py && make check
+  s3.d21 | builder | steps: 7 | writes: relay/history.py, relay/pricing.py, relay/stats.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d21
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/history.py, relay/pricing.py, relay/stats.py
+    check: uv run ruff check relay/history.py relay/pricing.py relay/stats.py && make check
+  s3.d22 | builder | steps: 7 | writes: relay/loop.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d22
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/loop.py
+    check: uv run ruff check relay/loop.py && make check
+  s3.d23 | builder | steps: 7 | writes: relay/check.py, relay/progress.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d23
+    design: docs/superpowers/specs/relay-gates-design.md
+    step: 7
+    paths: relay/check.py, relay/progress.py
+    check: uv run ruff check relay/check.py relay/progress.py && make check
+  s3.d24 | builder | steps: 7 | writes: relay/state.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d24
     design: docs/superpowers/specs/relay-gates-design.md
     step: 7
     paths: relay/state.py
     check: uv run ruff check relay/state.py && make check
-  s3.d9 | builder | steps: 7 | writes: relay/cli.py | size: builder: tokens: 274446.6 seconds: 144.5 overruns: 0 refusals: 0
-    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d9
+  s3.d25 | builder | steps: 7 | writes: relay/cli.py | size: builder: 20 finished, peak context median 26257, p90 36414, max 52070; 1 overruns
+    queue /Users/atom/dev/relay/docs/gates-queue.md s3.d25
     design: docs/superpowers/specs/relay-gates-design.md
     step: 7
     paths: relay/cli.py
