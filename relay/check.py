@@ -65,7 +65,7 @@ def run_checks(cfg: Config, section: Section, cwd: Path, log: Path) -> CheckResu
 def classify(
     cfg: Config, exit_code: int | None, timed_out: bool, tail: str
 ) -> Literal["fail", "outside"]:
-    """"outside" for exit 126/127 or a check_outside pattern in the tail, else "fail"."""
+    """ "outside" for exit 126/127 or a check_outside pattern in the tail, else "fail"."""
     if exit_code in (126, 127):
         return "outside"
     if any(re.search(pattern, tail) for pattern in cfg.check_outside):

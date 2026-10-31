@@ -16,8 +16,21 @@ FIXTURES = TESTS / "fixtures"
 # Section ids as the divvyer writes them, in queue order, in each copied sample.
 SAMPLE_IDS = {
     "workboard-queue.md": [
-        "s1.1.1", "s1.1.2", "s1.2", "s2", "s3", "s4", "s5", "s6",
-        "s7", "s8", "s9", "s10", "s11", "s12", "s13",
+        "s1.1.1",
+        "s1.1.2",
+        "s1.2",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+        "s8",
+        "s9",
+        "s10",
+        "s11",
+        "s12",
+        "s13",
     ],
     "m2-rest-queue.md": ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"],
 }
@@ -35,10 +48,13 @@ def _section_text(name: str, sid: str) -> str:
 
 
 def _section(sid: str, *depends_on: str) -> Section:
-    return Section(id=sid, title=sid, body=f"section {sid}\n", depends_on=tuple(depends_on), open=True)
+    return Section(
+        id=sid, title=sid, body=f"section {sid}\n", depends_on=tuple(depends_on), open=True
+    )
 
 
 # Behavior 1: `relay/queue.py`: parses the divvyer's `.md` queue into sections.
+
 
 @pytest.mark.parametrize("name", sorted(SAMPLE_IDS))
 def test_parse_queue_returns_each_section_in_queue_order_with_its_divvyer_id(
@@ -77,6 +93,7 @@ def test_parse_queue_raises_queue_format_error_on_a_file_that_is_not_a_queue(
 
 
 # Behavior 3: ids that depend, transitively, on a parked id.
+
 
 def test_blocked_by_is_empty_when_nothing_is_parked() -> None:
     sections = [_section("s1"), _section("s2", "s1"), _section("s3", "s2")]

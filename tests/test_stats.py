@@ -45,7 +45,13 @@ def _run(
         activity=Activity(agents=agents),
         peak_context=peak,
     )
-    return Run(kind=kind, section=section, session=session, log=Path(f"/runs/{session}.jsonl"), stream=stream)
+    return Run(
+        kind=kind,
+        section=section,
+        session=session,
+        log=Path(f"/runs/{session}.jsonl"),
+        stream=stream,
+    )
 
 
 def _history(*runs: Run) -> History:
@@ -107,7 +113,14 @@ def test_a_top_level_run_is_sized_by_its_kind_session_and_peak(
         ("research", "API error: overloaded", True),
         ("ask", None, False),
     ],
-    ids=["lead-recut", "lead-needs-owner", "lead-no-status", "lead-no-result", "research-error", "ask-no-result"],
+    ids=[
+        "lead-recut",
+        "lead-needs-owner",
+        "lead-no-status",
+        "lead-no-result",
+        "research-error",
+        "ask-no-result",
+    ],
 )
 def test_a_top_level_run_neither_finished_nor_overrun_is_not_sized(
     kind: str, result_text: str | None, is_error: bool, cfg: Config
@@ -122,8 +135,22 @@ def test_a_top_level_run_neither_finished_nor_overrun_is_not_sized(
 # finished when "completed" below the limit, an overrun when "stopped" or at or above the limit.
 
 
-def _agent(status: str | None, peak: int, context: int, *, name: str = "builder", description: str = "Build s1.d1") -> Agent:
-    return Agent(task_id=f"t-{description}", name=name, description=description, context=context, status=status, peak=peak)
+def _agent(
+    status: str | None,
+    peak: int,
+    context: int,
+    *,
+    name: str = "builder",
+    description: str = "Build s1.d1",
+) -> Agent:
+    return Agent(
+        task_id=f"t-{description}",
+        name=name,
+        description=description,
+        context=context,
+        status=status,
+        peak=peak,
+    )
 
 
 def _agents_sized(cfg: Config, *runs: Run) -> list[Sized]:
@@ -155,7 +182,13 @@ def test_a_subagent_is_sized_by_its_name_description_and_peak(
     # Breaks when: the role is not `Agent.name`, the label not its description, the section not
     # its run's, the peak is `context` alone or `peak` alone, the limit uses `>`, or a stopped
     # subagent is finished.
-    parent = _run("lead", "Too big.\nRECUT: split", 5_000, section="s4", agents=(_agent(status, peak, context),))
+    parent = _run(
+        "lead",
+        "Too big.\nRECUT: split",
+        5_000,
+        section="s4",
+        agents=(_agent(status, peak, context),),
+    )
     assert _agents_sized(cfg, parent) == [
         Sized(role="builder", section="s4", label="Build s1.d1", peak=want_peak, overrun=overrun)
     ]
@@ -171,10 +204,22 @@ def test_a_subagent_with_any_other_status_is_not_sized(status: str | None, cfg: 
 def test_the_subagents_of_every_run_are_sized(cfg: Config) -> None:
     # Breaks when: only one run's subagents are read, or a subagent is skipped because its run
     # is itself neither finished nor overrun.
-    first = _run("lead", "Too big.\nRECUT: split", 5_000, section="s1", session="sess-a",
-                 agents=(_agent("completed", 30_000, 0, name="test-writer", description="Red s1"),))
-    second = _run("lead", "Step committed.\nDONE", 5_000, section="s2", session="sess-b",
-                  agents=(_agent("stopped", 50_000, 0, name="builder", description="Build s2"),))
+    first = _run(
+        "lead",
+        "Too big.\nRECUT: split",
+        5_000,
+        section="s1",
+        session="sess-a",
+        agents=(_agent("completed", 30_000, 0, name="test-writer", description="Red s1"),),
+    )
+    second = _run(
+        "lead",
+        "Step committed.\nDONE",
+        5_000,
+        section="s2",
+        session="sess-b",
+        agents=(_agent("stopped", 50_000, 0, name="builder", description="Build s2"),),
+    )
     found = sorted(_agents_sized(cfg, first, second), key=lambda item: item.label)
     assert found == [
         Sized(role="builder", section="s2", label="Build s2", peak=50_000, overrun="stopped"),
@@ -185,7 +230,9 @@ def test_the_subagents_of_every_run_are_sized(cfg: Config) -> None:
 # Behavior 3: `by_role(items) -> list[RoleStats]`, sorted by role name.
 
 
-def _item(role: str, peak: int, overrun: str | None = None, *, section: str = "s1", label: str = "sess-1") -> Sized:
+def _item(
+    role: str, peak: int, overrun: str | None = None, *, section: str = "s1", label: str = "sess-1"
+) -> Sized:
     return Sized(role=role, section=section, label=label, peak=peak, overrun=overrun)
 
 
@@ -260,10 +307,12 @@ def test_each_role_line_is_followed_by_its_own_overruns() -> None:
     # Breaks when: overruns are printed after all role lines, or under the wrong role.
     builder_over = _item("builder", 40_000, "stopped", label="Build s1")
     lead_over = _item("lead", 80_000, "retired", section="s2", label="sess-b")
-    found = stats.lines([
-        RoleStats(role="builder", finished=(9_000,), overruns=(builder_over,)),
-        RoleStats(role="lead", finished=(30_000,), overruns=(lead_over,)),
-    ])
+    found = stats.lines(
+        [
+            RoleStats(role="builder", finished=(9_000,), overruns=(builder_over,)),
+            RoleStats(role="lead", finished=(30_000,), overruns=(lead_over,)),
+        ]
+    )
     assert found == [
         "builder: 1 finished, peak context median 9000, p90 9000, max 9000; 1 overruns",
         "  builder overrun: s1 Build s1 peak 40000 (stopped)",
@@ -297,9 +346,30 @@ def test_a_role_with_no_finished_run_prints_0_finished_and_no_figures() -> None:
 @pytest.mark.parametrize(
     ("role", "section", "label", "peak", "reason", "line"),
     [
-        ("lead", "s2", "sess-b", 80_000, "retired", "  lead overrun: s2 sess-b peak 80000 (retired)"),
-        ("lead", "s5", "sess-k", 210_000, "killed", "  lead overrun: s5 sess-k peak 210000 (killed)"),
-        ("builder", "s1", "Build s1.d1", 40_000, "stopped", "  builder overrun: s1 Build s1.d1 peak 40000 (stopped)"),
+        (
+            "lead",
+            "s2",
+            "sess-b",
+            80_000,
+            "retired",
+            "  lead overrun: s2 sess-b peak 80000 (retired)",
+        ),
+        (
+            "lead",
+            "s5",
+            "sess-k",
+            210_000,
+            "killed",
+            "  lead overrun: s5 sess-k peak 210000 (killed)",
+        ),
+        (
+            "builder",
+            "s1",
+            "Build s1.d1",
+            40_000,
+            "stopped",
+            "  builder overrun: s1 Build s1.d1 peak 40000 (stopped)",
+        ),
         (
             "test-writer",
             "s3.2",

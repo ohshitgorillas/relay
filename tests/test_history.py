@@ -30,11 +30,25 @@ def _log(state: State, number: int, session: str) -> Path:
     """Write run log `<number>.jsonl`: one finished run of `session`."""
     path = state.run_dir / f"{number}.jsonl"
     lines = [
-        {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work",
-         "model": "claude-opus", "tools": ["Bash"]},
-        {"type": "result", "subtype": "success", "is_error": False, "duration_ms": 500,
-         "num_turns": 1, "result": "Step committed.\nDONE", "session_id": session,
-         "total_cost_usd": 0.01, "usage": {"input_tokens": 1, "output_tokens": 2}},
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session,
+            "cwd": "/work",
+            "model": "claude-opus",
+            "tools": ["Bash"],
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 500,
+            "num_turns": 1,
+            "result": "Step committed.\nDONE",
+            "session_id": session,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        },
     ]
     path.write_text("".join(json.dumps(line) + "\n" for line in lines))
     return path
@@ -66,7 +80,9 @@ def test_a_session_the_ledger_names_twice_is_paired_with_its_logs_in_the_order_t
         ("lead", "s2", "sess-a", "11.jsonl"),
     ]
     assert [run.log for run in found.runs] == [
-        state.run_dir / "9.jsonl", state.run_dir / "10.jsonl", state.run_dir / "11.jsonl",
+        state.run_dir / "9.jsonl",
+        state.run_dir / "10.jsonl",
+        state.run_dir / "11.jsonl",
     ]
     assert found.skipped_logs == 0
 

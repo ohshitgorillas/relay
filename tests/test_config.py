@@ -18,8 +18,15 @@ from relay.errors import (
 from tests.conftest import DEFAULT_CHECK_OUTSIDE, STANDING_APPROVAL
 
 DEFAULT_LEAD = [
-    "claude", "-p", "--output-format", "stream-json", "--verbose", "--agent", "lead",
-    "--permission-mode", "bypassPermissions",
+    "claude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--agent",
+    "lead",
+    "--permission-mode",
+    "bypassPermissions",
 ]
 
 
@@ -207,7 +214,9 @@ def test_generic_requires_explicit_command(tmp_path: Path, home: Path) -> None:
 def test_generic_recut_defaults_without_claude_flags(tmp_path: Path, home: Path) -> None:
     # Breaks when generic recut inherits Claude's agent flag.
     try:
-        cfg = load_config(_toml(tmp_path, 'backend = "generic"\nlead_command = ["worker", "--plain"]\n'), {})
+        cfg = load_config(
+            _toml(tmp_path, 'backend = "generic"\nlead_command = ["worker", "--plain"]\n'), {}
+        )
     except ConfigError as exc:
         assert False, str(exc)
     assert cfg.backend == "generic"
@@ -218,7 +227,10 @@ def test_generic_recut_defaults_without_claude_flags(tmp_path: Path, home: Path)
 def test_backend_override_selects_generic_defaults(tmp_path: Path, home: Path) -> None:
     # Breaks when CLI backend selection is ignored during command defaulting.
     try:
-        cfg = load_config(_toml(tmp_path, 'backend = "claude"\nlead_command = ["worker"]\n'), {"backend": "generic"})
+        cfg = load_config(
+            _toml(tmp_path, 'backend = "claude"\nlead_command = ["worker"]\n'),
+            {"backend": "generic"},
+        )
     except ConfigError as exc:
         assert False, str(exc)
     assert cfg.backend == "generic"
@@ -235,6 +247,8 @@ def test_invalid_backend_is_config_error(tmp_path: Path, home: Path, backend: ob
     except ConfigError as exc:
         assert False, str(exc)
     assert cfg.backend == "claude"
+
+
 # The check keys (design: relay-check-design.md, Modules `relay/config.py`; Order 3).
 # Behavior: ConfigError unless context_limit < idle_ceiling < hard_ceiling.
 
@@ -272,7 +286,9 @@ def test_idle_ceiling_between_context_limit_and_hard_ceiling_is_loaded(
 def test_idle_ceiling_outside_context_limit_and_hard_ceiling_raises_config_error(
     tmp_path: Path, home: Path, idle: int
 ) -> None:
-    assert _load_ok(_toml(tmp_path, CEILINGS + "idle_ceiling = 150000\n"), {}).idle_ceiling == 150_000
+    assert (
+        _load_ok(_toml(tmp_path, CEILINGS + "idle_ceiling = 150000\n"), {}).idle_ceiling == 150_000
+    )
     path = _toml(tmp_path, CEILINGS + f"idle_ceiling = {idle}\n")
     with pytest.raises(ConfigError):
         load_config(path, {})
@@ -288,9 +304,7 @@ def test_idle_ceiling_override_at_a_bound_raises_config_error(
         load_config(path, {"idle_ceiling": idle})
 
 
-def test_default_idle_ceiling_is_capped_one_below_hard_ceiling(
-    tmp_path: Path, home: Path
-) -> None:
+def test_default_idle_ceiling_is_capped_one_below_hard_ceiling(tmp_path: Path, home: Path) -> None:
     # relay-check-design.md, `relay/config.py` (extended): the default is
     # min(context_limit * 13 // 10, hard_ceiling - 1); with context_limit 100000,
     # hard_ceiling 120000 and no idle_ceiling, idle_ceiling is 119999 and the config loads.
@@ -340,9 +354,7 @@ def test_check_outside_pattern_re_compile_rejects_raises_config_error(
         load_config(path, {})
 
 
-def test_check_outside_bad_pattern_override_raises_config_error(
-    tmp_path: Path, home: Path
-) -> None:
+def test_check_outside_bad_pattern_override_raises_config_error(tmp_path: Path, home: Path) -> None:
     path = _toml(tmp_path, "")
     assert _load_ok(path, {"check_outside": ["fine"]}).check_outside == ["fine"]
     with pytest.raises(ConfigError):
@@ -368,9 +380,7 @@ def test_all_three_check_keys_take_overrides_over_the_file(tmp_path: Path, home:
         tmp_path,
         "idle_ceiling = 150000\ncheck_timeout = 90.0\ncheck_outside = ['offline']\n",
     )
-    cfg = _load_ok(
-        path, {"idle_ceiling": 160000, "check_timeout": 12.0, "check_outside": ["down"]}
-    )
+    cfg = _load_ok(path, {"idle_ceiling": 160000, "check_timeout": 12.0, "check_outside": ["down"]})
     assert cfg.idle_ceiling == 160_000
     assert cfg.check_timeout == 12.0
     assert cfg.check_outside == ["down"]
@@ -413,9 +423,7 @@ def test_all_three_research_keys_are_read_from_the_file(tmp_path: Path, home: Pa
     assert cfg.map_max_chars == 3000
 
 
-def test_all_three_research_keys_take_overrides_over_the_file(
-    tmp_path: Path, home: Path
-) -> None:
+def test_all_three_research_keys_take_overrides_over_the_file(tmp_path: Path, home: Path) -> None:
     cfg = _load_ok(
         _toml(tmp_path, RESEARCH_KEYS),
         {"research_command": ["other-research"], "map_max_lines": 7, "map_max_chars": 900},
@@ -473,9 +481,7 @@ def test_research_command_defaults_to_an_overridden_lead_command_plus_researcher
 def test_research_command_from_the_file_is_not_given_the_researcher_tail(
     tmp_path: Path, home: Path
 ) -> None:
-    path = _toml(
-        tmp_path, 'lead_command = ["my-claude"]\nresearch_command = ["my-research"]\n'
-    )
+    path = _toml(tmp_path, 'lead_command = ["my-claude"]\nresearch_command = ["my-research"]\n')
     assert _load_ok(path, {}).research_command == ["my-research"]
 
 
@@ -512,9 +518,7 @@ def test_a_map_cap_override_that_is_not_a_positive_integer_raises_config_error(
         load_config(path, {key: value})
 
 
-def test_research_command_of_the_wrong_type_raises_config_error(
-    tmp_path: Path, home: Path
-) -> None:
+def test_research_command_of_the_wrong_type_raises_config_error(tmp_path: Path, home: Path) -> None:
     assert _load_ok(_toml(tmp_path, 'research_command = ["r"]\n'), {}).research_command == ["r"]
     with pytest.raises(ConfigError):
         load_config(_toml(tmp_path, 'research_command = "my-research"\n'), {})
@@ -640,7 +644,11 @@ def test_all_three_ladder_keys_are_read_from_the_file(tmp_path: Path, home: Path
 def test_all_three_ladder_keys_take_overrides_over_the_file(tmp_path: Path, home: Path) -> None:
     cfg = _load_ok(
         _toml(tmp_path, LADDER_KEYS),
-        {"design_command": ["other-architect"], "section_dollar_cap": 3.0, "design_approval": "Go."},
+        {
+            "design_command": ["other-architect"],
+            "section_dollar_cap": 3.0,
+            "design_approval": "Go.",
+        },
     )
     assert cfg.design_command == ["other-architect"]
     assert cfg.section_dollar_cap == 3.0
@@ -650,7 +658,11 @@ def test_all_three_ladder_keys_take_overrides_over_the_file(tmp_path: Path, home
 def test_ladder_overrides_apply_over_an_empty_file(tmp_path: Path, home: Path) -> None:
     cfg = _load_ok(
         _toml(tmp_path, ""),
-        {"design_command": ["other-architect"], "section_dollar_cap": 3.0, "design_approval": "Go."},
+        {
+            "design_command": ["other-architect"],
+            "section_dollar_cap": 3.0,
+            "design_approval": "Go.",
+        },
     )
     assert cfg.design_command == ["other-architect"]
     assert cfg.section_dollar_cap == 3.0
@@ -672,7 +684,11 @@ def test_ladder_keys_leave_the_other_keys_alone(tmp_path: Path, home: Path) -> N
 
 @pytest.mark.parametrize(
     ("text", "overrides"),
-    [('backend = "codex"\n', {}), ("", {"backend": "codex"}), ('backend = "claude"\n', {"backend": "codex"})],
+    [
+        ('backend = "codex"\n', {}),
+        ("", {"backend": "codex"}),
+        ('backend = "claude"\n', {"backend": "codex"}),
+    ],
     ids=["file", "override", "override-beats-file"],
 )
 def test_codex_backend_agent_commands_all_start_with_codex(
@@ -701,7 +717,7 @@ def test_price_table_loads_required_rates_and_optional_write_rates(tmp_path, hom
 
     cfg = _load_ok(_toml(tmp_path, PRICE_TABLE), {})
     assert cfg.prices == {"custom": Rate(3, 1.5, 7)}
-    cfg = _load_ok(_toml(tmp_path, PRICE_TABLE + 'cache_write_30m = 4\ncache_write_12h = 9\n'), {})
+    cfg = _load_ok(_toml(tmp_path, PRICE_TABLE + "cache_write_30m = 4\ncache_write_12h = 9\n"), {})
     assert cfg.prices == {"custom": Rate(3, 1.5, 7, 4, 9)}
 
 
@@ -709,25 +725,25 @@ def test_price_table_rejects_unknown_keys(tmp_path, home):
     # Breaks when an unknown bucket is silently ignored instead of rejected.
     assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
     with pytest.raises(ConfigError):
-        load_config(_toml(tmp_path, PRICE_TABLE + 'cache_write_1h = 2\n'), {})
+        load_config(_toml(tmp_path, PRICE_TABLE + "cache_write_1h = 2\n"), {})
 
 
 def test_price_table_requires_all_three_base_rates(tmp_path, home):
     # Breaks when a missing base rate is guessed or defaulted.
     assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
-    for missing in ('input = 3\n', 'cached_input = 1.5\n', 'output = 7\n'):
+    for missing in ("input = 3\n", "cached_input = 1.5\n", "output = 7\n"):
         with pytest.raises(ConfigError):
-            load_config(_toml(tmp_path, PRICE_TABLE.replace(missing, '')), {})
+            load_config(_toml(tmp_path, PRICE_TABLE.replace(missing, "")), {})
 
 
 def test_every_price_field_rejects_invalid_numbers(tmp_path, home):
     # Breaks when any field admits boolean, nonnumeric, negative or nonfinite rates.
     assert _load_ok(_toml(tmp_path, PRICE_TABLE), {}).prices
-    for field in ('input', 'cached_input', 'output', 'cache_write_30m', 'cache_write_12h'):
-        for value in ('-1', 'true', '"1"', 'inf', '-inf', 'nan'):
-            lines = [line for line in PRICE_TABLE.splitlines() if not line.startswith(field + ' =')]
+    for field in ("input", "cached_input", "output", "cache_write_30m", "cache_write_12h"):
+        for value in ("-1", "true", '"1"', "inf", "-inf", "nan"):
+            lines = [line for line in PRICE_TABLE.splitlines() if not line.startswith(field + " =")]
             with pytest.raises(ConfigError):
-                load_config(_toml(tmp_path, '\n'.join(lines) + f'\n{field} = {value}\n'), {})
+                load_config(_toml(tmp_path, "\n".join(lines) + f"\n{field} = {value}\n"), {})
 
 
 def test_missing_optional_write_rate_stays_unavailable_for_billed_writes(tmp_path, home):
@@ -735,8 +751,8 @@ def test_missing_optional_write_rate_stays_unavailable_for_billed_writes(tmp_pat
     from relay.pricing import Unpriced, Usage, dollars
 
     cfg = _load_ok(_toml(tmp_path, PRICE_TABLE), {})
-    assert cfg.prices['custom'].cache_write_30m is None
-    assert cfg.prices['custom'].cache_write_12h is None
-    for fields in ({'cache_write_30m': 1}, {'cache_write_12h': 1}):
-        with pytest.raises(Unpriced, match='.+'):
-            dollars(cfg, (Usage('t', 'custom', 10, 0, 0, **fields),))
+    assert cfg.prices["custom"].cache_write_30m is None
+    assert cfg.prices["custom"].cache_write_12h is None
+    for fields in ({"cache_write_30m": 1}, {"cache_write_12h": 1}):
+        with pytest.raises(Unpriced, match=".+"):
+            dollars(cfg, (Usage("t", "custom", 10, 0, 0, **fields),))

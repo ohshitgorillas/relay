@@ -35,18 +35,31 @@ from relay.errors import ExitCode
 REPO = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("policy", ["default", True, False], ids=["default", "required", "optional"])
+@pytest.mark.parametrize(
+    "policy", ["default", True, False], ids=["default", "required", "optional"]
+)
 @pytest.mark.parametrize(
     ("exit_code", "killed", "backend_error", "tokens"),
-    [(0, False, False, 0), (0, False, False, 17),
-     (0, True, False, 0), (0, True, False, 17),
-     (1, False, False, 0), (1, False, False, 17),
-     (None, False, False, 17), (-15, False, False, 17),
-     (0, False, True, 0), (0, False, True, 17)],
+    [
+        (0, False, False, 0),
+        (0, False, False, 17),
+        (0, True, False, 0),
+        (0, True, False, 17),
+        (1, False, False, 0),
+        (1, False, False, 17),
+        (None, False, False, 17),
+        (-15, False, False, 17),
+        (0, False, True, 0),
+        (0, False, True, 17),
+    ],
 )
 def test_shared_failure_predicate_preserves_explicit_token_policy(
-    policy: str | bool, exit_code: int | None, killed: bool,
-    backend_error: bool, tokens: int, tmp_path: Path,
+    policy: str | bool,
+    exit_code: int | None,
+    killed: bool,
+    backend_error: bool,
+    tokens: int,
+    tmp_path: Path,
 ) -> None:
     # Breaks when token policy changes other failures, or the default accepts zero tokens.
     stream = StreamState(None, 0, Spend(tokens, 0.0), "DONE", backend_error)
@@ -58,7 +71,10 @@ def test_shared_failure_predicate_preserves_explicit_token_policy(
 
 
 def test_runner_telemetry_uses_shared_publication_and_replays_final_snapshot(
-    fake_cfg: Config, tmp_path: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when runner bypasses shared publication or replay ignores the finalized snapshot.
     calls = []
@@ -75,30 +91,86 @@ def test_runner_telemetry_uses_shared_publication_and_replays_final_snapshot(
     monkeypatch.setattr(publication, "atomic_write", publish)
     command = [sys.executable, "-c", "print('wire answer')"]
     backend = PollingBackend(command)
-    result = run_agent(command, "", tmp_path, run_dir, _go, tmp_path / "retire",
-                       backend=backend, cfg=replace(fake_cfg, backend="generic"))
+    result = run_agent(
+        command,
+        "",
+        tmp_path,
+        run_dir,
+        _go,
+        tmp_path / "retire",
+        backend=backend,
+        cfg=replace(fake_cfg, backend="generic"),
+    )
     assert calls, "runner bypassed shared atomic publication"
     snapshots = [(path, data) for path, data in calls if b"final answer" in data]
     assert snapshots
     assert all(path.parent == run_dir for path, _ in snapshots)
     assert replay(result.log) == result.stream
 
+
 LINES = [
     json.dumps({"type": "system", "subtype": "init", "session_id": "sess-r"}),
-    json.dumps({"type": "assistant", "session_id": "sess-r", "message": {
-        "id": "m1", "role": "assistant", "content": [{"type": "text", "text": "one"}],
-        "usage": {"input_tokens": 10, "output_tokens": 5,
-                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}),
-    json.dumps({"type": "assistant", "session_id": "sess-r", "message": {
-        "id": "m2", "role": "assistant", "content": [{"type": "text", "text": "two"}],
-        "usage": {"input_tokens": 20, "output_tokens": 5,
-                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}),
-    json.dumps({"type": "assistant", "session_id": "sess-r", "message": {
-        "id": "m3", "role": "assistant", "content": [{"type": "text", "text": "three"}],
-        "usage": {"input_tokens": 30, "output_tokens": 5,
-                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}),
-    json.dumps({"type": "result", "subtype": "success", "result": "DONE", "is_error": False,
-                "total_cost_usd": 0.5, "session_id": "sess-r"}),
+    json.dumps(
+        {
+            "type": "assistant",
+            "session_id": "sess-r",
+            "message": {
+                "id": "m1",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "one"}],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        }
+    ),
+    json.dumps(
+        {
+            "type": "assistant",
+            "session_id": "sess-r",
+            "message": {
+                "id": "m2",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "two"}],
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        }
+    ),
+    json.dumps(
+        {
+            "type": "assistant",
+            "session_id": "sess-r",
+            "message": {
+                "id": "m3",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "three"}],
+                "usage": {
+                    "input_tokens": 30,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                },
+            },
+        }
+    ),
+    json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "DONE",
+            "is_error": False,
+            "total_cost_usd": 0.5,
+            "session_id": "sess-r",
+        }
+    ),
 ]
 
 # Records the shell's PID in $1 and a 30-second grandchild's PID in $2, runs the fake ($3),
@@ -194,7 +266,9 @@ def test_run_agent_gives_the_child_stdin_text_and_runs_it_in_cwd(
 
 @pytest.mark.parametrize("parent_marker", [None, "0"])
 def test_run_agent_marks_child_and_inherits_environment(
-    tmp_path: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
     parent_marker: str | None,
 ) -> None:
     # Breaks when agent launches omit the marker or replace the inherited environment.
@@ -204,7 +278,8 @@ def test_run_agent_marks_child_and_inherits_environment(
         monkeypatch.setenv("RELAY_RUN", parent_marker)
     monkeypatch.setenv("RELAY_TEST_INHERITED", "ordinary-value")
     argv = [
-        sys.executable, "-c",
+        sys.executable,
+        "-c",
         "import json, os; print(json.dumps({"
         "'marker': os.environ.get('RELAY_RUN'), "
         "'inherited': os.environ.get('RELAY_TEST_INHERITED')}))",
@@ -212,7 +287,8 @@ def test_run_agent_marks_child_and_inherits_environment(
     result = run_agent(argv, "", tmp_path, run_dir, _go, tmp_path / "retire")
     assert result.exit_code == 0
     assert json.loads(result.log.read_text()) == {
-        "marker": "1", "inherited": "ordinary-value",
+        "marker": "1",
+        "inherited": "ordinary-value",
     }
     assert os.environ.get("RELAY_RUN") == parent_marker
 
@@ -223,7 +299,9 @@ def test_run_agent_reports_the_exit_code_of_a_child_that_ends_on_its_own(
     ok = run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
     assert ok.exit_code == 0
     assert ok.killed is False
-    bad = run_agent(_sh('"$1"; exit 3', fake[0]), "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
+    bad = run_agent(
+        _sh('"$1"; exit 3', fake[0]), "p\n", tmp_path, run_dir, _go, tmp_path / "retire"
+    )
     assert bad.exit_code == 3
     assert bad.killed is False
     assert bad.log != ok.log
@@ -316,8 +394,9 @@ def test_run_agent_starts_the_child_in_a_new_session_and_process_group(
     ids = tmp_path / "ids"
     pidfile = tmp_path / "pid"
     probe = "import os; print(os.getpgrp(), os.getsid(0))"
-    argv = _sh('"$1" -c "$2" > "$3"; echo $$ > "$4"; "$5"',
-               sys.executable, probe, ids, pidfile, fake[0])
+    argv = _sh(
+        '"$1" -c "$2" > "$3"; echo $$ > "$4"; "$5"', sys.executable, probe, ids, pidfile, fake[0]
+    )
     run_agent(argv, "p\n", tmp_path, run_dir, _go, tmp_path / "retire")
     pid = _pid(pidfile)
     pgrp, sid = (int(word) for word in ids.read_text().split())
@@ -391,7 +470,11 @@ def test_a_signal_to_relay_kills_the_live_child_group_before_relay_exits(
     with open(tmp_path / "driver.out", "wb") as out:
         driver = subprocess.Popen(
             [sys.executable, "-c", DRIVER, json.dumps(args)],
-            cwd=REPO, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            cwd=REPO,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
         )
     try:
         deadline = time.monotonic() + 15
@@ -479,8 +562,14 @@ def test_kill_ends_a_long_child_at_once_and_reports_it_killed(
 
     start = time.monotonic()
     try:
-        result = run_agent(_sh(LONG, pidfile, grandfile, fake[0]), "p\n", tmp_path, run_dir,
-                           on_event, tmp_path / "retire")
+        result = run_agent(
+            _sh(LONG, pidfile, grandfile, fake[0]),
+            "p\n",
+            tmp_path,
+            run_dir,
+            on_event,
+            tmp_path / "retire",
+        )
         assert time.monotonic() - start < 20
         assert result.killed is True
         assert result.exit_code is None
@@ -559,11 +648,13 @@ def test_backend_poll_reaches_callback_while_stdout_is_quiet(
     pidfile = tmp_path / "quiet-pid"
     completed = tmp_path / "quiet-completed"
     command = [
-        sys.executable, "-c",
+        sys.executable,
+        "-c",
         "import os, sys, time; from pathlib import Path; "
         "Path(sys.argv[1]).write_text(str(os.getpid())); "
         "time.sleep(2); Path(sys.argv[2]).touch()",
-        str(pidfile), str(completed),
+        str(pidfile),
+        str(completed),
     ]
 
     class DelayedPollingBackend(PollingBackend):
@@ -583,8 +674,16 @@ def test_backend_poll_reaches_callback_while_stdout_is_quiet(
         return "kill" if state.context_tokens == 321 else "go"
 
     try:
-        result = run_agent(command, "handoff", tmp_path, run_dir, watch,
-                           tmp_path / "retire", backend=backend, cfg=fake_cfg)
+        result = run_agent(
+            command,
+            "handoff",
+            tmp_path,
+            run_dir,
+            watch,
+            tmp_path / "retire",
+            backend=backend,
+            cfg=fake_cfg,
+        )
     finally:
         _cleanup(pidfile)
     assert pidfile.exists()
@@ -616,9 +715,19 @@ def test_backend_finish_and_unique_output_are_used_for_every_run(
             return super().finish(state, output)
 
     backend = OutputReadingBackend(command)
-    results = [run_agent(command, "handoff", tmp_path, run_dir, _go,
-                         tmp_path / "retire", backend=backend, cfg=fake_cfg)
-               for _ in range(2)]
+    results = [
+        run_agent(
+            command,
+            "handoff",
+            tmp_path,
+            run_dir,
+            _go,
+            tmp_path / "retire",
+            backend=backend,
+            cfg=fake_cfg,
+        )
+        for _ in range(2)
+    ]
     assert len(backend.outputs) == 2
     assert backend.outputs[0] != backend.outputs[1]
     assert all(path.parent == run_dir for path in backend.outputs)
@@ -651,7 +760,10 @@ def _launched(path: Path) -> list[dict[str, Any]]:
 
 
 def test_run_agent_gives_the_child_the_launch_env_merged_over_relays_environment(
-    fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    fake: list[str],
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when run_agent ignores Launch.env, replaces os.environ with it instead of
@@ -661,11 +773,13 @@ def test_run_agent_gives_the_child_the_launch_env_merged_over_relays_environment
     monkeypatch.setenv("RELAY_LAUNCH_INHERITED", "from relay 3a9f")
     monkeypatch.setenv("RELAY_LAUNCH_OVERRIDDEN", "from relay")
     monkeypatch.delenv("RELAY_LAUNCH_ADDED", raising=False)
-    described = Launch(env={"RELAY_LAUNCH_OVERRIDDEN": "from launch",
-                            "RELAY_LAUNCH_ADDED": "added 51c0"})
+    described = Launch(
+        env={"RELAY_LAUNCH_OVERRIDDEN": "from launch", "RELAY_LAUNCH_ADDED": "added 51c0"}
+    )
     backend = LaunchingBackend(fake, described)
-    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
-              backend=backend, cfg=fake_cfg)
+    run_agent(
+        fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire", backend=backend, cfg=fake_cfg
+    )
     [seen] = _launched(record)
     assert seen["env"].get("RELAY_LAUNCH_ADDED") == "added 51c0"
     assert seen["env"].get("RELAY_LAUNCH_OVERRIDDEN") == "from launch"
@@ -676,7 +790,10 @@ def test_run_agent_gives_the_child_the_launch_env_merged_over_relays_environment
 
 
 def test_run_agent_adds_the_launch_extra_argv_to_the_childs_argv(
-    fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    fake: list[str],
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when run_agent drops Launch.extra_argv, splits it, or reorders it.
@@ -684,33 +801,40 @@ def test_run_agent_adds_the_launch_extra_argv_to_the_childs_argv(
     monkeypatch.setenv("RELAY_FAKE_LAUNCH", str(record))
     extra = ("--launch-flag", "value 8e2d", "--second")
     backend = LaunchingBackend(fake, Launch(extra_argv=extra))
-    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
-              backend=backend, cfg=fake_cfg)
+    run_agent(
+        fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire", backend=backend, cfg=fake_cfg
+    )
     [seen] = _launched(record)
     argv = seen["argv"]
-    runs = [tuple(argv[i:i + len(extra)]) for i in range(len(argv) - len(extra) + 1)]
+    runs = [tuple(argv[i : i + len(extra)]) for i in range(len(argv) - len(extra) + 1)]
     assert extra in runs
 
 
 @pytest.mark.parametrize("role", ["lead", "recut"])
 def test_run_agent_asks_the_backend_for_one_launch_per_child(
-    role: str, fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    role: str,
+    fake: list[str],
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
 ) -> None:
     # Breaks when run_agent skips Backend.launch, calls it more than once for a child, or
     # passes it another role, retire flag or run directory.
     retire = tmp_path / "retire"
     backend = LaunchingBackend(fake, Launch())
-    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire,
-              backend=backend, cfg=fake_cfg, role=role)
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire, backend=backend, cfg=fake_cfg, role=role)
     assert backend.launches == [(role, retire, run_dir)]
-    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire,
-              backend=backend, cfg=fake_cfg, role=role)
+    run_agent(fake, "p\n", tmp_path, run_dir, _go, retire, backend=backend, cfg=fake_cfg, role=role)
     assert backend.launches == [(role, retire, run_dir), (role, retire, run_dir)]
 
 
 @pytest.mark.parametrize("role", ["lead", "recut"])
 def test_a_claude_child_runs_with_the_print_background_wait_ceiling_off(
-    role: str, fake: list[str], fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    role: str,
+    fake: list[str],
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when the Claude child of any role starts without CHILD_ENV, so the CLI stops a
@@ -718,22 +842,34 @@ def test_a_claude_child_runs_with_the_print_background_wait_ceiling_off(
     record = tmp_path / "launch.jsonl"
     monkeypatch.setenv("RELAY_FAKE_LAUNCH", str(record))
     monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
-    run_agent(fake, "p\n", tmp_path, run_dir, _go, tmp_path / "retire",
-              backend=ClaudeBackend(), cfg=fake_cfg, role=role)
+    run_agent(
+        fake,
+        "p\n",
+        tmp_path,
+        run_dir,
+        _go,
+        tmp_path / "retire",
+        backend=ClaudeBackend(),
+        cfg=fake_cfg,
+        role=role,
+    )
     [seen] = _launched(record)
     assert seen["env"].get("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS") == "0"
     assert "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" not in os.environ
 
 
 def test_replay_restores_runner_telemetry_beside_legacy_claude_logs(
-    fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
 ) -> None:
     # Breaks when runner telemetry is lost or metadata-free Claude logs stop replaying.
     command = [sys.executable, "-c", "print('wire answer')"]
     backend = PollingBackend(command)
     cfg = replace(fake_cfg, backend="generic")
-    result = run_agent(command, "handoff", tmp_path, run_dir, _go,
-                       tmp_path / "retire", backend=backend, cfg=cfg)
+    result = run_agent(
+        command, "handoff", tmp_path, run_dir, _go, tmp_path / "retire", backend=backend, cfg=cfg
+    )
 
     restored = replay(result.log)
     assert restored.context_tokens == 321
@@ -768,10 +904,22 @@ def test_every_byte_of_the_childs_stderr_is_kept_in_a_stderr_file_named_like_its
 ) -> None:
     first_bytes = b"warn: one\n\xff\x00 not utf-8\r\nlast line, no newline"
     second_bytes = b"second child only\n"
-    first = run_agent(_sh(NOISY, sys.executable, first_bytes.hex(), fake[0]), "p\n",
-                      tmp_path, run_dir, _go, tmp_path / "retire")
-    second = run_agent(_sh(NOISY, sys.executable, second_bytes.hex(), fake[0]), "p\n",
-                       tmp_path, run_dir, _go, tmp_path / "retire")
+    first = run_agent(
+        _sh(NOISY, sys.executable, first_bytes.hex(), fake[0]),
+        "p\n",
+        tmp_path,
+        run_dir,
+        _go,
+        tmp_path / "retire",
+    )
+    second = run_agent(
+        _sh(NOISY, sys.executable, second_bytes.hex(), fake[0]),
+        "p\n",
+        tmp_path,
+        run_dir,
+        _go,
+        tmp_path / "retire",
+    )
     assert first.log != second.log
     for result, written in ((first, first_bytes), (second, second_bytes)):
         kept = run_dir / f"{result.log.stem}.stderr"
@@ -813,8 +961,14 @@ def test_stream_log_stdout_and_stream_state_are_unchanged_when_the_child_also_wr
         seen.append(copy.deepcopy(state))
         return "go"
 
-    result = run_agent([sys.executable, "-c", INTERLEAVED, noise], "p\n", tmp_path, run_dir,
-                       on_event, tmp_path / "retire")
+    result = run_agent(
+        [sys.executable, "-c", INTERLEAVED, noise],
+        "p\n",
+        tmp_path,
+        run_dir,
+        on_event,
+        tmp_path / "retire",
+    )
     assert result.exit_code == 0
     assert result.killed is False
     assert result.log.read_text().splitlines() == LINES
@@ -826,7 +980,8 @@ def test_stream_log_stdout_and_stream_state_are_unchanged_when_the_child_also_wr
 
 
 def test_direct_exit_cleans_inherited_stdout_and_drains_buffered_output(
-    tmp_path: Path, run_dir: Path,
+    tmp_path: Path,
+    run_dir: Path,
 ) -> None:
     # Breaks when inherited stdout postpones cleanup until descendant EOF.
     pidfile = tmp_path / "direct-pid"
@@ -852,7 +1007,11 @@ os._exit(7)
     try:
         result = run_agent(
             [sys.executable, "-c", script, str(pidfile), str(grandfile), str(expired), wire],
-            "", tmp_path, run_dir, _go, tmp_path / "retire",
+            "",
+            tmp_path,
+            run_dir,
+            _go,
+            tmp_path / "retire",
         )
         assert not expired.exists(), "descendant-held stdout delayed cleanup until natural exit"
         assert result.exit_code == 7
@@ -870,9 +1029,14 @@ os._exit(7)
                 assert proof.returncode == 1, proof.stdout
 
 
-@pytest.mark.parametrize("interrupt", [False, True], ids=["concurrent-reader", "interrupted-writer"])
+@pytest.mark.parametrize(
+    "interrupt", [False, True], ids=["concurrent-reader", "interrupted-writer"]
+)
 def test_telemetry_publication_preserves_complete_snapshots(
-    interrupt: bool, fake_cfg: Config, tmp_path: Path, run_dir: Path,
+    interrupt: bool,
+    fake_cfg: Config,
+    tmp_path: Path,
+    run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when telemetry truncates the published inode or exposes partial writes.
@@ -884,9 +1048,12 @@ def test_telemetry_publication_preserves_complete_snapshots(
     temporary: list[Path] = []
     readers: list[object] = []
     pidfile = tmp_path / "snapshot-pid"
-    command = [sys.executable, "-c",
-               "import os,time; from pathlib import Path; "
-               "Path('snapshot-pid').write_text(str(os.getpid())); time.sleep(0.7)"]
+    command = [
+        sys.executable,
+        "-c",
+        "import os,time; from pathlib import Path; "
+        "Path('snapshot-pid').write_text(str(os.getpid())); time.sleep(0.7)",
+    ]
 
     class SnapshotBackend(PollingBackend):
         def poll(self, state: StreamState) -> StreamState:
@@ -916,6 +1083,7 @@ def test_telemetry_publication_preserves_complete_snapshots(
                 if interrupt:
                     raise OSError("snapshot-write-interrupted")
             return original(source, destination, *args, **kwargs)
+
         return publish
 
     monkeypatch.setattr(os, "replace", observe_publication(os.replace))
@@ -923,8 +1091,16 @@ def test_telemetry_publication_preserves_complete_snapshots(
     failure = None
     try:
         try:
-            run_agent(command, "", tmp_path, run_dir, _go, tmp_path / "retire",
-                      backend=SnapshotBackend(command), cfg=fake_cfg)
+            run_agent(
+                command,
+                "",
+                tmp_path,
+                run_dir,
+                _go,
+                tmp_path / "retire",
+                backend=SnapshotBackend(command),
+                cfg=fake_cfg,
+            )
         except OSError as exc:
             failure = exc
         assert published, "no first telemetry snapshot was published"
@@ -949,6 +1125,8 @@ def test_telemetry_publication_preserves_complete_snapshots(
             assert _gone_within(pid)
             proof = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
             assert proof.returncode == 1, proof.stdout
+
+
 # ---------------------------------------------------------------------------------------
 # `run_command` and `capture` (design relay-check-design.md: Modules, `relay/runner.py`; Order 3).
 
@@ -972,7 +1150,7 @@ def test_run_command_runs_command_as_a_shell_script_and_reports_its_exit_code(
     tmp_path: Path,
 ) -> None:
     log = _log(tmp_path)
-    ok = run_command("x=one; echo \"$x\" | tr o O", tmp_path, log, 30)
+    ok = run_command('x=one; echo "$x" | tr o O', tmp_path, log, 30)
     assert isinstance(ok, CommandResult)
     assert ok.exit_code == 0
     assert ok.timed_out is False
@@ -1027,8 +1205,9 @@ def test_run_command_gives_the_child_dev_null_as_stdin(tmp_path: Path) -> None:
         "import os, stat; a = os.fstat(0); b = os.stat('/dev/null'); "
         "print(stat.S_ISCHR(a.st_mode) and a.st_rdev == b.st_rdev)"
     )
-    result = run_command(f"{_q(sys.executable)} -c {_q(probe)}; cat; echo read-all", tmp_path,
-                         log, 30)
+    result = run_command(
+        f"{_q(sys.executable)} -c {_q(probe)}; cat; echo read-all", tmp_path, log, 30
+    )
     assert result.exit_code == 0
     assert result.timed_out is False
     assert log.read_text() == "True\nread-all\n"
@@ -1054,7 +1233,7 @@ def test_run_command_child_inherits_relays_environment(
 # handlers as in run_agent: SIGINT/SIGTERM kill the group first.
 
 # Records the shell's PID in $1 and a 30-second grandchild's PID in $2, then waits on it.
-SLOW = 'sleep 30 & echo $! > {grand}; echo $$ > {pid}; wait'
+SLOW = "sleep 30 & echo $! > {grand}; echo $$ > {pid}; wait"
 SLOW_STUBBORN = "trap '' TERM INT HUP; " + SLOW
 
 
@@ -1067,8 +1246,9 @@ def test_run_command_kills_and_reaps_the_whole_group_at_timeout(
     log = _log(tmp_path)
     start = time.monotonic()
     try:
-        result = run_command(script.format(grand=_q(grandfile), pid=_q(pidfile)), tmp_path, log,
-                             1.0)
+        result = run_command(
+            script.format(grand=_q(grandfile), pid=_q(pidfile)), tmp_path, log, 1.0
+        )
         took = time.monotonic() - start
         assert result.timed_out is True
         assert result.exit_code is None
@@ -1114,7 +1294,11 @@ def test_a_signal_to_relay_kills_the_running_command_group(signum: int, tmp_path
     with open(tmp_path / "driver.out", "wb") as out:
         driver = subprocess.Popen(
             [sys.executable, "-c", COMMAND_DRIVER, json.dumps(args)],
-            cwd=REPO, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            cwd=REPO,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
         )
     try:
         deadline = time.monotonic() + 15
@@ -1302,7 +1486,8 @@ finally:
 def _on(events: list[list[Any]], child: int) -> list[list[Any]]:
     """The recorded kill, killpg and waitpid calls whose pid or group is `child`."""
     return [
-        event for event in events
+        event
+        for event in events
         if event[0] in {"kill", "killpg", "waitpid"} and abs(event[1]) == child
     ]
 
@@ -1346,7 +1531,11 @@ def test_a_signal_landing_mid_kill_leaves_the_child_signalled_and_reaped_once(
     with open(tmp_path / "driver.out", "wb") as log:
         driver = subprocess.Popen(
             [sys.executable, "-c", KILL_DRIVER, json.dumps(args)],
-            cwd=REPO, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            cwd=REPO,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
         )
     try:
         driver.wait(timeout=60)
@@ -1499,16 +1688,21 @@ def test_signal_drain_preserves_other_signalling_errors(monkeypatch: pytest.Monk
 
 
 # This driver invokes the real runner and existing fake; the test body sends each signal.
-DRAIN_DRIVER = DRIVER.replace(
-    "from relay.runner import run_agent",
-    "from relay.runner import run_agent, drain_armed\nfrom relay.errors import ExitCode",
-).replace(
-    '\nrun_agent(a["argv"]',
-    '\nwith drain_armed(lambda: Path(a["requested"]).touch()):\n    result = run_agent(a["argv"]',
-) + '\nPath(a["completed"]).write_text(json.dumps({"exit": result.exit_code, "killed": result.killed, "text": result.stream.result_text}))\nsys.exit(ExitCode.DRAINED)\n'
+DRAIN_DRIVER = (
+    DRIVER.replace(
+        "from relay.runner import run_agent",
+        "from relay.runner import run_agent, drain_armed\nfrom relay.errors import ExitCode",
+    ).replace(
+        '\nrun_agent(a["argv"]',
+        '\nwith drain_armed(lambda: Path(a["requested"]).touch()):\n    result = run_agent(a["argv"]',
+    )
+    + '\nPath(a["completed"]).write_text(json.dumps({"exit": result.exit_code, "killed": result.killed, "text": result.stream.result_text}))\nsys.exit(ExitCode.DRAINED)\n'
+)
 
 
-@pytest.mark.parametrize("force", [None, signal.SIGTERM, signal.SIGINT], ids=["finish", "second-term", "ctrl-c"])
+@pytest.mark.parametrize(
+    "force", [None, signal.SIGTERM, signal.SIGINT], ids=["finish", "second-term", "ctrl-c"]
+)
 def test_first_term_preserves_the_running_group_and_force_stops_it(
     force: int | None, fake: list[str], tmp_path: Path, run_dir: Path
 ) -> None:
@@ -1525,20 +1719,32 @@ def test_first_term_preserves_the_running_group_and_force_stops_it(
         else _sh(LONG, pidfile, grandfile, fake[0])
     )
     args = {
-        "argv": argv, "cwd": str(tmp_path), "run_dir": str(run_dir),
-        "retire": str(tmp_path / "retire"), "marker": str(marker),
-        "requested": str(requested), "completed": str(completed),
+        "argv": argv,
+        "cwd": str(tmp_path),
+        "run_dir": str(run_dir),
+        "retire": str(tmp_path / "retire"),
+        "marker": str(marker),
+        "requested": str(requested),
+        "completed": str(completed),
     }
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(REPO), env.get("PYTHONPATH", "")) if p)
     with (tmp_path / "drain-driver.out").open("wb") as out:
         driver = subprocess.Popen(
-            [sys.executable, "-c", DRAIN_DRIVER, json.dumps(args)], cwd=REPO, env=env,
-            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+            [sys.executable, "-c", DRAIN_DRIVER, json.dumps(args)],
+            cwd=REPO,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=subprocess.STDOUT,
         )
     try:
         deadline = time.monotonic() + 10
-        while (not marker.exists() or not pidfile.exists()) and driver.poll() is None and time.monotonic() < deadline:
+        while (
+            (not marker.exists() or not pidfile.exists())
+            and driver.poll() is None
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.01)
         assert marker.exists() and pidfile.exists(), "armed runner never started its child"
         child = _pid(pidfile)

@@ -1,4 +1,5 @@
 """Incremental Codex rollout telemetry."""
+
 import json
 import time
 from dataclasses import replace
@@ -27,8 +28,11 @@ def _matching_rollouts(home: Path, session_id: str):
             if not isinstance(meta, dict):
                 continue
             payload = meta.get("payload")
-            if (meta.get("type") == "session_meta" and isinstance(payload, dict)
-                    and payload.get("id") == session_id):
+            if (
+                meta.get("type") == "session_meta"
+                and isinstance(payload, dict)
+                and payload.get("id") == session_id
+            ):
                 yield path
         except OSError as exc:
             raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
@@ -102,7 +106,9 @@ class SessionReader:
                                 with path.open("rb") as handle:
                                     prefix = handle.read(boundary)
                             except OSError as exc:
-                                raise RelayError(f"cannot read Codex rollout telemetry {path}: {exc}") from exc
+                                raise RelayError(
+                                    f"cannot read Codex rollout telemetry {path}: {exc}"
+                                ) from exc
                             for line in prefix.splitlines():
                                 reader._event(line, state)
                             reader.offset = boundary
@@ -126,17 +132,33 @@ class SessionReader:
                     self.model_context_window = reader.model_context_window
             self.usage = tuple(row for reader in self._readers.values() for row in reader.usage)
             for name in ("models", "efforts", "children"):
-                setattr(self, name, tuple(dict.fromkeys(
-                    value for reader in self._readers.values() for value in getattr(reader, name)
-                )))
-            reasons = tuple(dict.fromkeys(
-                reader.unavailable for reader in self._readers.values() if reader.unavailable
-            ))
+                setattr(
+                    self,
+                    name,
+                    tuple(
+                        dict.fromkeys(
+                            value
+                            for reader in self._readers.values()
+                            for value in getattr(reader, name)
+                        )
+                    ),
+                )
+            reasons = tuple(
+                dict.fromkeys(
+                    reader.unavailable for reader in self._readers.values() if reader.unavailable
+                )
+            )
             self.unavailable = "; ".join(reasons) if reasons else "rollout telemetry missing"
-            return replace(state, usage=self.usage,
-                           spend=Spend(max(state.spend.tokens, sum(
-                               reader._tokens for reader in self._readers.values()
-                           )), state.spend.dollars))
+            return replace(
+                state,
+                usage=self.usage,
+                spend=Spend(
+                    max(
+                        state.spend.tokens, sum(reader._tokens for reader in self._readers.values())
+                    ),
+                    state.spend.dollars,
+                ),
+            )
         if force_scan:
             self._next_scan = 0.0
         if self.path is None:
@@ -188,9 +210,11 @@ class SessionReader:
             self._settings()
         receivers = payload.get("receiver_thread_ids")
         if payload.get("type") == "collab_tool_call" and isinstance(receivers, list):
-            self.children = tuple(dict.fromkeys(self.children + tuple(
-                sid for sid in receivers if isinstance(sid, str) and sid
-            )))
+            self.children = tuple(
+                dict.fromkeys(
+                    self.children + tuple(sid for sid in receivers if isinstance(sid, str) and sid)
+                )
+            )
         if event.get("type") != "event_msg" or payload.get("type") != "token_count":
             return state
         info = payload.get("info")
@@ -213,7 +237,9 @@ class SessionReader:
         else:
             self._tokens += token_delta
             self._previous_tokens = spend
-        state = replace(state, spend=Spend(max(state.spend.tokens, self._tokens), state.spend.dollars))
+        state = replace(
+            state, spend=Spend(max(state.spend.tokens, self._tokens), state.spend.dollars)
+        )
         context = last.get("total_tokens") if isinstance(last, dict) else None
         if type(context) is not int or context < 0:
             self._problem("invalid context token counter")
@@ -228,12 +254,16 @@ class SessionReader:
         if invalid:
             for key in invalid:
                 self._problem(f"{key} count invalid or unavailable")
-            return replace(state, context_tokens=context, peak_context=max(state.peak_context, context))
+            return replace(
+                state, context_tokens=context, peak_context=max(state.peak_context, context)
+            )
         previous = self._previous or dict.fromkeys(keys, 0)
         delta = {key: total[key] - previous[key] for key in keys}
         if any(value < 0 for value in delta.values()):
             self._problem("cumulative token counter reset; baseline unavailable")
-            return replace(state, context_tokens=context, peak_context=max(state.peak_context, context))
+            return replace(
+                state, context_tokens=context, peak_context=max(state.peak_context, context)
+            )
         self._previous = {key: total[key] for key in keys}
         # The captured provider input includes cached reads, and output includes
         # reasoning. Neither component is added a second time.
@@ -247,19 +277,26 @@ class SessionReader:
             rows = list(self.usage)
             index = next((i for i, row in enumerate(rows) if row.model == self._model), None)
             old = rows[index] if index is not None else Usage(self.session_id, self._model, 0, 0, 0)
-            row = replace(old, input=old.input + delta["input_tokens"],
-                          cached_input=old.cached_input + delta["cached_input_tokens"],
-                          output=old.output + delta["output_tokens"],
-                          cache_write_30m=0 if writes == 0 else None,
-                          cache_write_12h=0 if writes == 0 else None,
-                          unavailable=self.unavailable)
+            row = replace(
+                old,
+                input=old.input + delta["input_tokens"],
+                cached_input=old.cached_input + delta["cached_input_tokens"],
+                output=old.output + delta["output_tokens"],
+                cache_write_30m=0 if writes == 0 else None,
+                cache_write_12h=0 if writes == 0 else None,
+                unavailable=self.unavailable,
+            )
             if index is None:
                 rows.append(row)
             else:
                 rows[index] = row
             self.usage = tuple(rows)
-        return replace(state, context_tokens=context, peak_context=max(state.peak_context, context),
-                       spend=Spend(max(state.spend.tokens, self._tokens), state.spend.dollars))
+        return replace(
+            state,
+            context_tokens=context,
+            peak_context=max(state.peak_context, context),
+            spend=Spend(max(state.spend.tokens, self._tokens), state.spend.dollars),
+        )
 
     def _settings(self) -> None:
         self.models = tuple(dict.fromkeys(self.models + (self._model,)))

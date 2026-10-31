@@ -26,10 +26,12 @@ def checked_queue(path: Path, record: Path, *sids: str) -> Path:
     script = "import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.open('a').write(str(pathlib.Path.cwd().resolve())+'\\n')"
     command = shlex.join([sys.executable, "-c", script, str(record)])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(
-        f"section {sid} | lead | steps: 1\n  {sid} work\n  done-check: {command}\n"
-        for sid in sids
-    ))
+    path.write_text(
+        "".join(
+            f"section {sid} | lead | steps: 1\n  {sid} work\n  done-check: {command}\n"
+            for sid in sids
+        )
+    )
     return path
 
 
@@ -106,6 +108,7 @@ def request_drain() -> None:
 
 def drain_after_role(role: str, *, during: bool = False):
     """Request drain after a child's return, or during its first stream callback."""
+
     def wrap(original):
         requested = False
 
@@ -192,8 +195,8 @@ class Background:
 
     def wait_for_pass(self) -> None:
         """Wait for two further checks of this queue's stop file."""
-        target = getattr(self.thread, '_relay_polls', 0) + 2
-        until(lambda: getattr(self.thread, '_relay_polls', 0) >= target or not self.still_running())
+        target = getattr(self.thread, "_relay_polls", 0) + 2
+        until(lambda: getattr(self.thread, "_relay_polls", 0) >= target or not self.still_running())
 
     def finish(self, timeout: float = 15.0) -> int | None:
         self.thread.join(timeout)

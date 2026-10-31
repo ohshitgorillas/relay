@@ -74,9 +74,7 @@ def changed(m: Map, cwd: Path) -> frozenset[str]:
     return frozenset(
         path
         for i, path in enumerate(m.files)
-        if i >= len(m.digests)
-        or m.digests[i] == UNKNOWN
-        or m.digests[i] != digest(cwd, path)
+        if i >= len(m.digests) or m.digests[i] == UNKNOWN or m.digests[i] != digest(cwd, path)
     )
 
 
@@ -87,9 +85,7 @@ def split(m: Map, changed: frozenset[str]) -> Map | None:
         return None
     entries, links = parts
     entries = [line for line in entries if _ENTRY.fullmatch(line)[1] not in changed]
-    links = [
-        line for line in links if not changed.intersection(_LINK.fullmatch(line).groups())
-    ]
+    links = [line for line in links if not changed.intersection(_LINK.fullmatch(line).groups())]
     kept = _build(m.sid, m.commit, _lines(entries, links))
     if kept is None:
         return kept
@@ -191,8 +187,7 @@ def save(m: Map, path: Path) -> None:
     """Atomically write the map header, optional per-file digests, and body."""
     path.parent.mkdir(parents=True, exist_ok=True)
     records = "".join(
-        f"file {value} {name}\n"
-        for name, value in zip(m.files, m.digests, strict=bool(m.digests))
+        f"file {value} {name}\n" for name, value in zip(m.files, m.digests, strict=bool(m.digests))
     )
     provenance = f"queue {m.queue}\n" if m.queue is not None else ""
     write_atomic(path, f"{_header(m.sid, m.commit)}\n{provenance}{records}{m.body}\n")

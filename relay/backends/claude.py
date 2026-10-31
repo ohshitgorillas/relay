@@ -21,7 +21,9 @@ CHILD_ENV: Mapping[str, str] = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
 
 
 class ClaudeBackend:
-    capabilities = Capabilities(context=True, tokens=True, dollars=True, subagents=True, resume=True)
+    capabilities = Capabilities(
+        context=True, tokens=True, dollars=True, subagents=True, resume=True
+    )
 
     def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
         if role == "lead":
@@ -51,7 +53,15 @@ class ClaudeBackend:
             return Launch(env=CHILD_ENV)
         command = shlex.join([sys.executable, "-m", "relay.retire_gate", str(retire_flag)])
         settings = run_dir / "retire-gate.settings.json"
-        settings.write_text(json.dumps({
-            "hooks": {"PreToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": command}]}]}
-        }))
+        settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PreToolUse": [
+                            {"matcher": "Agent", "hooks": [{"type": "command", "command": command}]}
+                        ]
+                    }
+                }
+            )
+        )
         return Launch(extra_argv=("--settings", str(settings)), env=CHILD_ENV)

@@ -25,21 +25,48 @@ FIXTURES = TESTS / "fixtures"
 # Section ids as the divvyer writes them in each copied queue sample.
 QUEUE_SAMPLES = {
     "workboard-queue.md": [
-        "s1.1.1", "s1.1.2", "s1.2", "s2", "s3", "s4", "s5", "s6",
-        "s7", "s8", "s9", "s10", "s11", "s12", "s13",
+        "s1.1.1",
+        "s1.1.2",
+        "s1.2",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6",
+        "s7",
+        "s8",
+        "s9",
+        "s10",
+        "s11",
+        "s12",
+        "s13",
     ],
     "m2-rest-queue.md": ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"],
 }
 
 SCRIPT_A = [
     json.dumps({"type": "system", "subtype": "init", "session_id": "sess-a"}),
-    json.dumps({"type": "result", "subtype": "success", "result": "DONE",
-                "is_error": False, "total_cost_usd": 0.5}),
+    json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "DONE",
+            "is_error": False,
+            "total_cost_usd": 0.5,
+        }
+    ),
 ]
 SCRIPT_B = [
     json.dumps({"type": "system", "subtype": "init", "session_id": "sess-b"}),
-    json.dumps({"type": "result", "subtype": "success", "result": "RETIRED",
-                "is_error": False, "total_cost_usd": 1.25}),
+    json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "result": "RETIRED",
+            "is_error": False,
+            "total_cost_usd": 1.25,
+        }
+    ),
 ]
 
 
@@ -52,11 +79,16 @@ def _run_fake(scenario_path: Path, prompt: str) -> subprocess.CompletedProcess[s
     env = dict(os.environ, RELAY_FAKE_SCENARIO=str(scenario_path))
     return subprocess.run(
         [sys.executable, str(FAKE_CLAUDE)],
-        input=prompt, capture_output=True, text=True, env=env, timeout=30,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
 
 
 # Behavior 1: `tests/fakes/fake_claude.py` is an executable that reads its prompt on stdin.
+
 
 def test_fake_claude_runs_as_a_command_given_its_prompt_on_stdin(
     request: pytest.FixtureRequest, tmp_path: Path
@@ -67,7 +99,11 @@ def test_fake_claude_runs_as_a_command_given_its_prompt_on_stdin(
     env = dict(os.environ, RELAY_FAKE_SCENARIO=str(path))
     done = subprocess.run(
         [str(FAKE_CLAUDE)],
-        input="You are a lead\n", capture_output=True, text=True, env=env, timeout=30,
+        input="You are a lead\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
     assert done.returncode == 0, done.stderr
     assert done.stdout.splitlines() == SCRIPT_A
@@ -78,7 +114,12 @@ def test_fake_claude_runs_as_a_command_given_its_prompt_on_stdin(
     ping_argv = [arg.replace("{message}", "s1 DONE") for arg in cfg.ping_command]
     for argv in (cfg.recut_command, ping_argv):
         done = subprocess.run(
-            argv, input="recut s1\n", capture_output=True, text=True, env=env, timeout=30,
+            argv,
+            input="recut s1\n",
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
         )
         assert done.returncode == 0, (argv, done.stderr)
         assert done.stdout.splitlines() == SCRIPT_A, argv
@@ -89,7 +130,10 @@ def test_fake_claude_waits_for_its_whole_prompt_on_stdin(tmp_path: Path) -> None
     env = dict(os.environ, RELAY_FAKE_SCENARIO=str(path))
     proc = subprocess.Popen(
         [sys.executable, str(FAKE_CLAUDE)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
     )
     try:
         assert proc.stdin is not None and proc.stdout is not None
@@ -110,6 +154,7 @@ def test_fake_claude_waits_for_its_whole_prompt_on_stdin(tmp_path: Path) -> None
 # Behavior 2: it emits scripted stream-json lines taken from a scenario file named by
 # `RELAY_FAKE_SCENARIO`.
 
+
 def test_fake_claude_emits_the_scenario_lines_in_order(tmp_path: Path) -> None:
     path = _write_scenario(tmp_path / "a.jsonl", SCRIPT_A)
     done = _run_fake(path, "You are a lead\n")
@@ -125,6 +170,7 @@ def test_fake_claude_reads_the_scenario_the_variable_names(tmp_path: Path) -> No
 
 
 # Behavior 3: `tests/conftest.py` holds the fixtures `fake_cfg`, `queue_file` and `scenario`.
+
 
 def test_fake_cfg_is_a_config_whose_commands_point_at_the_fake(
     request: pytest.FixtureRequest,
@@ -180,7 +226,11 @@ def _run_fake_argv(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(FAKE_CLAUDE), *args],
-        input=prompt, capture_output=True, text=True, env=env, timeout=30,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
 
 
@@ -189,9 +239,7 @@ def test_fake_claude_emits_the_named_agents_scenario_over_the_shared_one(
 ) -> None:
     shared = _write_scenario(tmp_path / "shared.jsonl", SCRIPT_A)
     architect = _write_scenario(tmp_path / "architect.jsonl", SCRIPT_B)
-    env = _fake_env(
-        RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_ARCHITECT=str(architect)
-    )
+    env = _fake_env(RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_ARCHITECT=str(architect))
     done = _run_fake_argv(["--agent", "architect"], "design s1\n", env)
     assert done.returncode == 0, done.stderr
     assert done.stdout.splitlines() == SCRIPT_B
@@ -214,9 +262,7 @@ def test_fake_claude_names_the_agents_variable_upper_case_with_dash_as_underscor
 def test_fake_claude_finds_the_agent_flag_among_other_arguments(tmp_path: Path) -> None:
     shared = _write_scenario(tmp_path / "shared.jsonl", SCRIPT_A)
     researcher = _write_scenario(tmp_path / "researcher.jsonl", SCRIPT_B)
-    env = _fake_env(
-        RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_RESEARCHER=str(researcher)
-    )
+    env = _fake_env(RELAY_FAKE_SCENARIO=str(shared), RELAY_FAKE_SCENARIO_RESEARCHER=str(researcher))
     done = _run_fake_argv(
         ["-p", "--output-format", "stream-json", "--agent", "researcher", "--verbose"],
         "research s1\n",
@@ -251,6 +297,7 @@ def test_fake_claude_appends_each_prompt_it_reads_to_the_prompts_file(
 
 
 # Behavior 4: `tests/fixtures/` holds queue samples in the divvyer's `.md` format.
+
 
 @pytest.mark.parametrize("name", sorted(QUEUE_SAMPLES))
 def test_fixture_queue_sample_parses_into_its_sections(name: str) -> None:

@@ -193,7 +193,11 @@ def design_brief(
 def design_retry_brief(brief: str, said: str, error: str | None) -> str:
     """`brief` with one `lead new:` line before its `approve:` line saying why the previous run
     filed no design change."""
-    why = f"it failed: {error}" if error is not None else "its final message had no BRIEF … END DESIGN block"
+    why = (
+        f"it failed: {error}"
+        if error is not None
+        else "its final message had no BRIEF … END DESIGN block"
+    )
     reason = _ruling(
         "lead new:",
         f"The previous run on this brief filed no design change: {why}. Its final message: {said} "
@@ -221,7 +225,9 @@ def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, app
 
 
 def check_feedback(result: CheckResult) -> str:
-    return f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
+    return (
+        f"{result.command}\n{outcome_text(result)}\n{result.log}\n{result.tail.rstrip(chr(10))}\n"
+    )
 
 
 ENTRY_RULE = (

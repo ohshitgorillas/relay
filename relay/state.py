@@ -59,8 +59,12 @@ class SectionState:
     check_pending: bool = False
     research_session: str | None = None  # the researcher a follow-up resumes
     last_log: str | None = None  # the run log of the section's last lead run
-    design_changed: bool = False  # this section had a design change, or a design-change recut made it
-    design_open: str | None = None  # the design path whose product decision awaits the owner's answer
+    design_changed: bool = (
+        False  # this section had a design change, or a design-change recut made it
+    )
+    design_open: str | None = (
+        None  # the design path whose product decision awaits the owner's answer
+    )
     # The open decision numbers of the park now awaiting that answer; None when the section's
     # current park (or run) is for another reason, so an answer to it is not a design answer.
     design_numbers: list[int] | None = None
@@ -79,7 +83,9 @@ class SectionState:
 
 def numbered_logs(run_dir: Path) -> list[Path]:
     """The numbered `<n>.jsonl` run logs in `run_dir`, ascending by number."""
-    return sorted((p for p in run_dir.glob("*.jsonl") if p.stem.isdigit()), key=lambda p: int(p.stem))
+    return sorted(
+        (p for p in run_dir.glob("*.jsonl") if p.stem.isdigit()), key=lambda p: int(p.stem)
+    )
 
 
 def queue_id(queue: Path) -> str:
@@ -202,9 +208,7 @@ class State:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             yield
 
-    def _update(
-        self, sid: str, change: Callable[[SectionState, dict], _T]
-    ) -> _T:
+    def _update(self, sid: str, change: Callable[[SectionState, dict], _T]) -> _T:
         with self._write_guard():
             record = self._load()
             section = SectionState(**record["sections"].get(sid, asdict(_fresh())))
@@ -390,6 +394,7 @@ class State:
 
     def record_design_failure(self, sid: str, reason: str) -> int:
         """Atomically increment design_failures and store reason; return the new count."""
+
         def change(s: SectionState, _r: dict) -> int:
             s.design_failures += 1
             s.design_failure = reason
@@ -399,6 +404,7 @@ class State:
 
     def clear_design_failures(self, sid: str) -> None:
         """Atomically clear the count and reason for this section."""
+
         def change(s: SectionState, _r: dict) -> None:
             s.design_failures = 0
             s.design_failure = None

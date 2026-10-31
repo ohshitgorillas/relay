@@ -1,4 +1,5 @@
 """Codex exec protocol, generated role configuration and handoffs."""
+
 from __future__ import annotations
 
 import json
@@ -17,8 +18,11 @@ from relay.ledger import Spend
 from relay.pricing import Unpriced, dollars
 from relay.stream import StreamState
 
+
 class CodexBackend:
-    capabilities = Capabilities(context=True, tokens=True, dollars=False, subagents=True, resume=True)
+    capabilities = Capabilities(
+        context=True, tokens=True, dollars=False, subagents=True, resume=True
+    )
 
     def __init__(self) -> None:
         self.home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
@@ -29,8 +33,11 @@ class CodexBackend:
     def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
         self._config = cfg
         filename = {
-            "lead": "lead", "recut": "divvyer", "research": "researcher",
-            "ask": "researcher", "design": "architect",
+            "lead": "lead",
+            "recut": "divvyer",
+            "research": "researcher",
+            "ask": "researcher",
+            "design": "architect",
         }.get(role)
         if filename is None:
             raise ConfigError(f"unknown Codex role {role!r}")
@@ -65,12 +72,31 @@ class CodexBackend:
             self.reader = SessionReader(
                 self.home, command[-1], boundary=rollout_boundary(self.home, command[-1])
             )
-            return ["codex", "exec", "resume", "--json",
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "-o", str(output), *overrides, command[-1], "-"]
+            return [
+                "codex",
+                "exec",
+                "resume",
+                "--json",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-o",
+                str(output),
+                *overrides,
+                command[-1],
+                "-",
+            ]
         # With a prompt argument, Codex appends piped stdin, the brief, as a `<stdin>` block.
-        return ["codex", "exec", "--json", "--dangerously-bypass-approvals-and-sandbox",
-                "-C", str(cwd), "-o", str(output), *overrides, instructions]
+        return [
+            "codex",
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-C",
+            str(cwd),
+            "-o",
+            str(output),
+            *overrides,
+            instructions,
+        ]
 
     def parse(self, state: StreamState, line: str) -> StreamState:
         try:
@@ -91,7 +117,10 @@ class CodexBackend:
             if isinstance(usage, dict):
                 counts = [usage.get(key) for key in ("input_tokens", "output_tokens")]
                 if all(type(value) is int and value >= 0 for value in counts):
-                    return replace(state, spend=Spend(max(state.spend.tokens, sum(counts)), state.spend.dollars))
+                    return replace(
+                        state,
+                        spend=Spend(max(state.spend.tokens, sum(counts)), state.spend.dollars),
+                    )
         elif kind in ("item.started", "item.updated", "item.completed"):
             item = event.get("item")
             if not isinstance(item, dict):
@@ -116,15 +145,28 @@ class CodexBackend:
             receiver = statuses.get(sid)
             status = receiver.get("status") if isinstance(receiver, dict) else None
             known = next((a for a in activity.agents if a.task_id == sid), None)
-            if known is None or (status in ("pending_init", "running") and sid not in activity.live):
-                activity = agents.feed(activity, {
-                    "subtype": "task_started", "task_id": sid, "task_type": "local_agent",
-                    "description": item.get("prompt"), "subagent_type": "",
-                })
+            if known is None or (
+                status in ("pending_init", "running") and sid not in activity.live
+            ):
+                activity = agents.feed(
+                    activity,
+                    {
+                        "subtype": "task_started",
+                        "task_id": sid,
+                        "task_type": "local_agent",
+                        "description": item.get("prompt"),
+                        "subagent_type": "",
+                    },
+                )
             if status in ("interrupted", "completed", "errored", "shutdown", "not_found"):
-                activity = agents.feed(activity, {
-                    "subtype": "task_notification", "task_id": sid, "status": status,
-                })
+                activity = agents.feed(
+                    activity,
+                    {
+                        "subtype": "task_notification",
+                        "task_id": sid,
+                        "status": status,
+                    },
+                )
         return activity
 
     def poll(self, state: StreamState) -> StreamState:
@@ -173,8 +215,12 @@ class CodexBackend:
                 except Unpriced as exc:
                     reason = str(exc)
             activity = agents.measured(
-                activity, sid, models=reader.models, efforts=reader.efforts,
-                cost_dollars=cost, cost_basis="api-estimate" if cost is not None else "none",
+                activity,
+                sid,
+                models=reader.models,
+                efforts=reader.efforts,
+                cost_dollars=cost,
+                cost_basis="api-estimate" if cost is not None else "none",
                 cost_unavailable=reason,
             )
         return replace(state, activity=activity, usage=tuple(usage))
@@ -191,11 +237,13 @@ class CodexBackend:
             return replace(state, is_error=True)
 
     def resume_hint(self, session_id: str) -> str:
-        return (f"Prior Codex thread: {session_id}. Native history continuation uses "
-                f"`codex exec resume {session_id}`. This fresh thread uses the supplied "
-                "report as its handoff. To recall more of that thread or a worker's session, "
-                f"use deja: `~/.codex/skills/deja/scripts/recall-session {session_id}` "
-                "(the `deja` skill).")
+        return (
+            f"Prior Codex thread: {session_id}. Native history continuation uses "
+            f"`codex exec resume {session_id}`. This fresh thread uses the supplied "
+            "report as its handoff. To recall more of that thread or a worker's session, "
+            f"use deja: `~/.codex/skills/deja/scripts/recall-session {session_id}` "
+            "(the `deja` skill)."
+        )
 
     def launch(self, role: str, retire_flag: Path, run_dir: Path) -> Launch:
         return Launch()

@@ -58,7 +58,8 @@ def test_hooks_without_adapter_give_no_args(hooks_home: Path) -> None:
 
 
 def test_inherited_codex_home_selects_hooks_file(
-    hooks_home: Path, monkeypatch: pytest.MonkeyPatch,
+    hooks_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when adapter selection ignores the run's inherited CODEX_HOME.
     monkeypatch.setenv("CODEX_HOME", str(hooks_home))
@@ -69,7 +70,9 @@ def test_inherited_codex_home_selects_hooks_file(
 
 
 def test_default_codex_home_selects_user_hooks(
-    hooks_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    hooks_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when an unset CODEX_HOME stops defaulting to ~/.codex/hooks.json.
     user = tmp_path / "synthetic-user"
@@ -84,16 +87,23 @@ def test_default_codex_home_selects_user_hooks(
     assert tomllib.loads(args[1])["hooks"]["state"] == _expected_states(home)
 
 
-@pytest.mark.parametrize("role,filename", [
-    ("lead", "lead"),
-    ("recut", "divvyer"),
-    ("research", "researcher"),
-    ("design", "architect"),
-    ("ask", "researcher"),
-])
+@pytest.mark.parametrize(
+    "role,filename",
+    [
+        ("lead", "lead"),
+        ("recut", "divvyer"),
+        ("research", "researcher"),
+        ("design", "architect"),
+        ("ask", "researcher"),
+    ],
+)
 def test_every_codex_launch_disables_adapter_before_prompt(
-    hooks_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    fake_cfg: Config, role: str, filename: str,
+    hooks_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_cfg: Config,
+    role: str,
+    filename: str,
 ) -> None:
     # Breaks when any fresh or resumed role omits the override or puts it after the prompt.
     agents = hooks_home / "agents"
@@ -103,7 +113,9 @@ def test_every_codex_launch_disables_adapter_before_prompt(
         f"developer_instructions = {json.dumps(instructions)}\n"
     )
     monkeypatch.setenv("CODEX_HOME", str(hooks_home))
-    cfg = replace(fake_cfg, backend="codex", research_command=["codex", "--resume", "synthetic-thread"])
+    cfg = replace(
+        fake_cfg, backend="codex", research_command=["codex", "--resume", "synthetic-thread"]
+    )
 
     argv = CodexBackend().argv(role, cfg, tmp_path, tmp_path / "out")
 

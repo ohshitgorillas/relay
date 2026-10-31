@@ -324,8 +324,12 @@ def run_agent(
     with _group_guard(live):
         with log_path.with_suffix(".stderr").open("wb") as stderr_file:
             proc = subprocess.Popen(
-                argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=stderr_file, start_new_session=True,
+                argv,
+                cwd=cwd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                start_new_session=True,
                 env={**os.environ, **launch.env},
             )
             live.append(proc)

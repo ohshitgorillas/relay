@@ -17,7 +17,9 @@ from harness import RECORD as _RECORD
 
 
 def _recording_cfg(cfg: Config, record: Path) -> Config:
-    return dataclasses.replace(cfg, ping_command=[sys.executable, "-c", _RECORD, str(record), "{message}"])
+    return dataclasses.replace(
+        cfg, ping_command=[sys.executable, "-c", _RECORD, str(record), "{message}"]
+    )
 
 
 def _sent(record: Path) -> list[list[str]]:
@@ -38,7 +40,8 @@ def test_ping_runs_ping_command_with_message_in_place(fake_cfg: Config, tmp_path
     # "{message}" is replaced where it stands, so arguments after it keep their places.
     inner = tmp_path / "inner.jsonl"
     cfg = dataclasses.replace(
-        fake_cfg, ping_command=[sys.executable, "-c", _RECORD, str(inner), "--title", "{message}", "--end"]
+        fake_cfg,
+        ping_command=[sys.executable, "-c", _RECORD, str(inner), "--title", "{message}", "--end"],
     )
     ping(cfg, "section s3 parked")
     assert _sent(inner) == [["--title", "section s3 parked", "--end"]]
@@ -46,7 +49,7 @@ def test_ping_runs_ping_command_with_message_in_place(fake_cfg: Config, tmp_path
 
 def test_ping_passes_message_as_one_argument_unexpanded(fake_cfg: Config, tmp_path: Path) -> None:
     record = tmp_path / "sent.jsonl"
-    message = "it's \"done\"; $HOME * {x} `id`"
+    message = 'it\'s "done"; $HOME * {x} `id`'
     ping(_recording_cfg(fake_cfg, record), message)
     assert _sent(record) == [[message]]
 
@@ -59,7 +62,9 @@ def test_ping_sends_once_per_call(fake_cfg: Config, tmp_path: Path) -> None:
     assert _sent(record) == [["first"], ["second"]]
 
 
-def test_needs_owner_message_names_queue_section_and_question(fake_cfg: Config, tmp_path: Path) -> None:
+def test_needs_owner_message_names_queue_section_and_question(
+    fake_cfg: Config, tmp_path: Path
+) -> None:
     record = tmp_path / "sent.jsonl"
     queue = tmp_path / "m2-rest.md"
     question = "Should the API keep v1 routes?"
@@ -91,8 +96,12 @@ def test_stopped_message_names_queue_reason_and_detail(fake_cfg: Config, tmp_pat
 
 def _failing_cfgs(cfg: Config, tmp_path: Path) -> dict[str, Config]:
     return {
-        "nonzero": dataclasses.replace(cfg, ping_command=[sys.executable, "-c", "raise SystemExit(3)", "{message}"]),
-        "missing": dataclasses.replace(cfg, ping_command=[str(tmp_path / "no-such-ping"), "{message}"]),
+        "nonzero": dataclasses.replace(
+            cfg, ping_command=[sys.executable, "-c", "raise SystemExit(3)", "{message}"]
+        ),
+        "missing": dataclasses.replace(
+            cfg, ping_command=[str(tmp_path / "no-such-ping"), "{message}"]
+        ),
     }
 
 

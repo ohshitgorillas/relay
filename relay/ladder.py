@@ -23,7 +23,9 @@ class Climb:
     why: str  # rung 3: the question parked for the owner; rungs 1 and 2: the progress text
 
 
-def climb(kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None, sid: str) -> Climb:
+def climb(
+    kind: Literal["RECUT", "DESIGN"], s: SectionState, design: Path | None, sid: str
+) -> Climb:
     """RECUT on a section that is not from_recut, or on a design_changed one: rung 1.
     Any other RECUT, or DESIGN, when design is not None: rung 2.
     design None at rung 2: rung 3, "no design to amend: the queue names no design

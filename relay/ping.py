@@ -17,7 +17,10 @@ def ping(cfg: Config, message: str) -> None:
         print(f"relay: ping failed: {exc}", file=sys.stderr)
         return
     if result.returncode != 0:
-        print(f"relay: ping failed (exit {result.returncode}): {result.stderr.strip()}", file=sys.stderr)
+        print(
+            f"relay: ping failed (exit {result.returncode}): {result.stderr.strip()}",
+            file=sys.stderr,
+        )
 
 
 def needs_owner(cfg: Config, queue: Path, sid: str, question: str) -> None:

@@ -547,7 +547,9 @@ def test_queue_lookup_rejects_partial_output_when_git_fails(
         (returncode, f"worktree {tmp_path}\nHEAD {'1' * 40}\nbranch refs/heads/{branch}\n\n"),
     )
     assert section_worktree(tmp_path, queue, "s1") is None
-    assert section_worktree(tmp_path, queue, "s1", relay.git.SectionWorktree(branch, tmp_path)) is None
+    assert (
+        section_worktree(tmp_path, queue, "s1", relay.git.SectionWorktree(branch, tmp_path)) is None
+    )
 
 
 # Reading another repository's worktree list would make this foreign binding pass.

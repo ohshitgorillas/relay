@@ -93,7 +93,8 @@ def agent_finished_text(agent: Agent) -> str:
     else:
         basis = (
             "API-equivalent estimate (not subscription billing)"
-            if agent.cost_basis == "api-estimate" else agent.cost_basis
+            if agent.cost_basis == "api-estimate"
+            else agent.cost_basis
         )
         cost = f"${agent.cost_dollars:.12g} {basis}"
     return (
@@ -102,7 +103,9 @@ def agent_finished_text(agent: Agent) -> str:
     )
 
 
-def retiring(sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead") -> None:
+def retiring(
+    sid: str, why: Literal["context", "budget", "cap"], tokens: int, who: Kind = "lead"
+) -> None:
     if why == "context":
         _write_for(who, f"{who} {sid}: asked to retire at {tokens} context tokens")
     elif why == "cap":
@@ -213,7 +216,9 @@ def research_finished(sid: str, result: RunResult, m: Map | None) -> None:
         _write(f"research {sid}: no usable map {_spend(result)}; the lead starts without one")
         return
     lines = len(m.body.splitlines())
-    _write(f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}")
+    _write(
+        f"research {sid}: map of {lines} lines, {len(m.files)} files at {m.commit} {_spend(result)}"
+    )
 
 
 def map_reused(sid: str, m: Map) -> None:

@@ -200,11 +200,17 @@ class Ledger:
 
             capabilities = get_backend(cfg.backend).capabilities
         past = self.total(since)
-        if (capabilities.tokens and cfg.token_budget is not None
-                and past.tokens + live.tokens > cfg.token_budget):
+        if (
+            capabilities.tokens
+            and cfg.token_budget is not None
+            and past.tokens + live.tokens > cfg.token_budget
+        ):
             return "tokens"
-        if (capabilities.dollars and cfg.dollar_budget is not None
-                and past.dollars + live.dollars > cfg.dollar_budget):
+        if (
+            capabilities.dollars
+            and cfg.dollar_budget is not None
+            and past.dollars + live.dollars > cfg.dollar_budget
+        ):
             return "dollars"
         return None
 

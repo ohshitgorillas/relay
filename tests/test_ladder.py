@@ -65,9 +65,7 @@ def test_climb_recut_on_a_fresh_section_takes_rung_1(design: Path | None) -> Non
     [("RECUT", True), ("DESIGN", False), ("DESIGN", True)],
     ids=["recut-from-recut", "design-fresh", "design-from-recut"],
 )
-def test_climb_takes_rung_2_with_a_design_and_no_design_change(
-    kind: str, from_recut: bool
-) -> None:
+def test_climb_takes_rung_2_with_a_design_and_no_design_change(kind: str, from_recut: bool) -> None:
     # breaks when: a recut section's second RECUT, or a DESIGN, parks for the owner or recuts again.
     climb_ = climb(kind, _section(from_recut=from_recut, design_changed=False), DESIGN, SID)  # type: ignore[arg-type]
     assert climb_.rung == 2
@@ -176,9 +174,7 @@ def _block(unfiled: str) -> str:
 
 def test_parse_report_reads_a_brief_block() -> None:
     # breaks when: a BRIEF ... END DESIGN report is not found.
-    report = parse_report(
-        "Some prose first.\n\n" + _block("the old relay/loop.py note")
-    )
+    report = parse_report("Some prose first.\n\n" + _block("the old relay/loop.py note"))
     assert report is not None
     assert report.rejected is False
     assert report.approved is True
@@ -198,9 +194,7 @@ def test_parse_report_a_status_not_approved_is_not_approved() -> None:
 def test_parse_report_reads_the_last_brief_block() -> None:
     # breaks when: the first block is read instead of the last.
     report = parse_report(
-        _block("from the first block")
-        + "\nmore prose\n\n"
-        + _block("from the last block")
+        _block("from the first block") + "\nmore prose\n\n" + _block("from the last block")
     )
     assert report is not None
     assert list(report.unfiled) == ["from the last block"]
@@ -213,20 +207,13 @@ def test_parse_report_none_gives_none() -> None:
 
 def test_parse_report_text_without_rejection_or_block_gives_none() -> None:
     # breaks when: prose with no report is read as a report.
-    assert (
-        parse_report(
-            "I amended the design and all is well.\nSTATUS Status: approved.\n"
-        )
-        is None
-    )
+    assert parse_report("I amended the design and all is well.\nSTATUS Status: approved.\n") is None
 
 
 def test_parse_report_brief_without_end_design_gives_none() -> None:
     # breaks when: a block with no END DESIGN line is read as a report.
     assert (
-        parse_report(
-            "BRIEF rulings docs/x-design.md\nSTATUS Status: approved.\nUNFILED\n  a gap\n"
-        )
+        parse_report("BRIEF rulings docs/x-design.md\nSTATUS Status: approved.\nUNFILED\n  a gap\n")
         is None
     )
 
@@ -331,11 +318,17 @@ REPORT_TEXT = (
 
 # Each call into relay/ladder.py, given the fake config.
 _LADDER_CALLS: list[tuple[str, Callable[[Config], Any]]] = [
-    ("climb", lambda cfg: climb("DESIGN", _section(from_recut=False, design_changed=False), DESIGN, SID)),
+    (
+        "climb",
+        lambda cfg: climb("DESIGN", _section(from_recut=False, design_changed=False), DESIGN, SID),
+    ),
     ("split_reason", lambda cfg: split_reason(f"the problem{GUESS}the fix")),
     ("parse_report", lambda cfg: parse_report(REPORT_TEXT)),
     ("decision_numbers", lambda cfg: decision_numbers(_report(DECISION_1, DECISION_2))),
-    ("design_of", lambda cfg: design_of("docs/superpowers/specs/thing-design.md", Path("/no-such-repo"))),
+    (
+        "design_of",
+        lambda cfg: design_of("docs/superpowers/specs/thing-design.md", Path("/no-such-repo")),
+    ),
     ("section_cap", lambda cfg: section_cap(cfg, _ladder_section(dollar_cap=5.0))),
     ("cap_text", lambda cfg: cap_text("s2", 3.0, 2.5)),
     (
@@ -343,7 +336,9 @@ _LADDER_CALLS: list[tuple[str, Callable[[Config], Any]]] = [
         lambda cfg: decisions_text(
             "s2",
             DESIGN,
-            DesignReport(rejected=False, approved=True, decisions=(DECISION_1,), unfiled=(UNFILED_1,)),
+            DesignReport(
+                rejected=False, approved=True, decisions=(DECISION_1,), unfiled=(UNFILED_1,)
+            ),
         ),
     ),
     ("failed_text", lambda cfg: failed_text("s2", DESIGN, "the architect exited 1")),

@@ -155,9 +155,7 @@ def test_output_is_appended_to_the_log_not_written_over_it(
     assert "this-pass" in text
 
 
-def test_checks_stop_at_the_first_non_zero_exit(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_checks_stop_at_the_first_non_zero_exit(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: checks after a failing one still run.
     cwd = _cwd(tmp_path)
     log = _log(tmp_path)
@@ -221,9 +219,7 @@ def test_a_plain_failure_is_fail(tmp_path: Path, fake_cfg: Config) -> None:
 
 
 @pytest.mark.parametrize("code", [126, 127])
-def test_exit_126_or_127_is_outside(
-    code: int, tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_exit_126_or_127_is_outside(code: int, tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: run_checks reports a fail, not classify()'s "outside", for an exit 126 or 127.
     cfg = dataclasses.replace(fake_cfg, check_outside=[])
     result = run_checks(cfg, _section(f"exit {code}"), _cwd(tmp_path), _log(tmp_path))
@@ -245,9 +241,7 @@ def test_a_failing_output_matching_an_outside_pattern_is_outside(
     assert result.verdict == "outside"
 
 
-def test_only_the_failing_commands_output_is_judged(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_only_the_failing_commands_output_is_judged(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: the whole log, an earlier passing command's output included, is matched against the patterns.
     cfg = dataclasses.replace(fake_cfg, check_outside=["quota exceeded"])
     result = run_checks(
@@ -259,9 +253,7 @@ def test_only_the_failing_commands_output_is_judged(
     assert result.verdict == "fail"
 
 
-def test_a_timed_out_check_with_no_pattern_match_is_fail(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_a_timed_out_check_with_no_pattern_match_is_fail(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: a timeout is reported outside or pass instead of classify()'s "fail".
     cfg = dataclasses.replace(fake_cfg, check_timeout=0.5, check_outside=["quota exceeded"])
     result = run_checks(cfg, _section("sleep 20"), _cwd(tmp_path), _log(tmp_path))
@@ -323,9 +315,7 @@ def test_a_timed_out_check_matching_a_pattern_is_outside(fake_cfg: Config) -> No
 # Behavior 5: the end of that command's output, TAIL_LINES / TAIL_CHARS
 
 
-def test_a_short_output_is_kept_whole_in_the_tail(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_a_short_output_is_kept_whole_in_the_tail(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: the tail drops lines of an output already under the limits.
     result = run_checks(
         fake_cfg,
@@ -343,13 +333,9 @@ def test_the_tail_is_the_last_40_lines(tmp_path: Path, fake_cfg: Config) -> None
     assert _lines(result.tail) == [f"line{i}" for i in range(61, 101)]
 
 
-def test_the_tail_is_at_most_4000_characters_from_the_end(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_the_tail_is_at_most_4000_characters_from_the_end(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: 40 long lines are kept whole past 4000 characters, or the cut keeps the start.
-    command = (
-        'i=1; while [ "$i" -le 60 ]; do printf "%0200d\\n" "$i"; i=$((i+1)); done; exit 1'
-    )
+    command = 'i=1; while [ "$i" -le 60 ]; do printf "%0200d\\n" "$i"; i=$((i+1)); done; exit 1'
     full = "".join(f"{i:0200d}\n" for i in range(1, 61))
     result = run_checks(fake_cfg, _section(command), _cwd(tmp_path), _log(tmp_path))
     tail = result.tail
@@ -359,9 +345,7 @@ def test_the_tail_is_at_most_4000_characters_from_the_end(
     assert f"{60:0200d}" in tail
 
 
-def test_the_tail_holds_only_that_commands_output(
-    tmp_path: Path, fake_cfg: Config
-) -> None:
+def test_the_tail_holds_only_that_commands_output(tmp_path: Path, fake_cfg: Config) -> None:
     # Breaks when: the tail is read from the end of the whole log, earlier output included.
     log = _log(tmp_path)
     log.write_text("an earlier pass\n")

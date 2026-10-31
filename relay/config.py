@@ -9,8 +9,15 @@ from relay.errors import ConfigError
 from relay.pricing import Rate, Unpriced, validate_rate
 
 _DEFAULT_LEAD = [
-    "claude", "-p", "--output-format", "stream-json", "--verbose", "--agent", "lead",
-    "--permission-mode", "bypassPermissions",
+    "claude",
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--agent",
+    "lead",
+    "--permission-mode",
+    "bypassPermissions",
 ]
 _DEFAULT_CHECK_OUTSIDE = [
     "command not found",
@@ -71,7 +78,6 @@ class Config:
                 "research_command",
                 self._role_command("researcher", "--model", "opus[1m]"),
             )
-
 
     def _role_command(self, role: str, *extra: str) -> list[str]:
         if self.backend == "claude":
@@ -221,13 +227,13 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
     assert poll_seconds is not None
     lead_default = _DEFAULT_LEAD if backend == "claude" else ["codex"]
     lead_command = _command(merged, "lead_command", lead_default)
-    recut_default = (
-        [*lead_command, "--agent", "divvyer"] if backend == "claude" else lead_command
-    )
+    recut_default = [*lead_command, "--agent", "divvyer"] if backend == "claude" else lead_command
 
     state_value = _string(merged, "state_root", None)
     state_root = (
-        home / ".local" / "state" / "relay" if state_value is None else Path(state_value).expanduser()
+        home / ".local" / "state" / "relay"
+        if state_value is None
+        else Path(state_value).expanduser()
     )
 
     map_max_lines = _int(merged, "map_max_lines", Config.map_max_lines)
@@ -246,7 +252,9 @@ def load_config(path: Path | None, overrides: dict[str, object]) -> Config:
         lead_command=lead_command,
         recut_command=_command(merged, "recut_command", recut_default),
         ping_command=_command(
-            merged, "ping_command", [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"]
+            merged,
+            "ping_command",
+            [str(home / ".local" / "bin" / "claude-ping"), "relay", "{message}"],
         ),
         state_root=state_root,
         backend=backend,

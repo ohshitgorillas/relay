@@ -184,7 +184,9 @@ def test_pending_dispatch_survives_reopen_and_is_consumed_per_section(
     assert State.open(queue, fake_cfg).take_pending("s2") == other
 
 
-def test_run_record_path_and_clear_leave_section_state_intact(queue: Path, fake_cfg: Config) -> None:
+def test_run_record_path_and_clear_leave_section_state_intact(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: run records use another path or clearing them removes section state.
     state = State.open(queue, fake_cfg)
     state.set_last_report("s1", "finished work")
@@ -210,7 +212,10 @@ def test_design_cycle_failures_persist_independently_and_old_records_default(
     assert (section.design_failures, section.design_failure) == (0, None)
     assert state_module.DESIGN_FAILURE_LIMIT == 2
     assert State.open(queue, fake_cfg).record_design_failure("s1", "it filed no report") == 1
-    assert State.open(queue, fake_cfg).record_design_failure("s1", "it did not approve the design") == 2
+    assert (
+        State.open(queue, fake_cfg).record_design_failure("s1", "it did not approve the design")
+        == 2
+    )
     section = State.open(queue, fake_cfg).section("s1")
     assert (section.design_failures, section.design_failure) == (2, "it did not approve the design")
     assert section.failures == 1
@@ -235,7 +240,9 @@ def test_design_failure_resets_are_persisted(queue: Path, fake_cfg: Config, rese
     assert (other.design_failures, other.design_failure) == (1, "it rejected the brief as steering")
 
 
-def test_ordinary_section_activity_does_not_clear_design_failures(queue: Path, fake_cfg: Config) -> None:
+def test_ordinary_section_activity_does_not_clear_design_failures(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: lead bookkeeping, guidance consumption or ordinary recuts clear the bound.
     state = State.open(queue, fake_cfg)
     state.record_design_failure("s1", "it filed no report")
@@ -385,7 +392,9 @@ def other_queue(tmp_path: Path) -> Path:
 # `state_root/<slug of the queue's absolute path>/`.
 
 
-def test_open_creates_one_directory_directly_under_state_root(queue: Path, fake_cfg: Config) -> None:
+def test_open_creates_one_directory_directly_under_state_root(
+    queue: Path, fake_cfg: Config
+) -> None:
     state = State.open(queue, fake_cfg)
     assert _dir(state).is_dir()
     assert _dir(state).parent == fake_cfg.state_root
@@ -427,7 +436,9 @@ def test_records_of_one_queue_are_not_seen_by_another(
 
 def test_a_section_with_no_record_is_open_with_nothing_set(queue: Path, fake_cfg: Config) -> None:
     section = State.open(queue, fake_cfg).section("s1")
-    assert section == SectionState(status="open", failures=0, question=None, answer=None, last_session=None)
+    assert section == SectionState(
+        status="open", failures=0, question=None, answer=None, last_session=None
+    )
 
 
 def test_mark_done_sets_status_done_and_survives_reopening(queue: Path, fake_cfg: Config) -> None:
@@ -475,7 +486,10 @@ def test_every_answer_is_kept_in_order_after_take_answer(queue: Path, fake_cfg: 
     state.set_answer("s5", "Use port 8080.")
     state.take_answer("s5")
     state.set_answer("s5", "Compress the spec.\nKeep the cap.")
-    assert State.open(queue, fake_cfg).section("s5").answers == ["Use port 8080.", "Compress the spec.\nKeep the cap."]
+    assert State.open(queue, fake_cfg).section("s5").answers == [
+        "Use port 8080.",
+        "Compress the spec.\nKeep the cap.",
+    ]
 
 
 def test_guidance_is_kept_across_reopening_and_taken_once(queue: Path, fake_cfg: Config) -> None:
@@ -502,7 +516,9 @@ def test_last_session_is_kept_per_section_across_reopening(queue: Path, fake_cfg
     assert reopened.section("s3").last_session is None
 
 
-def test_last_session_any_is_none_before_any_session_is_recorded(queue: Path, fake_cfg: Config) -> None:
+def test_last_session_any_is_none_before_any_session_is_recorded(
+    queue: Path, fake_cfg: Config
+) -> None:
     assert State.open(queue, fake_cfg).last_session_any is None
 
 
@@ -616,7 +632,9 @@ def test_lock_raises_locked_error_while_another_holder_has_flock_on_the_lock_fil
             state.lock()
 
 
-def test_lock_holds_flock_on_the_lock_file_against_other_holders(queue: Path, fake_cfg: Config) -> None:
+def test_lock_holds_flock_on_the_lock_file_against_other_holders(
+    queue: Path, fake_cfg: Config
+) -> None:
     state = State.open(queue, fake_cfg)
     state.lock()
     with open(_dir(state) / "lock", "a") as other:
@@ -637,7 +655,9 @@ def test_a_lock_on_one_queue_does_not_block_another_queue(
 # Behavior 5: also sets status back to "open"
 
 
-def test_set_answer_on_a_parked_section_sets_status_back_to_open(queue: Path, fake_cfg: Config) -> None:
+def test_set_answer_on_a_parked_section_sets_status_back_to_open(
+    queue: Path, fake_cfg: Config
+) -> None:
     state = State.open(queue, fake_cfg)
     state.park("s7", "Which port?")
     state.set_answer("s7", "Port 8080.")
@@ -692,7 +712,9 @@ def test_mark_from_recut_is_kept_for_that_section_only(queue: Path, fake_cfg: Co
     assert not state.section("s1").from_recut
 
 
-def test_a_record_saved_before_from_recut_existed_loads_with_it_false(queue: Path, fake_cfg: Config) -> None:
+def test_a_record_saved_before_from_recut_existed_loads_with_it_false(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: a state.json from an older relay, without the key, no longer loads.
     state = State.open(queue, fake_cfg)
     old = '{"sections": {"s1": {"status": "parked", "failures": 1, "question": "q", "answer": null, "last_session": null}}, "last_any": null}'
@@ -730,7 +752,9 @@ def test_a_failure_after_failed_checks_counts_from_zero(queue: Path, fake_cfg: C
 # Behavior 2: +1, sets check_feedback, returns the count
 
 
-def test_record_check_failure_returns_the_count_after_adding_one(queue: Path, fake_cfg: Config) -> None:
+def test_record_check_failure_returns_the_count_after_adding_one(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: the count is not raised by one per call, or the old count is returned.
     state = State.open(queue, fake_cfg)
     assert state.record_check_failure("s2", "first") == 1
@@ -738,7 +762,9 @@ def test_record_check_failure_returns_the_count_after_adding_one(queue: Path, fa
     assert State.open(queue, fake_cfg).record_check_failure("s2", "third") == 3
 
 
-def test_record_check_failure_is_kept_per_section_across_reopening(queue: Path, fake_cfg: Config) -> None:
+def test_record_check_failure_is_kept_per_section_across_reopening(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: the count is not saved, or is shared between sections.
     state = State.open(queue, fake_cfg)
     state.record_check_failure("s2", "exit 1")
@@ -750,11 +776,16 @@ def test_record_check_failure_is_kept_per_section_across_reopening(queue: Path, 
     assert reopened.section("s4").check_failures == 0
 
 
-def test_record_check_failure_sets_check_feedback_to_the_latest_text(queue: Path, fake_cfg: Config) -> None:
+def test_record_check_failure_sets_check_feedback_to_the_latest_text(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: the feedback is not saved, or an older failure's text is kept.
     state = State.open(queue, fake_cfg)
     state.record_check_failure("s2", "make test: exit 1\nFAILED test_a")
-    assert State.open(queue, fake_cfg).section("s2").check_feedback == "make test: exit 1\nFAILED test_a"
+    assert (
+        State.open(queue, fake_cfg).section("s2").check_feedback
+        == "make test: exit 1\nFAILED test_a"
+    )
     state.record_check_failure("s2", "make test: exit 2\nFAILED test_b")
     reopened = State.open(queue, fake_cfg)
     assert reopened.section("s2").check_feedback == "make test: exit 2\nFAILED test_b"
@@ -829,7 +860,9 @@ def test_research_flag_is_research_sid_inside_the_run_dir(queue: Path, fake_cfg:
     assert state.research_flag("s1") != state.retire_flag
 
 
-def test_set_research_session_is_kept_per_section_across_reopening(queue: Path, fake_cfg: Config) -> None:
+def test_set_research_session_is_kept_per_section_across_reopening(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: the session is not saved, or is shared between sections.
     state = State.open(queue, fake_cfg)
     state.set_research_session("s1", "research-a")
@@ -859,7 +892,9 @@ def test_set_research_session_leaves_the_leads_session_alone(queue: Path, fake_c
     assert reopened.last_session_any == "lead-a"
 
 
-def test_drop_map_clears_the_research_session_and_deletes_the_map(queue: Path, fake_cfg: Config) -> None:
+def test_drop_map_clears_the_research_session_and_deletes_the_map(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: `drop_map` leaves either the session or the map file behind.
     state = State.open(queue, fake_cfg)
     state.set_research_session("s1", "research-a")
@@ -992,7 +1027,9 @@ def test_research_lock_of_one_section_does_not_block_another_or_the_go_lock(
 # Behavior 2: `mark_done` also calls the work of `drop_map`.
 
 
-def test_mark_done_clears_the_research_session_and_deletes_the_map(queue: Path, fake_cfg: Config) -> None:
+def test_mark_done_clears_the_research_session_and_deletes_the_map(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: `mark_done` leaves the researcher's session or the map file behind.
     state = State.open(queue, fake_cfg)
     state.set_research_session("s1", "research-a")
@@ -1016,7 +1053,9 @@ def test_mark_done_leaves_other_sections_maps_and_sessions(queue: Path, fake_cfg
     assert State.open(queue, fake_cfg).section("s2").research_session == "research-b"
 
 
-def test_mark_done_with_a_session_and_no_map_file_clears_the_session(queue: Path, fake_cfg: Config) -> None:
+def test_mark_done_with_a_session_and_no_map_file_clears_the_session(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: `mark_done` raises on an absent map, or keeps the session when there is no map.
     state = State.open(queue, fake_cfg)
     state.set_research_session("s1", "research-a")
@@ -1091,7 +1130,9 @@ def test_set_design_open_none_clears_it(queue: Path, fake_cfg: Config) -> None:
 # Behavior 4: wait: status "waiting", waits_on blocker; no question.
 
 
-def test_wait_sets_status_waiting_and_the_blocker_across_reopening(queue: Path, fake_cfg: Config) -> None:
+def test_wait_sets_status_waiting_and_the_blocker_across_reopening(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: wait does not set "waiting", does not save the blocker, or touches another section.
     State.open(queue, fake_cfg).wait("s3", "s2")
     state = State.open(queue, fake_cfg)
@@ -1110,7 +1151,9 @@ def test_wait_sets_no_question(queue: Path, fake_cfg: Config) -> None:
 # Behavior 5: wake: status "open", waits_on None.
 
 
-def test_wake_reopens_a_waiting_section_and_clears_its_blocker(queue: Path, fake_cfg: Config) -> None:
+def test_wake_reopens_a_waiting_section_and_clears_its_blocker(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: wake leaves the section waiting or keeps waits_on.
     state = State.open(queue, fake_cfg)
     state.wait("s3", "s2")
@@ -1166,6 +1209,8 @@ def test_mark_done_clears_waits_on(queue: Path, fake_cfg: Config) -> None:
     section = State.open(queue, fake_cfg).section("s3")
     assert section.status == "done"
     assert section.waits_on is None
+
+
 # Order 17, behavior 1: It holds ... the last session id and the last lead's final report per
 # section (design: Modules, `relay/state.py`).
 # Order 17, behavior 2: last_report: str | None = None  # RunResult.stream.result_text of the
@@ -1189,7 +1234,9 @@ def test_a_section_with_no_record_has_no_last_report(queue: Path, fake_cfg: Conf
     assert getattr(section, "last_report", "missing") is None
 
 
-def test_last_report_is_kept_per_section_verbatim_across_reopening(queue: Path, fake_cfg: Config) -> None:
+def test_last_report_is_kept_per_section_verbatim_across_reopening(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: the report is not saved, is altered, or is kept for the queue rather than per section.
     state = State.open(queue, fake_cfg)
     _set_last_report(state, "s1", REPORT_A)
@@ -1208,7 +1255,9 @@ def test_a_later_report_replaces_the_earlier_one(queue: Path, fake_cfg: Config) 
     assert getattr(State.open(queue, fake_cfg).section("s1"), "last_report", None) == REPORT_B
 
 
-def test_set_last_report_none_clears_it_for_that_section_only(queue: Path, fake_cfg: Config) -> None:
+def test_set_last_report_none_clears_it_for_that_section_only(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: None is ignored, stored as a string, or clears another section's report too.
     state = State.open(queue, fake_cfg)
     _set_last_report(state, "s1", REPORT_A)
@@ -1219,7 +1268,9 @@ def test_set_last_report_none_clears_it_for_that_section_only(queue: Path, fake_
     assert getattr(reopened.section("s2"), "last_report", None) == REPORT_B
 
 
-def test_the_last_report_and_the_last_session_are_kept_side_by_side(queue: Path, fake_cfg: Config) -> None:
+def test_the_last_report_and_the_last_session_are_kept_side_by_side(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: setting one of the two overwrites or clears the other.
     state = State.open(queue, fake_cfg)
     state.set_last_session("s1", "session-a")
@@ -1230,7 +1281,9 @@ def test_the_last_report_and_the_last_session_are_kept_side_by_side(queue: Path,
     assert getattr(section, "last_report", None) == REPORT_A
 
 
-def test_a_record_saved_before_last_report_existed_loads_with_it_none(queue: Path, fake_cfg: Config) -> None:
+def test_a_record_saved_before_last_report_existed_loads_with_it_none(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: a state.json from an older relay, without the key, no longer loads or loads a report.
     state = State.open(queue, fake_cfg)
     old = '{"sections": {"s1": {"status": "open", "failures": 1, "question": null, "answer": null, "last_session": "session-a"}}, "last_any": "session-a"}'
@@ -1324,11 +1377,13 @@ def test_binding_replaces_branch_and_path_in_one_atomic_publication(
     for publication in publications:
         published = publication["sections"]["s1"]
         assert (published["worktree_branch"], published["worktree_path"]) == (
-            "lead/new", str((tmp_path / "new").resolve())
+            "lead/new",
+            str((tmp_path / "new").resolve()),
         )
     reopened = State.open(queue, fake_cfg).section("s1")
     assert (reopened.worktree_branch, reopened.worktree_path) == (
-        "lead/new", str((tmp_path / "new").resolve())
+        "lead/new",
+        str((tmp_path / "new").resolve()),
     )
 
 
@@ -1343,13 +1398,15 @@ def test_reports_without_branch_and_completion_keep_the_saved_binding(
     state.set_last_report("s1", report)
     after_report = State.open(queue, fake_cfg).section("s1")
     assert (after_report.worktree_branch, after_report.worktree_path) == (
-        "custom-existing-branch", str(tree.resolve())
+        "custom-existing-branch",
+        str(tree.resolve()),
     )
     state.mark_done("s1")
     completed = State.open(queue, fake_cfg).section("s1")
     assert completed.status == "done"
     assert (completed.worktree_branch, completed.worktree_path) == (
-        "custom-existing-branch", str(tree.resolve())
+        "custom-existing-branch",
+        str(tree.resolve()),
     )
 
 
@@ -1368,10 +1425,14 @@ def test_legacy_record_defaults_bindings_and_can_gain_one_without_losing_its_sta
     state.bind_worktree("s1", "lead/s1", tmp_path / "legacy")
     migrated = State.open(queue, fake_cfg).section("s1")
     assert (migrated.status, migrated.failures, migrated.question, migrated.last_session) == (
-        "parked", 2, "old question", "legacy-lead"
+        "parked",
+        2,
+        "old question",
+        "legacy-lead",
     )
     assert (migrated.worktree_branch, migrated.worktree_path) == (
-        "lead/s1", str((tmp_path / "legacy").resolve())
+        "lead/s1",
+        str((tmp_path / "legacy").resolve()),
     )
 
 
@@ -1379,11 +1440,21 @@ def test_legacy_record_defaults_bindings_and_can_gain_one_without_losing_its_sta
 # (extended); Order 1).
 
 
-def test_run_logs_are_the_numbered_jsonl_files_ascending_by_number(queue: Path, fake_cfg: Config) -> None:
+def test_run_logs_are_the_numbered_jsonl_files_ascending_by_number(
+    queue: Path, fake_cfg: Config
+) -> None:
     # Breaks when: run logs sort by name (10 before 9), or take in files that are not numbered logs.
     state = State.open(queue, fake_cfg)
     state.run_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("10.jsonl", "9.jsonl", "2.jsonl", "check-2.jsonl", "notes.jsonl", "retire", "3.txt"):
+    for name in (
+        "10.jsonl",
+        "9.jsonl",
+        "2.jsonl",
+        "check-2.jsonl",
+        "notes.jsonl",
+        "retire",
+        "3.txt",
+    ):
         (state.run_dir / name).write_text("")
     expected = [state.run_dir / name for name in ("2.jsonl", "9.jsonl", "10.jsonl")]
     assert state.run_logs() == expected

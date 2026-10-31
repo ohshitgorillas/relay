@@ -60,5 +60,7 @@ def read(state: State, ledger: Ledger) -> History:
 def activity_by_section(history: History) -> dict[str, agents.Activity]:
     found: dict[str, agents.Activity] = {}
     for run in history.runs:
-        found[run.section] = agents.merge(found.get(run.section, agents.Activity()), run.stream.activity)
+        found[run.section] = agents.merge(
+            found.get(run.section, agents.Activity()), run.stream.activity
+        )
     return found

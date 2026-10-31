@@ -55,9 +55,7 @@ ANSWER_TEXT = (
 
 # Its block's lines from `ANSWER` to `END ANSWER`, both included, with no newline after.
 ANSWER_BLOCK = (
-    "ANSWER\n"
-    "relay/git.py:12 | head runs git rev-parse HEAD in the section worktree\n"
-    "END ANSWER"
+    "ANSWER\nrelay/git.py:12 | head runs git rev-parse HEAD in the section worktree\nEND ANSWER"
 )
 
 # The answer's result text cut off right after `END ANSWER`.
@@ -134,9 +132,7 @@ def test_parse_map_none_on_an_entry_without_what_it_does(fake_cfg: Config) -> No
 
 def test_parse_map_none_on_a_bad_line_among_links(fake_cfg: Config) -> None:
     # Breaks when only the entry lines are checked and a malformed line after `LINKS` passes.
-    text = _with_line_after(
-        MAP_TEXT, "LINKS", "relay/loop.py:101 calls relay/git.py:12"
-    )
+    text = _with_line_after(MAP_TEXT, "LINKS", "relay/loop.py:101 calls relay/git.py:12")
     assert parse_map(SID, COMMIT, text, fake_cfg) is None
 
 
@@ -165,9 +161,7 @@ def test_parse_map_judges_the_last_block(fake_cfg: Config) -> None:
 def test_parse_map_takes_a_good_last_block_after_a_bad_one(fake_cfg: Config) -> None:
     # Breaks when parse_map rejects the text because an earlier block is malformed, or reads
     # lines from the first `MAP` to the last `END MAP`.
-    bad = (
-        "MAP\nrelay/state.py:1 | the state directory\nRead this file first.\nEND MAP\n"
-    )
+    bad = "MAP\nrelay/state.py:1 | the state directory\nRead this file first.\nEND MAP\n"
     m = parse_map(SID, COMMIT, bad + "\n" + MAP_TEXT, fake_cfg)
     assert m is not None
     assert m.files == ("relay/git.py", "relay/loop.py", "relay/research.py")
@@ -309,9 +303,7 @@ def _fixture_map(cfg: Config, sid: str = SID, commit: str = COMMIT) -> Map:
 # os.replace, making the parent directory.
 
 
-def test_save_writes_the_header_line_then_the_body(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_save_writes_the_header_line_then_the_body(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when save drops or rewords the `map <sid> at <commit>` line, or alters the body.
     m = _fixture_map(fake_cfg)
     path = tmp_path / "s1.map"
@@ -344,9 +336,7 @@ def test_save_moves_a_temp_file_into_place_with_os_replace(
     def spy(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
         # At the rename, the map's name still holds the old map whole and the temp file
         # already holds the new one whole.
-        seen.append(
-            (Path(src), Path(dst), Path(dst).read_text(), Path(src).read_text())
-        )
+        seen.append((Path(src), Path(dst), Path(dst).read_text(), Path(src).read_text()))
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", spy)
@@ -399,9 +389,7 @@ def test_load_none_when_the_file_is_missing(tmp_path: Path) -> None:
     assert load(tmp_path / "maps" / "s1.map", SID) is None
 
 
-def test_load_none_when_the_file_is_unreadable(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_load_none_when_the_file_is_unreadable(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when an unreadable map file raises instead of giving None.
     path = tmp_path / "s1.map"
     save(_fixture_map(fake_cfg), path)
@@ -419,9 +407,7 @@ def test_load_none_when_the_path_is_a_directory(tmp_path: Path) -> None:
     assert load(path, SID) is None
 
 
-def test_load_none_when_the_file_names_another_section(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_load_none_when_the_file_names_another_section(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when load ignores the section its header names.
     path = tmp_path / "s1.map"
     save(_fixture_map(fake_cfg), path)
@@ -435,9 +421,7 @@ def test_load_none_on_an_empty_file(tmp_path: Path) -> None:
     assert load(path, SID) is None
 
 
-def test_load_none_when_the_body_no_longer_parses(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_load_none_when_the_body_no_longer_parses(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when load trusts the saved body instead of parsing it again.
     path = tmp_path / "s1.map"
     save(_fixture_map(fake_cfg), path)
@@ -481,9 +465,7 @@ def test_digest_hashes_file_bytes_without_decoding(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory", "unreadable"])
-def test_digest_unknown_when_a_path_is_not_a_readable_file(
-    tmp_path: Path, kind: str
-) -> None:
+def test_digest_unknown_when_a_path_is_not_a_readable_file(tmp_path: Path, kind: str) -> None:
     # Breaks when a missing, non-regular, or unreadable path raises or gains a reusable digest.
     assert UNKNOWN == "-"
     path = tmp_path / "source"
@@ -499,9 +481,7 @@ def test_digest_unknown_when_a_path_is_not_a_readable_file(
             path.chmod(0o600)
 
 
-def test_stamp_aligns_digests_with_every_mapped_path(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_stamp_aligns_digests_with_every_mapped_path(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when stamping misses link-only files, misorders digests, or changes map text.
     m = _fixture_map(fake_cfg)
     hashes = _materialize_map(m, tmp_path)
@@ -603,12 +583,8 @@ def test_save_and_load_preserve_per_file_digests(fake_cfg: Config, tmp_path: Pat
     assert load(path, SID) == stamped
 
 
-@pytest.mark.parametrize(
-    "bad", ["malformed", "missing", "extra", "duplicate", "invalid-digest"]
-)
-def test_load_rejects_invalid_digest_metadata(
-    fake_cfg: Config, tmp_path: Path, bad: str
-) -> None:
+@pytest.mark.parametrize("bad", ["malformed", "missing", "extra", "duplicate", "invalid-digest"])
+def test_load_rejects_invalid_digest_metadata(fake_cfg: Config, tmp_path: Path, bad: str) -> None:
     # Breaks when partial, duplicate, malformed, or mismatched metadata can certify a saved map.
     m = _fixture_map(fake_cfg)
     records = [f"file {'a' * 64} {name}" for name in m.files]
@@ -700,11 +676,7 @@ def test_parse_refresh_accepts_no_entry_when_kept_entries_remain(
     assert merged is not None
     assert merged.body.splitlines() == [
         *MAP_LINES[:-1],
-        *(
-            ["new.py:1 -> relay/git.py:12 | dependency"]
-            if "LINKS" in refresh.splitlines()
-            else []
-        ),
+        *(["new.py:1 -> relay/git.py:12 | dependency"] if "LINKS" in refresh.splitlines() else []),
         "END MAP",
     ]
     for entry in MAP_LINES[1:4]:
@@ -731,9 +703,7 @@ def test_parse_refresh_rejects_absent_malformed_or_conflicting_blocks(
 ) -> None:
     # Breaks when a failed partial response or an attempt to overwrite kept entries is merged.
     assert (
-        parse_refresh(
-            _fixture_map(fake_cfg), "new", frozenset({"changed.py"}), refresh, fake_cfg
-        )
+        parse_refresh(_fixture_map(fake_cfg), "new", frozenset({"changed.py"}), refresh, fake_cfg)
         is None
     )
 
@@ -742,9 +712,7 @@ def test_parse_refresh_uses_the_last_complete_block(fake_cfg: Config) -> None:
     # Breaks when a valid earlier refresh masks the final malformed block.
     text = "MAP\nnew.py:1 | first\nEND MAP\nMAP\ninvalid final\nEND MAP"
     assert (
-        parse_refresh(
-            _fixture_map(fake_cfg), "new", frozenset({"changed.py"}), text, fake_cfg
-        )
+        parse_refresh(_fixture_map(fake_cfg), "new", frozenset({"changed.py"}), text, fake_cfg)
         is None
     )
 
@@ -793,9 +761,7 @@ def test_block_names_the_section_and_commit_of_its_map(fake_cfg: Config) -> None
     assert f"map s7 at {'2' * 40}" in block(m).splitlines()
 
 
-def test_save_places_queue_provenance_before_file_records(
-    fake_cfg: Config, tmp_path: Path
-) -> None:
+def test_save_places_queue_provenance_before_file_records(fake_cfg: Config, tmp_path: Path) -> None:
     # Breaks when storage drops provenance or places it among file records or map text.
     original = _fixture_map(fake_cfg)
     hashes = _materialize_map(original, tmp_path)

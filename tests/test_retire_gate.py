@@ -10,11 +10,16 @@ import pytest
 from relay.retire_gate import REFUSAL, main
 
 # A PreToolUse event as the Claude CLI hands it to a hook on stdin.
-_EVENT = json.dumps({
-    "hook_event_name": "PreToolUse",
-    "tool_name": "Agent",
-    "tool_input": {"subagent_type": "builder", "prompt": "Build step 3."},
-}) + "\n"
+_EVENT = (
+    json.dumps(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Agent",
+            "tool_input": {"subagent_type": "builder", "prompt": "Build step 3."},
+        }
+    )
+    + "\n"
+)
 
 
 def _stdin(monkeypatch: pytest.MonkeyPatch) -> io.TextIOWrapper:
@@ -24,7 +29,9 @@ def _stdin(monkeypatch: pytest.MonkeyPatch) -> io.TextIOWrapper:
 
 
 def test_raised_flag_refuses_the_dispatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when an Agent call goes through after the retire flag is up, the refusal
     # is not on stderr where the CLI shows a blocking hook's reason, or it stops telling
@@ -42,7 +49,9 @@ def test_raised_flag_refuses_the_dispatch(
 
 
 def test_absent_flag_lets_the_dispatch_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when a lead whose retire flag is down is refused a dispatch, or the gate
     # looks at some file other than argv[0].
@@ -56,7 +65,9 @@ def test_absent_flag_lets_the_dispatch_through(
 
 @pytest.mark.parametrize("raised", [True, False], ids=["raised", "absent"])
 def test_hook_stdin_is_read_whole_and_discarded(
-    raised: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    raised: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when the gate leaves the hook's stdin unread, or echoes any of it back.

@@ -3,7 +3,9 @@
 import sys
 from pathlib import Path
 
-REFUSAL = "Relay's retire flag is up: dispatch nothing new, wait for running agents, end with RETIRED."
+REFUSAL = (
+    "Relay's retire flag is up: dispatch nothing new, wait for running agents, end with RETIRED."
+)
 
 
 def main(argv: list[str]) -> int:

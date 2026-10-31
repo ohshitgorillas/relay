@@ -140,9 +140,7 @@ def blocked_by(sections: list[Section], parked: set[str]) -> set[str]:
     while changed:
         changed = False
         for s in sections:
-            if s.id not in blocked and any(
-                d in parked or d in blocked for d in s.depends_on
-            ):
+            if s.id not in blocked and any(d in parked or d in blocked for d in s.depends_on):
                 blocked.add(s.id)
                 changed = True
     return blocked

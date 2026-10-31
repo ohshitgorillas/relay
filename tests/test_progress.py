@@ -41,13 +41,18 @@ def _completed_report_agents() -> tuple[Agent, ...]:
 
 @pytest.mark.parametrize("outcome", ["done", "failed", "killed", "no-status"])
 def test_completed_lead_lists_the_entire_final_inventory_on_every_outcome(
-    outcome: str, capsys: pytest.CaptureFixture[str],
+    outcome: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: a terminal lead omits inventory, reconstructs it from empty events,
     # truncates it to a costly member, or drops failed, missing or descendant rows.
     result = _result(exit_code=3 if outcome == "failed" else 0, killed=outcome == "killed")
-    activity = dataclasses.replace(result.stream.activity, agents=_completed_report_agents(), events=())
-    result = dataclasses.replace(result, stream=dataclasses.replace(result.stream, activity=activity))
+    activity = dataclasses.replace(
+        result.stream.activity, agents=_completed_report_agents(), events=()
+    )
+    result = dataclasses.replace(
+        result, stream=dataclasses.replace(result.stream, activity=activity)
+    )
     status = None if outcome == "no-status" else LeadStatus(kind="DONE", text="")
     progress.lead_finished("report-section", result, status)
     lines = _out(capsys).splitlines()
@@ -68,7 +73,9 @@ def test_completed_lead_lists_the_entire_final_inventory_on_every_outcome(
             amount = re.search(r"\$([0-9.eE+-]+)", row)
             assert amount is not None
             assert float(amount.group(1)) == pytest.approx(agent.cost_dollars)
-            assert ("reported" if agent.cost_basis == "reported" else "API-equivalent estimate") in row
+            assert (
+                "reported" if agent.cost_basis == "reported" else "API-equivalent estimate"
+            ) in row
             if agent.cost_basis == "api-estimate":
                 assert "not subscription billing" in row
 
@@ -89,7 +96,8 @@ def test_final_agent_formatter_preserves_small_positive_charge_and_observed_sett
     formatter = getattr(progress, "agent_finished_text", None)
     assert callable(formatter), "the shared final-agent formatter is required"
     agent = dataclasses.replace(
-        _completed_report_agents()[1], cost_dollars=0.000000001,
+        _completed_report_agents()[1],
+        cost_dollars=0.000000001,
         models=("gpt-6.1-terra", "gpt-6.1-sol", "unavailable"),
         efforts=("medium", "high", "unavailable"),
     )
@@ -100,6 +108,7 @@ def test_final_agent_formatter_preserves_small_positive_charge_and_observed_sett
     assert amount is not None
     assert float(amount.group(1)) == pytest.approx(0.000000001, abs=1e-15)
     assert "API-equivalent estimate" in row and "not subscription billing" in row
+
 
 PREFIX = re.compile(r"^(\d{2}):(\d{2}):(\d{2}) ")
 
@@ -138,7 +147,9 @@ def _check(**changes: object) -> CheckResult:
 
 
 def _agent(**changes: object) -> Agent:
-    agent = Agent("a1", "builder", "Build s2.d1 stub", context=21844, duration_ms=36943, status="completed")
+    agent = Agent(
+        "a1", "builder", "Build s2.d1 stub", context=21844, duration_ms=36943, status="completed"
+    )
     return dataclasses.replace(agent, **changes)
 
 
@@ -204,9 +215,7 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
         ("lead_started", lambda: progress.lead_started("s1", "sess-9", True)),
         (
             "lead_finished",
-            lambda: progress.lead_finished(
-                "s1", _result(), LeadStatus(kind="DONE", text="")
-            ),
+            lambda: progress.lead_finished("s1", _result(), LeadStatus(kind="DONE", text="")),
         ),
         ("retiring", lambda: progress.retiring("s1", "context", 100_000)),
         ("killing", lambda: progress.killing("s1", 200_000)),
@@ -234,7 +243,10 @@ def _calls(queue: Path, cfg: Config) -> list[tuple[str, Callable[[], None]]]:
             "design_started",
             lambda: progress.design_started("s1", DESIGN, ("6", "7"), "the design lacks a cap"),
         ),
-        ("design_finished", lambda: progress.design_finished("s1", _result(), _report(approved=True))),
+        (
+            "design_finished",
+            lambda: progress.design_finished("s1", _result(), _report(approved=True)),
+        ),
         ("section_waiting", lambda: progress.section_waiting("s1", "s2")),
         ("woken", lambda: progress.woken("s1", "s2")),
         ("design_retrying", lambda: progress.design_retrying("s1", "it filed no report")),
@@ -272,18 +284,14 @@ NAMES = [
 ]
 
 
-def _call(
-    name: str, queue_file: Callable[[str], Path], cfg: Config
-) -> Callable[[], None]:
+def _call(name: str, queue_file: Callable[[str], Path], cfg: Config) -> Callable[[], None]:
     return dict(_calls(queue_file("workboard-queue.md"), cfg))[name]
 
 
 class _Stdout:
     """A stand-in for `sys.stdout` that records each write and flush in order."""
 
-    def __init__(
-        self, fail: BaseException | None = None, fail_on: str = "write"
-    ) -> None:
+    def __init__(self, fail: BaseException | None = None, fail_on: str = "write") -> None:
         self.events: list[tuple[str, str]] = []
         self.fail = fail
         self.fail_on = fail_on
@@ -403,9 +411,7 @@ def test_a_multi_line_question_still_writes_one_line(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: needs_answer writes the question's later lines as more terminal lines.
-    progress.needs_answer(
-        "s4", "Which name?\nThe CLI ships under it.\nAnswer by Friday."
-    )
+    progress.needs_answer("s4", "Which name?\nThe CLI ships under it.\nAnswer by Friday.")
     out = _out(capsys)
     assert out.count("\n") == 1
 
@@ -633,9 +639,7 @@ def test_lead_started_resuming_with_the_owners_answer(
 ) -> None:
     # Breaks when: an answered resume omits ", with the owner's answer" or puts it before the session.
     progress.lead_started("s1.2", "sess-77", True)
-    assert (
-        _line(capsys) == "lead s1.2: started, resuming sess-77, with the owner's answer"
-    )
+    assert _line(capsys) == "lead s1.2: started, resuming sess-77, with the owner's answer"
 
 
 # Behavior 8: def lead_finished(sid: str, result: RunResult, status: LeadStatus | None) -> None: ...
@@ -651,7 +655,10 @@ def test_lead_finished_done(capsys: pytest.CaptureFixture[str]) -> None:
     progress.lead_finished(
         "s2", _result(tokens=4321, dollars=1.5), LeadStatus(kind="DONE", text="")
     )
-    assert _line(capsys) == "lead s2: finished DONE (peak context 0, 4321 tokens summed over turns, $1.50)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished DONE (peak context 0, 4321 tokens summed over turns, $1.50)"
+    )
 
 
 def test_lead_finished_retired(capsys: pytest.CaptureFixture[str]) -> None:
@@ -659,7 +666,10 @@ def test_lead_finished_retired(capsys: pytest.CaptureFixture[str]) -> None:
     progress.lead_finished(
         "s2", _result(tokens=10, dollars=0.1234), LeadStatus(kind="RETIRED", text="")
     )
-    assert _line(capsys) == "lead s2: finished RETIRED (peak context 0, 10 tokens summed over turns, $0.12)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished RETIRED (peak context 0, 10 tokens summed over turns, $0.12)"
+    )
 
 
 def test_lead_finished_needs_owner_shows_only_the_kind(
@@ -668,7 +678,10 @@ def test_lead_finished_needs_owner_shows_only_the_kind(
     # Breaks when: the NEEDS-OWNER question is appended, which only RECUT's reason is.
     status = LeadStatus(kind="NEEDS-OWNER", text="Which name?")
     progress.lead_finished("s2", _result(tokens=7, dollars=2.0), status)
-    assert _line(capsys) == "lead s2: finished NEEDS-OWNER (peak context 0, 7 tokens summed over turns, $2.00)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished NEEDS-OWNER (peak context 0, 7 tokens summed over turns, $2.00)"
+    )
 
 
 def test_lead_finished_recut_shows_its_reason(
@@ -686,7 +699,10 @@ def test_lead_finished_recut_shows_its_reason(
 def test_lead_finished_with_no_status_line(capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: a clean exit with no status line is not worded "with no status line".
     progress.lead_finished("s2", _result(exit_code=0, tokens=5, dollars=0.0), None)
-    assert _line(capsys) == "lead s2: finished with no status line (peak context 0, 5 tokens summed over turns, $0.00)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished with no status line (peak context 0, 5 tokens summed over turns, $0.00)"
+    )
 
 
 def test_lead_finished_non_zero_exit_beats_status(
@@ -698,7 +714,10 @@ def test_lead_finished_non_zero_exit_beats_status(
         _result(exit_code=3, tokens=5, dollars=0.5),
         LeadStatus(kind="DONE", text=""),
     )
-    assert _line(capsys) == "lead s2: finished exit 3 (peak context 0, 5 tokens summed over turns, $0.50)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished exit 3 (peak context 0, 5 tokens summed over turns, $0.50)"
+    )
 
 
 def test_lead_finished_non_zero_exit_with_no_status(
@@ -706,7 +725,10 @@ def test_lead_finished_non_zero_exit_with_no_status(
 ) -> None:
     # Breaks when: "with no status line" is checked ahead of a non-zero exit.
     progress.lead_finished("s2", _result(exit_code=1, tokens=5, dollars=0.5), None)
-    assert _line(capsys) == "lead s2: finished exit 1 (peak context 0, 5 tokens summed over turns, $0.50)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished exit 1 (peak context 0, 5 tokens summed over turns, $0.50)"
+    )
 
 
 def test_lead_finished_killed_beats_everything(
@@ -715,17 +737,21 @@ def test_lead_finished_killed_beats_everything(
     # Breaks when: a killed lead is reported by its exit code or status instead of "killed".
     result = _result(exit_code=None, killed=True, tokens=250000, dollars=3.75)
     progress.lead_finished("s2", result, LeadStatus(kind="DONE", text=""))
-    assert _line(capsys) == "lead s2: finished killed (peak context 0, 250000 tokens summed over turns, $3.75)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished killed (peak context 0, 250000 tokens summed over turns, $3.75)"
+    )
 
 
 def test_lead_finished_killed_with_no_status(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: a killed lead with no status reads "exit None" or "with no status line".
-    progress.lead_finished(
-        "s2", _result(exit_code=None, killed=True, tokens=1, dollars=0.0), None
+    progress.lead_finished("s2", _result(exit_code=None, killed=True, tokens=1, dollars=0.0), None)
+    assert (
+        _line(capsys)
+        == "lead s2: finished killed (peak context 0, 1 tokens summed over turns, $0.00)"
     )
-    assert _line(capsys) == "lead s2: finished killed (peak context 0, 1 tokens summed over turns, $0.00)"
 
 
 # Behavior 9: def retiring(sid: str, why: Literal["context", "budget"], tokens: int) -> None: ...
@@ -751,10 +777,7 @@ def test_retiring_for_budget(capsys: pytest.CaptureFixture[str]) -> None:
 def test_killing(capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: the kill line omits the context token count or the hard ceiling.
     progress.killing("s3", 200001)
-    assert (
-        _line(capsys)
-        == "lead s3: killed at 200001 context tokens, past the hard ceiling"
-    )
+    assert _line(capsys) == "lead s3: killed at 200001 context tokens, past the hard ceiling"
 
 
 # Behavior 11: def recut_started(sid: str, reason: str) -> None: ...
@@ -780,7 +803,8 @@ def test_recut_finished_with_the_queue_recut(
     # Breaks when: a clean recut that changed the queue is misworded, or its spend is not shown to 2 places.
     progress.recut_finished("s5", _result(tokens=3456, dollars=0.7), True)
     assert (
-        _line(capsys) == "recut s5: finished with the queue recut (peak context 0, 3456 tokens summed over turns, $0.70)"
+        _line(capsys)
+        == "recut s5: finished with the queue recut (peak context 0, 3456 tokens summed over turns, $0.70)"
     )
 
 
@@ -800,7 +824,10 @@ def test_recut_finished_non_zero_exit_beats_changed(
 ) -> None:
     # Breaks when: a recut that exited non-zero is reported by whether the queue changed.
     progress.recut_finished("s5", _result(exit_code=2, tokens=8, dollars=1.0), True)
-    assert _line(capsys) == "recut s5: finished exit 2 (peak context 0, 8 tokens summed over turns, $1.00)"
+    assert (
+        _line(capsys)
+        == "recut s5: finished exit 2 (peak context 0, 8 tokens summed over turns, $1.00)"
+    )
 
 
 def test_recut_finished_non_zero_exit_with_queue_unchanged(
@@ -808,7 +835,10 @@ def test_recut_finished_non_zero_exit_with_queue_unchanged(
 ) -> None:
     # Breaks when: "with the queue unchanged" is checked ahead of a non-zero exit.
     progress.recut_finished("s5", _result(exit_code=1, tokens=8, dollars=1.0), False)
-    assert _line(capsys) == "recut s5: finished exit 1 (peak context 0, 8 tokens summed over turns, $1.00)"
+    assert (
+        _line(capsys)
+        == "recut s5: finished exit 1 (peak context 0, 8 tokens summed over turns, $1.00)"
+    )
 
 
 def test_recut_finished_killed_beats_everything(
@@ -817,7 +847,10 @@ def test_recut_finished_killed_beats_everything(
     # Breaks when: a killed recut is reported by its exit code or the queue's state instead of "killed".
     result = _result(exit_code=None, killed=True, tokens=210000, dollars=4.5)
     progress.recut_finished("s5", result, True)
-    assert _line(capsys) == "recut s5: finished killed (peak context 0, 210000 tokens summed over turns, $4.50)"
+    assert (
+        _line(capsys)
+        == "recut s5: finished killed (peak context 0, 210000 tokens summed over turns, $4.50)"
+    )
 
 
 def test_recut_finished_killed_with_queue_unchanged(
@@ -826,7 +859,10 @@ def test_recut_finished_killed_with_queue_unchanged(
     # Breaks when: a killed recut that left the queue alone reads "exit None" or "with the queue unchanged".
     result = _result(exit_code=None, killed=True, tokens=1, dollars=0.0)
     progress.recut_finished("s5", result, False)
-    assert _line(capsys) == "recut s5: finished killed (peak context 0, 1 tokens summed over turns, $0.00)"
+    assert (
+        _line(capsys)
+        == "recut s5: finished killed (peak context 0, 1 tokens summed over turns, $0.00)"
+    )
 
 
 @pytest.mark.parametrize("changed", [True, False], ids=["recut", "unchanged"])
@@ -838,7 +874,10 @@ def test_recut_finished_killed_whatever_its_exit_code(
     # killed recut that came back with a code reads "exit <code>" or a queue outcome.
     result = _result(exit_code=exit_code, killed=True, tokens=42, dollars=0.5)
     progress.recut_finished("s5", result, changed)
-    assert _line(capsys) == "recut s5: finished killed (peak context 0, 42 tokens summed over turns, $0.50)"
+    assert (
+        _line(capsys)
+        == "recut s5: finished killed (peak context 0, 42 tokens summed over turns, $0.50)"
+    )
 
 
 # Behavior 13: def needs_answer(sid: str, question: str) -> None: ...
@@ -858,9 +897,7 @@ def test_needs_answer_names_the_section_and_question(
 
 
 @pytest.mark.parametrize("failures", [1, 2])
-def test_failed_shows_the_count_of_two(
-    failures: int, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_failed_shows_the_count_of_two(failures: int, capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: the failure count is missing, fixed, or not shown "of 2".
     progress.failed("s7", failures)
     assert _line(capsys) == f"section s7: failed ({failures} of 2)"
@@ -910,8 +947,7 @@ def test_ended_with_code_zero(
     progress.ended(queue, 0, "done", "every section closed")
     line = _line(capsys)
     assert line in tuple(
-        f"relay go {q}: ended done: every section closed (exit 0)"
-        for q in _queues(queue)
+        f"relay go {q}: ended done: every section closed (exit 0)" for q in _queues(queue)
     )
 
 
@@ -1027,7 +1063,9 @@ def test_research_started_names_the_section_and_cwd(capsys: pytest.CaptureFixtur
     assert _line(capsys) == "research s4.2: mapping in /work/relay-wt/s4.2"
 
 
-@pytest.mark.parametrize("changed", [frozenset({"relay/a.py"}), frozenset({"relay/a.py", "relay/b.py"})])
+@pytest.mark.parametrize(
+    "changed", [frozenset({"relay/a.py"}), frozenset({"relay/a.py", "relay/b.py"})]
+)
 def test_research_refreshing_counts_changed_and_kept_files(
     changed: frozenset[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1057,7 +1095,10 @@ def test_research_finished_counts_the_maps_own_files(
     # Breaks when: the file count is fixed or counted from the body's lines rather than m.files.
     m = dataclasses.replace(_map("s4"), files=("relay/git.py",))
     progress.research_finished("s4", _result(tokens=1, dollars=0.0), m)
-    assert _line(capsys) == f"research s4: map of 7 lines, 1 files at {MAP_COMMIT} (peak context 0, 1 tokens summed over turns, $0.00)"
+    assert (
+        _line(capsys)
+        == f"research s4: map of 7 lines, 1 files at {MAP_COMMIT} (peak context 0, 1 tokens summed over turns, $0.00)"
+    )
 
 
 def test_research_finished_without_a_map_says_the_lead_starts_without_one(
@@ -1167,7 +1208,10 @@ def test_lead_finished_waiting_shows_the_section_it_waits_on(
     # Breaks when: a WAITING outcome drops ": <section id>".
     status = LeadStatus(kind="WAITING", text="s1.2")
     progress.lead_finished("s2", _result(tokens=7, dollars=2.0), status)
-    assert _line(capsys) == "lead s2: finished WAITING: s1.2 (peak context 0, 7 tokens summed over turns, $2.00)"
+    assert (
+        _line(capsys)
+        == "lead s2: finished WAITING: s1.2 (peak context 0, 7 tokens summed over turns, $2.00)"
+    )
 
 
 @pytest.mark.parametrize("kind", ["DESIGN", "WAITING"])
@@ -1266,7 +1310,10 @@ def test_design_started_cuts_a_long_problem_to_120_characters(
 def test_design_finished_approved(capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: an approved design change is misworded, or its spend is missing or not to 2 places.
     progress.design_finished("s4", _result(tokens=3456, dollars=0.7), _report(approved=True))
-    assert _line(capsys) == "design s4: finished approved (peak context 0, 3456 tokens summed over turns, $0.70)"
+    assert (
+        _line(capsys)
+        == "design s4: finished approved (peak context 0, 3456 tokens summed over turns, $0.70)"
+    )
 
 
 @pytest.mark.parametrize("count", [1, 2])
@@ -1289,13 +1336,19 @@ def test_design_finished_with_decisions_counts_them(
 def test_design_finished_rejected(capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: a rejected brief is reported as approved, as decisions, or with no report.
     progress.design_finished("s4", _result(tokens=8, dollars=0.25), _report(rejected=True))
-    assert _line(capsys) == "design s4: finished rejected (peak context 0, 8 tokens summed over turns, $0.25)"
+    assert (
+        _line(capsys)
+        == "design s4: finished rejected (peak context 0, 8 tokens summed over turns, $0.25)"
+    )
 
 
 def test_design_finished_with_no_report(capsys: pytest.CaptureFixture[str]) -> None:
     # Breaks when: a clean exit with no report is not worded "with no report".
     progress.design_finished("s4", _result(exit_code=0, tokens=5, dollars=0.0), None)
-    assert _line(capsys) == "design s4: finished with no report (peak context 0, 5 tokens summed over turns, $0.00)"
+    assert (
+        _line(capsys)
+        == "design s4: finished with no report (peak context 0, 5 tokens summed over turns, $0.00)"
+    )
 
 
 # Behavior 5: def section_waiting(sid: str, blocker: str) -> None: ...
@@ -1395,7 +1448,10 @@ def test_design_finished_after_a_failed_run_names_its_error_line(
         stream = dataclasses.replace(result.stream, result_text=error_text, is_error=True)
         result = dataclasses.replace(result, stream=stream)
     progress.design_finished("s4", result, None)
-    assert _line(capsys) == f"design s4: finished failed: {error} (peak context 0, 9 tokens summed over turns, $0.25)"
+    assert (
+        _line(capsys)
+        == f"design s4: finished failed: {error} (peak context 0, 9 tokens summed over turns, $0.25)"
+    )
 
 
 # Run overhead design (docs/superpowers/specs/relay-run-overhead-design.md), Modules
@@ -1418,9 +1474,7 @@ _SPEND_CALLERS: list[tuple[str, Callable[[RunResult], None]]] = [
 ]
 
 
-@pytest.mark.parametrize(
-    "call", [c for _, c in _SPEND_CALLERS], ids=[n for n, _ in _SPEND_CALLERS]
-)
+@pytest.mark.parametrize("call", [c for _, c in _SPEND_CALLERS], ids=[n for n, _ in _SPEND_CALLERS])
 def test_a_finished_line_shows_peak_context_apart_from_tokens_summed_over_turns(
     call: Callable[[RunResult], None], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1436,8 +1490,11 @@ def test_a_finished_line_reads_the_largest_context_of_the_run_not_the_last(
     # Breaks when: the spend figure shows the run's last main-thread context (1007 in
     # stream-lead.jsonl) instead of its largest (6203), or feed stops keeping peak_context.
     state = StreamState(
-        session_id=None, context_tokens=0, spend=Spend(tokens=0, dollars=0.0),
-        result_text=None, is_error=False,
+        session_id=None,
+        context_tokens=0,
+        spend=Spend(tokens=0, dollars=0.0),
+        result_text=None,
+        is_error=False,
     )
     for line in (FIXTURES / "stream-lead.jsonl").read_text().splitlines():
         state = feed(state, line)

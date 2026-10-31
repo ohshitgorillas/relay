@@ -34,8 +34,11 @@ def _lines(name: str) -> list[str]:
 
 def _fresh() -> StreamState:
     return StreamState(
-        session_id=None, context_tokens=0, spend=Spend(tokens=0, dollars=0.0),
-        result_text=None, is_error=False,
+        session_id=None,
+        context_tokens=0,
+        spend=Spend(tokens=0, dollars=0.0),
+        result_text=None,
+        is_error=False,
     )
 
 
@@ -195,7 +198,11 @@ def test_claude_task_measurements_preserve_reported_zero_and_run_total() -> None
     measured, unmeasured = state.activity.agents
     assert measured.models == ("worker-model",)
     assert measured.efforts == ("high",)
-    assert (measured.cost_dollars, measured.cost_basis, measured.cost_unavailable) == (0.0, "reported", None)
+    assert (measured.cost_dollars, measured.cost_basis, measured.cost_unavailable) == (
+        0.0,
+        "reported",
+        None,
+    )
     assert unmeasured.models == unmeasured.efforts == ()
     assert unmeasured.cost_dollars is None
     assert unmeasured.cost_basis == "none"
@@ -223,11 +230,19 @@ def test_claude_task_positive_final_cost_preserves_reported_charge_and_run_total
 def test_claude_invalid_task_cost_never_becomes_a_final_measurement(bad_cost: object) -> None:
     # Breaks when explicitly associated invalid billing values become final numeric costs.
     lines = _lines("cache-cost/claude-agent-measurements.jsonl")[:2]
-    lines.append(json.dumps({
-        "type": "system", "subtype": "task_notification", "task_id": "synthetic-worker",
-        "status": "completed", "model": "worker-model", "effort": "high",
-        "total_cost_usd": bad_cost,
-    }))
+    lines.append(
+        json.dumps(
+            {
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "synthetic-worker",
+                "status": "completed",
+                "model": "worker-model",
+                "effort": "high",
+                "total_cost_usd": bad_cost,
+            }
+        )
+    )
     agent = _feed_all(_fresh(), lines).activity.agents[0]
     assert agent.models == ("worker-model",)
     assert agent.efforts == ("high",)
@@ -239,11 +254,19 @@ def test_claude_invalid_task_cost_never_becomes_a_final_measurement(bad_cost: ob
 def test_claude_progress_cost_is_not_a_final_cost_and_missing_settings_stay_unknown() -> None:
     # Breaks when partial usage becomes final billing or unknown turn settings are guessed.
     lines = _lines("cache-cost/claude-agent-measurements.jsonl")[:2]
-    lines.append(json.dumps({
-        "type": "system", "subtype": "task_progress", "task_id": "synthetic-worker",
-        "model": "unavailable", "effort": "unavailable", "total_cost_usd": 0.2,
-        "usage": {"total_tokens": 900},
-    }))
+    lines.append(
+        json.dumps(
+            {
+                "type": "system",
+                "subtype": "task_progress",
+                "task_id": "synthetic-worker",
+                "model": "unavailable",
+                "effort": "unavailable",
+                "total_cost_usd": 0.2,
+                "usage": {"total_tokens": 900},
+            }
+        )
+    )
     agent = _feed_all(_fresh(), lines).activity.agents[0]
     assert agent.models == ("worker-model", "unavailable")
     assert agent.efforts == ("high", "unavailable")
@@ -295,7 +318,9 @@ def test_a_whole_run_spends_every_message_and_measures_only_the_main_thread() ->
     # in the run; a subagent event leaves it unchanged).
     state = _feed_all(_fresh(), _lines(SUBAGENT))
     assert state.context_tokens == MAIN_LAST_CONTEXT
-    assert state.spend.tokens == MAIN_FIRST_SPEND + SUB_FIRST_SPEND + MAIN_LAST_SPEND + SUB_LAST_SPEND
+    assert (
+        state.spend.tokens == MAIN_FIRST_SPEND + SUB_FIRST_SPEND + MAIN_LAST_SPEND + SUB_LAST_SPEND
+    )
     assert state.spend.dollars == 0.9
     assert state.peak_context == max(MAIN_FIRST_CONTEXT, MAIN_LAST_CONTEXT)
 

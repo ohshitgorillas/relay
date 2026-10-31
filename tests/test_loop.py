@@ -29,14 +29,30 @@ from relay.errors import ExitCode, LockedError
 from relay.ledger import Ledger, Spend
 from relay.loop import ask, run
 from relay.queue import parse_queue
-from relay.research import Map, attribute, block, changed, digest, load, owned, parse_map, save, stamp
+from relay.research import (
+    Map,
+    attribute,
+    block,
+    changed,
+    digest,
+    load,
+    owned,
+    parse_map,
+    save,
+    stamp,
+)
 from relay.state import State
 from relay.git import section_branch
 from harness import checked_queue
 from harness import RECORD as _RECORD
 from harness import request_drain as _request_drain
 from harness import drain_after_role as _drain_after_role
-from harness import Background as _Background, ledger_line as _ledger_line, pings as _pings, until as _until
+from harness import (
+    Background as _Background,
+    ledger_line as _ledger_line,
+    pings as _pings,
+    until as _until,
+)
 
 from tests.conftest import _GIT, GitRepo
 
@@ -50,14 +66,27 @@ DONE_LEAD = "stream-lead.jsonl"
 NO_STATUS_LEAD = "stream-error.jsonl"
 
 
-
-@pytest.mark.parametrize("ownership", [
-    "qualified", "reported-legacy", "reported-custom", "bound-custom",
-    "bound-before-report", "invalid-binding", "stale-report", "foreign-report",
-    "other-section-report", "previous-session", "bare-legacy",
-])
+@pytest.mark.parametrize(
+    "ownership",
+    [
+        "qualified",
+        "reported-legacy",
+        "reported-custom",
+        "bound-custom",
+        "bound-before-report",
+        "invalid-binding",
+        "stale-report",
+        "foreign-report",
+        "other-section-report",
+        "previous-session",
+        "bare-legacy",
+    ],
+)
 def test_pending_checks_resolve_only_this_queue_sections_ownership(
-    ownership: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    ownership: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # Breaks when: pending checks trust a bare sid, foreign evidence, or a report over a binding.
     record = tmp_path / "ownership-checks.txt"
@@ -81,7 +110,12 @@ def test_pending_checks_resolve_only_this_queue_sections_ownership(
             state.set_last_report("s1", f"BRANCH {branch} {expected}\nEND LEAD")
         else:
             state.bind_worktree("s1", branch, expected)
-            state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD" if ownership == "bound-before-report" else None)
+            state.set_last_report(
+                "s1",
+                f"BRANCH lead/s1 {legacy}\nEND LEAD"
+                if ownership == "bound-before-report"
+                else None,
+            )
     elif ownership == "invalid-binding":
         state.bind_worktree("s1", "lead/s1", tmp_path / "missing")
         state.set_last_report("s1", f"BRANCH lead/s1 {legacy}\nEND LEAD")
@@ -102,9 +136,14 @@ def test_pending_checks_resolve_only_this_queue_sections_ownership(
     assert saved.worktree_path == (str(expected) if branch else None)
 
 
-@pytest.mark.parametrize("reported", [True, False], ids=["first-legacy-report", "qualified-no-branch"])
+@pytest.mark.parametrize(
+    "reported", [True, False], ids=["first-legacy-report", "qualified-no-branch"]
+)
 def test_a_leads_new_worktree_is_bound_before_its_immediate_check(
-    reported: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    reported: bool,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
     scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: resolution waits until after DONE handling or requires every report to name BRANCH.
@@ -124,7 +163,9 @@ def test_a_leads_new_worktree_is_bound_before_its_immediate_check(
 
 
 def test_a_report_without_branch_keeps_the_bound_custom_worktree_on_restart(
-    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # Breaks when: a later report erases the binding or a restarted pending check reconstructs lead/s1.
     record = tmp_path / "restart-checks.txt"
@@ -141,7 +182,10 @@ def test_a_report_without_branch_keeps_the_bound_custom_worktree_on_restart(
 
 @pytest.mark.parametrize("kind", ["legacy", "custom"])
 def test_a_branch_named_in_a_saved_handoff_of_a_lead_without_status_is_the_sections_worktree_on_restart(
-    kind: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    kind: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # README.md:33, where the saved lead report is handoff()'s text for a lead that stopped
     # without a status (relay-run-overhead-design.md, `relay/prompts.py` `handoff`, `relay/loop.py`).
@@ -169,15 +213,21 @@ def test_a_branch_named_in_a_saved_handoff_of_a_lead_without_status_is_the_secti
 
 
 def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
-    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # Breaks when: research or a follow-up resolves by queue basename or bare section id.
     record = tmp_path / "queue-checks.txt"
-    queues = [checked_queue(git_repo.root / name / "queue.md", record, "s1") for name in ("one", "two")]
+    queues = [
+        checked_queue(git_repo.root / name / "queue.md", record, "s1") for name in ("one", "two")
+    ]
     trees = [git_repo.worktree("s1", queue=queue) for queue in queues]
     for tree in trees:
         _mapped_worktree(git_repo, tree)
-    commits = [git_repo.commit(cwd=tree, message=queue.parent.name) for queue, tree in zip(queues, trees)]
+    commits = [
+        git_repo.commit(cwd=tree, message=queue.parent.name) for queue, tree in zip(queues, trees)
+    ]
     assert len(set(commits)) == 2
     records = []
     for queue, tree in zip(queues, trees):
@@ -185,20 +235,40 @@ def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
         edit = plans / "edited-git.py"
         edit.parent.mkdir(parents=True, exist_ok=True)
         edit.write_text("# edited in this queue's worktree\n")
-        current = _researched(cfg, plans, [
-            _step(RETIRED_LEAD, write=(edit, tree / "relay/git.py")), _stop_lead(queue, cfg),
-        ])
-        current = dataclasses.replace(current, research_command=_plan(
-            plans, cfg.lead_command[0], "research",
-            [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")], False,
-        ))
+        current = _researched(
+            cfg,
+            plans,
+            [
+                _step(RETIRED_LEAD, write=(edit, tree / "relay/git.py")),
+                _stop_lead(queue, cfg),
+            ],
+        )
+        current = dataclasses.replace(
+            current,
+            research_command=_plan(
+                plans,
+                cfg.lead_command[0],
+                "research",
+                [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")],
+                False,
+            ),
+        )
         assert run(queue, current) == ExitCode.STOP_FILE
-        current = dataclasses.replace(current, research_command=_plan(
-            plans, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
-        ))
+        current = dataclasses.replace(
+            current,
+            research_command=_plan(
+                plans,
+                cfg.lead_command[0],
+                "research",
+                [_step("stream-ask.jsonl")],
+                False,
+            ),
+        )
         ask(queue, current, "s1", "Which files describe this section?")
         records.append(_research_runs(plans))
-    assert [[Path(str(item["cwd"])).resolve() for item in runs] for runs in records] == [[tree] * 3 for tree in trees]
+    assert [[Path(str(item["cwd"])).resolve() for item in runs] for runs in records] == [
+        [tree] * 3 for tree in trees
+    ]
     for queue, tree, commit in zip(queues, trees, commits):
         state = State.open(queue, cfg)
         assert state.section("s1").worktree_path == str(tree)
@@ -215,8 +285,11 @@ def test_same_named_queues_research_and_ask_in_their_own_qualified_worktrees(
 
 
 def test_architect_evidence_rejects_a_report_path_from_another_repository(
-    cfg: Config, tmp_path: Path, git_repo: GitRepo,
-    queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the architect trusts the report's arbitrary path instead of the owned branch and HEAD.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -227,9 +300,14 @@ def test_architect_evidence_rejects_a_report_path_from_another_repository(
     foreign = git_repo.worktrees["s1"]
     scenario(_lines(DONE_LEAD))
     status = f"BRANCH lead/s1 {foreign}\nEND LEAD\nDESIGN: {PROBLEM}"
-    cfg = _sequenced(cfg, tmp_path, [
-        _step(str(_status_lead(tmp_path, "foreign-report", status))), _step(NO_STATUS_LEAD),
-    ])
+    cfg = _sequenced(
+        cfg,
+        tmp_path,
+        [
+            _step(str(_status_lead(tmp_path, "foreign-report", status))),
+            _step(NO_STATUS_LEAD),
+        ],
+    )
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_REJECTED)])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     brief = str(_runs(tmp_path, "design")[0]["prompt"])
@@ -240,8 +318,12 @@ def test_architect_evidence_rejects_a_report_path_from_another_repository(
 
 @pytest.mark.parametrize("recut", [False, True], ids=["direct", "recursive-recut"])
 def test_another_queues_dirty_legacy_blocker_does_not_hold_this_queue(
-    recut: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
-    scenario: Callable[[list[str]], Path], stop_after: Callable[[Path, Config], None],
+    recut: bool,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    scenario: Callable[[list[str]], Path],
+    stop_after: Callable[[Path, Config], None],
 ) -> None:
     # Breaks when: blocker cleanliness adopts a bare legacy branch belonging to another queue.
     queue = _repo_queue(git_repo)
@@ -538,7 +620,9 @@ def _replace_queue(queue: Path, name: str) -> None:
     os.replace(staged, queue)
 
 
-def _between_passes(monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]) -> Callable[[float], None]:
+def _between_passes(
+    monkeypatch: pytest.MonkeyPatch, change: Callable[[], None]
+) -> Callable[[float], None]:
     """Wrap `parse_queue` in every loaded `relay` module that holds it; return `apply`.
 
     `apply(timeout)` makes `change` happen once, in the loop's own thread just before its next
@@ -568,7 +652,9 @@ def _between_passes(monkeypatch: pytest.MonkeyPatch, change: Callable[[], None])
         return original(*args, **kwargs)
 
     for name, module in list(sys.modules.items()):
-        if (name == "relay" or name.startswith("relay.")) and getattr(module, "parse_queue", None) is original:
+        if (name == "relay" or name.startswith("relay.")) and getattr(
+            module, "parse_queue", None
+        ) is original:
             monkeypatch.setattr(module, "parse_queue", wrapped)
 
     def apply(timeout: float) -> None:
@@ -664,7 +750,10 @@ def test_with_only_parked_sections_left_the_loop_waits_instead_of_stopping(
 
 
 def test_a_stop_file_created_while_waiting_stops_with_stop_file(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
@@ -674,7 +763,9 @@ def test_a_stop_file_created_while_waiting_stops_with_stop_file(
     # ping's own work and `run`'s return are done.
     stamps = tmp_path / "ping-stamps.txt"
     stamp = "import time, sys; t = time.time(); f = open(sys.argv[1], 'a'); f.write(repr(t) + chr(10)); f.close()"
-    cfg = dataclasses.replace(cfg, ping_command=[sys.executable, "-I", "-S", "-c", stamp, str(stamps), "{message}"])
+    cfg = dataclasses.replace(
+        cfg, ping_command=[sys.executable, "-I", "-S", "-c", stamp, str(stamps), "{message}"]
+    )
     state = _park_all_but_done(queue, cfg, parked)
     loop = _Background(queue, cfg)
     try:
@@ -733,7 +824,10 @@ def test_the_loop_holds_the_lock_while_waiting(
 
 
 def test_waiting_sends_no_ping(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
@@ -790,7 +884,10 @@ def _ledger(queue: Path, cfg: Config) -> Ledger:
 
 
 def test_the_lead_resumes_its_sections_own_last_session(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop passes last_session_any, or no resume, though the section has its own.
     queue = queue_file(WORKBOARD)
@@ -806,7 +903,10 @@ def test_the_lead_resumes_its_sections_own_last_session(
 
 
 def test_a_section_without_its_own_session_resumes_last_session_any(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop passes no resume when only another section has a session.
     queue = queue_file(WORKBOARD)
@@ -818,7 +918,10 @@ def test_a_section_without_its_own_session_resumes_last_session_any(
 
 
 def test_the_next_sections_lead_resumes_the_session_the_last_lead_recorded(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the second lead of a `relay go` is not given the first lead's session.
     queue = queue_file(M2)
@@ -831,7 +934,10 @@ def test_the_next_sections_lead_resumes_the_session_the_last_lead_recorded(
 
 
 def test_context_tokens_reaching_context_limit_create_the_retire_flag_during_the_run(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: on_event compares context_tokens with `>` or never returns "retire".
     queue = queue_file(WORKBOARD)
@@ -843,7 +949,10 @@ def test_context_tokens_reaching_context_limit_create_the_retire_flag_during_the
 
 
 def test_context_tokens_below_context_limit_create_no_retire_flag(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: on_event returns "retire" below context_limit.
     queue = queue_file(WORKBOARD)
@@ -854,7 +963,10 @@ def test_context_tokens_below_context_limit_create_no_retire_flag(
 
 
 def test_live_spend_passing_the_token_budget_creates_the_retire_flag_during_the_run(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: on_event ignores the live spend, leaving the budget to the next pass.
     queue = queue_file(WORKBOARD)
@@ -865,7 +977,10 @@ def test_live_spend_passing_the_token_budget_creates_the_retire_flag_during_the_
 
 
 def test_live_spend_counts_this_gos_ledger_spend_toward_the_budget(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: on_event weighs the run's own spend alone against the budget.
     queue = queue_file(WORKBOARD)
@@ -877,7 +992,10 @@ def test_live_spend_counts_this_gos_ledger_spend_toward_the_budget(
 
 
 def test_live_spend_leaves_ledger_spend_from_before_this_go_out_of_the_budget(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: on_event weighs the live spend against the all-time ledger (since=None).
     queue = queue_file(WORKBOARD)
@@ -908,7 +1026,9 @@ def test_a_lead_whose_context_stays_below_hard_ceiling_is_not_killed(
     # Breaks when: on_event returns "kill" below hard_ceiling, or at context_limit.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
-    cfg = dataclasses.replace(cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT + 1)
+    cfg = dataclasses.replace(
+        cfg, context_limit=FIRST_CONTEXT - 200, hard_ceiling=FIRST_CONTEXT + 1
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     state = State.open(queue, cfg)
     assert all(state.section(sid).status == "done" for sid in _open_ids(queue))
@@ -930,7 +1050,12 @@ def test_each_lead_runs_spend_is_appended_to_the_ledger(
     assert total.dollars == pytest.approx(n * DONE_SPEND.dollars)
     # One readable line per lead run, each holding that run's own spend.
     assert _ledger(queue, cfg).unreadable() == []
-    lines = [json.loads(line) for line in (State.open(queue, cfg).stop_file.parent / "ledger.jsonl").read_text().splitlines()]
+    lines = [
+        json.loads(line)
+        for line in (State.open(queue, cfg).stop_file.parent / "ledger.jsonl")
+        .read_text()
+        .splitlines()
+    ]
     # relay-check-design.md:168-170: a check line is kind "check"; every other line is a lead run's.
     entries = [e for e in lines if e["kind"] != "check"]
     assert len(entries) == n
@@ -1027,7 +1152,9 @@ sys.exit(step["exit"])
 # Scripted leads of `tests/fixtures/`, each a session of its own, ending with the status line named.
 RETIRED_LEAD = "stream-retired.jsonl"  # "RETIRED", session "sess-lead-3"
 RECUT_LEAD = "stream-recut.jsonl"  # "RECUT: step 2 needs a split", session "sess-lead-4"
-NEEDS_OWNER_LEAD = "stream-needs-owner.jsonl"  # "NEEDS-OWNER: Which port should the server use?", "sess-lead-5"
+NEEDS_OWNER_LEAD = (
+    "stream-needs-owner.jsonl"  # "NEEDS-OWNER: Which port should the server use?", "sess-lead-5"
+)
 DONE_SMALL_LEAD = "stream-done-small.jsonl"  # "DONE", session "sess-lead-6", context 1 + 50 + 400
 DIVVYER_RUN = "stream-divvyer.jsonl"  # the divvyer's recut run, session "sess-recut-1"
 
@@ -1059,7 +1186,9 @@ with open(record, "a") as f:
 """
 
 
-def _step(name: str, exit: int = 0, write: tuple[Path, Path] | None = None, then: list[str] | None = None) -> dict[str, object]:
+def _step(
+    name: str, exit: int = 0, write: tuple[Path, Path] | None = None, then: list[str] | None = None
+) -> dict[str, object]:
     """One run of the plan: the fixture scenario `name`, its exit code, a file to copy over another
     first, and a command to run after that copy."""
     return {
@@ -1070,7 +1199,9 @@ def _step(name: str, exit: int = 0, write: tuple[Path, Path] | None = None, then
     }
 
 
-def _plan(tmp_path: Path, fake: str, role: str, steps: list[dict[str, object]], cycle: bool) -> list[str]:
+def _plan(
+    tmp_path: Path, fake: str, role: str, steps: list[dict[str, object]], cycle: bool
+) -> list[str]:
     rec = tmp_path / "plans" / role
     rec.mkdir(parents=True, exist_ok=True)
     return ["fake-plan", str(rec), json.dumps({"steps": steps, "cycle": cycle})]
@@ -1096,7 +1227,9 @@ def _sequenced(
 def _runs(tmp_path: Path, role: str) -> list[dict[str, object]]:
     """The records of every `role` run ("lead" or "recut"), in run order."""
     rec = tmp_path / "plans" / role
-    count = len([p for p in rec.iterdir() if p.name.startswith("run-") and p.name.endswith(".json")])
+    count = len(
+        [p for p in rec.iterdir() if p.name.startswith("run-") and p.name.endswith(".json")]
+    )
     return [json.loads((rec / f"run-{n}.json").read_text()) for n in range(count)]
 
 
@@ -1117,25 +1250,39 @@ def test_generic_loop_ignores_budgets_and_accepts_plain_stdout(
     queue = queue_file(WORKBOARD)
     _only_first_open(queue, cfg)
     command = [sys.executable, "-c", "import sys; sys.stdin.read(); print('DONE')"]
-    generic = dataclasses.replace(cfg, backend="generic", lead_command=command,
-                                  recut_command=command, token_budget=1,
-                                  dollar_budget=0.01)
+    generic = dataclasses.replace(
+        cfg,
+        backend="generic",
+        lead_command=command,
+        recut_command=command,
+        token_budget=1,
+        dollar_budget=0.01,
+    )
     _ledger_line(State.open(queue, cfg), time.time() + 3600, 900, 5.0)
     assert run(queue, generic) == ExitCode.QUEUE_EMPTY
 
 
 @pytest.mark.parametrize("backend", ["generic", "claude"])
 def test_zero_token_successful_lead_completes_for_each_token_policy_backend(
-    backend: str, cfg: Config, tmp_path: Path,
-    queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+    backend: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when lead success requires usage, including for a metered backend.
     queue = queue_file(WORKBOARD)
     sid = _only_first_open(queue, cfg)
     if backend == "generic":
-        cfg = dataclasses.replace(cfg, backend=backend, lead_command=[
-            sys.executable, "-c", "import sys; sys.stdin.read(); print('DONE')",
-        ])
+        cfg = dataclasses.replace(
+            cfg,
+            backend=backend,
+            lead_command=[
+                sys.executable,
+                "-c",
+                "import sys; sys.stdin.read(); print('DONE')",
+            ],
+        )
     else:
         events = [json.loads(line) for line in _lines(DONE_LEAD)]
         for event in events:
@@ -1151,18 +1298,29 @@ def test_zero_token_successful_lead_completes_for_each_token_policy_backend(
 
 
 def test_zero_token_generic_recut_accepts_a_valid_changed_queue(
-    cfg: Config, tmp_path: Path,
+    cfg: Config,
+    tmp_path: Path,
 ) -> None:
     # Breaks when recut requires tokens or fails to run the newly cut section.
     queue = _queue_of(tmp_path / "generic-queue.md", "s1")
-    lead = [sys.executable, "-c", (
-        "import pathlib,sys; sys.stdin.read(); "
-        "print('RECUT: split work' if 'section s1 |' in pathlib.Path(sys.argv[1]).read_text() else 'DONE')"
-    ), str(queue)]
-    recut = [sys.executable, "-c", (
-        "import pathlib,sys; sys.stdin.read(); "
-        "pathlib.Path(sys.argv[1]).write_text('section s1a | lead | steps: 1\\n  new work\\n')"
-    ), str(queue)]
+    lead = [
+        sys.executable,
+        "-c",
+        (
+            "import pathlib,sys; sys.stdin.read(); "
+            "print('RECUT: split work' if 'section s1 |' in pathlib.Path(sys.argv[1]).read_text() else 'DONE')"
+        ),
+        str(queue),
+    ]
+    recut = [
+        sys.executable,
+        "-c",
+        (
+            "import pathlib,sys; sys.stdin.read(); "
+            "pathlib.Path(sys.argv[1]).write_text('section s1a | lead | steps: 1\\n  new work\\n')"
+        ),
+        str(queue),
+    ]
     cfg = dataclasses.replace(cfg, backend="generic", lead_command=lead, recut_command=recut)
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     state = State.open(queue, cfg)
@@ -1174,7 +1332,9 @@ def test_zero_token_generic_recut_accepts_a_valid_changed_queue(
 
 
 def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when rotation omits the backend hint/report or resumes the retired process.
@@ -1201,7 +1361,8 @@ def test_rotation_starts_fresh_runs_with_backend_hint_and_previous_report(
 
         def parse(self, state: StreamState, line: str) -> StreamState:
             return dataclasses.replace(
-                state, session_id=f"thread-{len(prompts)}",
+                state,
+                session_id=f"thread-{len(prompts)}",
                 result_text=(state.result_text or "") + line,
             )
 
@@ -1246,7 +1407,11 @@ def test_backend_finalization_error_overrides_successful_child_report(
         def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
             self.role = role
             roles.append(role)
-            answer = "RECUT: split the remaining work" if failed_role == "recut" and len(roles) == 1 else "DONE"
+            answer = (
+                "RECUT: split the remaining work"
+                if failed_role == "recut" and len(roles) == 1
+                else "DONE"
+            )
             script = "import pathlib,sys; sys.stdin.read(); print(sys.argv[1]); "
             if role == "recut":
                 script += "p=pathlib.Path(sys.argv[2]); p.write_text(p.read_text() + '\\n<!-- recut -->\\n')"
@@ -1275,12 +1440,17 @@ def test_backend_finalization_error_overrides_successful_child_report(
     assert section.failures == (2 if failed_role == "lead" else 1)
     assert result == (ExitCode.FAILED_TWICE if failed_role == "lead" else ExitCode.QUEUE_EMPTY)
     assert section.status == ("open" if failed_role == "lead" else "done")
-    assert finalized == ([("lead", True), ("lead", True)] if failed_role == "lead" else
-                         [("lead", False), ("recut", True), ("lead", False)])
+    assert finalized == (
+        [("lead", True), ("lead", True)]
+        if failed_role == "lead"
+        else [("lead", False), ("recut", True), ("lead", False)]
+    )
 
 
 def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
-    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when a finalized recut error leaves its queue changes eligible for
     # acceptance on the next loop pass (backend design, Modules).
@@ -1294,7 +1464,9 @@ def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
         def argv(self, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
             self.role = role
             roles.append(role)
-            answer = "RECUT: split the remaining work" if len(roles) == 1 else "No successful report"
+            answer = (
+                "RECUT: split the remaining work" if len(roles) == 1 else "No successful report"
+            )
             script = "import pathlib,sys; sys.stdin.read(); print(sys.argv[1]); "
             if role == "recut":
                 script += "pathlib.Path(sys.argv[2]).write_text('section s2 | lead | steps: 1\\n  s2 work\\n')"
@@ -1320,15 +1492,21 @@ def test_failed_recut_cannot_finish_queue_by_removing_pending_work(
     assert result != ExitCode.QUEUE_EMPTY, "failed recut changes completed the queue"
 
 
-@pytest.mark.parametrize(("failure", "damage"), [
-    (failure, damage)
-    for failure in ["exit", "backend", "exception", "success", "killed", "restore-error"]
-    for damage in ["valid", "malformed", "empty", "missing", "unchanged"]
-    if (failure, damage) != ("success", "valid")
-])
+@pytest.mark.parametrize(
+    ("failure", "damage"),
+    [
+        (failure, damage)
+        for failure in ["exit", "backend", "exception", "success", "killed", "restore-error"]
+        for damage in ["valid", "malformed", "empty", "missing", "unchanged"]
+        if (failure, damage) != ("success", "valid")
+    ],
+)
 def test_recut_transaction_restores_bytes_mode_and_retries(
-    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    damage: str, failure: str,
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    failure: str,
 ) -> None:
     # Breaks when failed or invalid recuts escape rollback or skip the retry;
     # unchanged sections must restore even edits outside the parsed sections.
@@ -1360,12 +1538,20 @@ def test_recut_transaction_restores_bytes_mode_and_retries(
                 assert queue.read_bytes() == original, "retry observed failed recut bytes"
                 assert queue.stat().st_mode & 0o777 == 0o640, "retry observed changed mode"
             answer = "RECUT: split remaining work" if len(roles) == 1 else "No successful report"
-            return [sys.executable, "-c", "import sys; sys.stdin.read(); print(sys.argv[1])", answer]
+            return [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdin.read(); print(sys.argv[1])",
+                answer,
+            ]
 
         def parse(self, state: StreamState, line: str) -> StreamState:
             return dataclasses.replace(
-                state, result_text=(state.result_text or "") + line,
-                context_tokens=cfg.hard_ceiling if failure == "killed" and self.role == "recut" else 0,
+                state,
+                result_text=(state.result_text or "") + line,
+                context_tokens=cfg.hard_ceiling
+                if failure == "killed" and self.role == "recut"
+                else 0,
             )
 
         def poll(self, state: StreamState) -> StreamState:
@@ -1379,9 +1565,12 @@ def test_recut_transaction_restores_bytes_mode_and_retries(
             if damage == "missing":
                 queue.unlink()
             else:
-                content = {"valid": b"section s2 | lead | steps: 1\n  s2 work\n",
-                           "malformed": b"section malformed\n",
-                           "empty": b"", "unchanged": b"<!-- changed -->\n" + original}[damage]
+                content = {
+                    "valid": b"section s2 | lead | steps: 1\n  s2 work\n",
+                    "malformed": b"section malformed\n",
+                    "empty": b"",
+                    "unchanged": b"<!-- changed -->\n" + original,
+                }[damage]
                 queue.write_bytes(content)
                 queue.chmod(0o600)
             if failure == "exception":
@@ -1397,7 +1586,9 @@ def test_recut_transaction_restores_bytes_mode_and_retries(
     if failure == "exit":
         original_argv = RecoveryBackend.argv
 
-        def failing_argv(self: RecoveryBackend, role: str, cfg: Config, cwd: Path, output: Path) -> list[str]:
+        def failing_argv(
+            self: RecoveryBackend, role: str, cfg: Config, cwd: Path, output: Path
+        ) -> list[str]:
             command = original_argv(self, role, cfg, cwd, output)
             if role == "recut":
                 command[2] += "; sys.exit(1)"
@@ -1454,7 +1645,10 @@ def _body(queue: Path, sid: str) -> str:
 
 
 def test_a_lead_ending_done_marks_its_section_done_and_the_next_lead_takes_the_next_section(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop leaves a DONE section open, or records a failure on it.
     queue = queue_file(WORKBOARD)
@@ -1471,7 +1665,10 @@ def test_a_lead_ending_done_marks_its_section_done_and_the_next_lead_takes_the_n
 
 
 def test_a_section_marked_done_gets_no_second_lead(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: mark_done is skipped, so the next pass runs the same section again.
     queue = queue_file(WORKBOARD)
@@ -1484,7 +1681,10 @@ def test_a_section_marked_done_gets_no_second_lead(
 
 
 def test_an_answer_to_a_done_section_wakes_no_lead(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: `relay answer` on a done section reopens it, so `relay go` resumes its lead.
     queue = queue_file(WORKBOARD)
@@ -1503,7 +1703,10 @@ def test_an_answer_to_a_done_section_wakes_no_lead(
 
 
 def test_a_retired_lead_is_followed_by_a_fresh_lead_on_the_same_section(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: RETIRED moves the loop on to the next section, or marks the section done.
     queue = queue_file(WORKBOARD)
@@ -1521,7 +1724,10 @@ def test_a_retired_lead_is_followed_by_a_fresh_lead_on_the_same_section(
 
 
 def test_retired_leads_count_no_failure(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop calls record_failure on RETIRED, so a second retire stops FAILED_TWICE.
     queue = queue_file(WORKBOARD)
@@ -1547,7 +1753,10 @@ def _recut_to_m2(cfg: Config, tmp_path: Path, queue: Path, exit: int = 0) -> Con
 
 
 def test_a_recut_status_runs_the_recut_command_once_with_the_recut_brief(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop never runs recut_command, or sends it a brief without the reason and the lead's log.
     queue = queue_file(WORKBOARD)
@@ -1572,7 +1781,10 @@ def test_a_recut_status_runs_the_recut_command_once_with_the_recut_brief(
 
 
 def test_after_a_recut_the_loop_re_parses_the_queue_and_counts_no_failure(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop keeps the queue it parsed before the recut, or fails a recut that changed it.
     queue = queue_file(WORKBOARD)
@@ -1588,7 +1800,10 @@ def test_after_a_recut_the_loop_re_parses_the_queue_and_counts_no_failure(
 
 
 def test_the_recut_runs_spend_is_appended_to_the_ledger(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop appends the leads' spend but not the recut's.
     queue = queue_file(WORKBOARD)
@@ -1598,11 +1813,16 @@ def test_the_recut_runs_spend_is_appended_to_the_ledger(
     n = len(_open_ids(queue))
     total = _ledger(queue, cfg).total(None)
     assert total.tokens == RECUT_SPEND.tokens + DIVVYER_SPEND.tokens + n * DONE_SPEND.tokens
-    assert total.dollars == pytest.approx(RECUT_SPEND.dollars + DIVVYER_SPEND.dollars + n * DONE_SPEND.dollars)
+    assert total.dollars == pytest.approx(
+        RECUT_SPEND.dollars + DIVVYER_SPEND.dollars + n * DONE_SPEND.dollars
+    )
 
 
 def test_a_recut_with_a_non_zero_exit_counts_as_a_failure_of_the_section(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop ignores the recut's exit code.
     queue = queue_file(WORKBOARD)
@@ -1614,13 +1834,18 @@ def test_a_recut_with_a_non_zero_exit_counts_as_a_failure_of_the_section(
 
 
 def test_a_recut_that_leaves_the_queue_file_unchanged_counts_as_a_failure_of_the_section(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop treats a zero-exit recut as success without checking the queue file changed.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
-    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)]
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     section = State.open(queue, cfg).section(first)
     assert section.failures == 1
@@ -1628,7 +1853,10 @@ def test_a_recut_that_leaves_the_queue_file_unchanged_counts_as_a_failure_of_the
 
 
 def test_two_recuts_that_leave_the_queue_unchanged_stop_with_failed_twice(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a failed recut is not counted with the section's other failures.
     queue = queue_file(WORKBOARD)
@@ -1684,7 +1912,17 @@ def test_a_section_from_a_recut_that_ends_recut_with_no_design_pings_the_owner_w
     recut = _queue_of(tmp_path / "recut.md", "s1a", "s2")
     scenario(_lines(DONE_LEAD))
     record = tmp_path / "pings.jsonl"
-    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), "s1a", "{message}"]
+    ping = [
+        sys.executable,
+        "-c",
+        _RECORD_STATE,
+        str(REPO),
+        str(record),
+        str(queue),
+        str(cfg.state_root),
+        "s1a",
+        "{message}",
+    ]
     cfg = dataclasses.replace(cfg, ping_command=ping)
     leads = [_step(RECUT_LEAD), _step(RECUT_LEAD), _step(NO_STATUS_LEAD)]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(recut, queue))])
@@ -1792,7 +2030,10 @@ def test_a_recut_that_splits_the_section_runs_the_child_ids_and_leaves_the_old_i
 
 
 def test_needs_owner_parks_the_section_with_its_question_and_the_loop_goes_on(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: NEEDS-OWNER does not park, parks without the question, or counts a failure.
     queue = queue_file(WORKBOARD)
@@ -1811,14 +2052,27 @@ def test_needs_owner_parks_the_section_with_its_question_and_the_loop_goes_on(
 
 
 def test_needs_owner_pings_the_owner_with_the_question_once_the_section_is_parked(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop sends no needs-owner ping, or pings before it parks the section.
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     sid = _open_ids(queue)[0]
     record = tmp_path / "pings.jsonl"
-    ping = [sys.executable, "-c", _RECORD_STATE, str(REPO), str(record), str(queue), str(cfg.state_root), sid, "{message}"]
+    ping = [
+        sys.executable,
+        "-c",
+        _RECORD_STATE,
+        str(REPO),
+        str(record),
+        str(queue),
+        str(cfg.state_root),
+        sid,
+        "{message}",
+    ]
     cfg = dataclasses.replace(cfg, ping_command=ping)
     cfg = _sequenced(cfg, tmp_path, [_step(NEEDS_OWNER_LEAD), _step(NO_STATUS_LEAD)])
     run(queue, cfg)
@@ -1834,7 +2088,10 @@ def test_needs_owner_pings_the_owner_with_the_question_once_the_section_is_parke
 
 
 def test_a_lead_with_no_status_line_records_one_failure_and_the_section_is_run_again(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a missing status records no failure, or stops at the first failure.
     queue = queue_file(WORKBOARD)
@@ -1848,7 +2105,10 @@ def test_a_lead_with_no_status_line_records_one_failure_and_the_section_is_run_a
 
 
 def test_a_lead_ending_done_with_a_non_zero_exit_records_a_failure(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop reads the status line and ignores the lead's exit code.
     queue = queue_file(WORKBOARD)
@@ -1862,7 +2122,10 @@ def test_a_lead_ending_done_with_a_non_zero_exit_records_a_failure(
 
 
 def test_two_leads_ending_done_with_a_non_zero_exit_stop_with_failed_twice(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a non-zero exit with a DONE line marks the section done.
     queue = queue_file(WORKBOARD)
@@ -1876,7 +2139,10 @@ def test_two_leads_ending_done_with_a_non_zero_exit_stop_with_failed_twice(
 
 
 def test_a_killed_lead_records_one_failure(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a kill at hard_ceiling records no failure.
     queue = queue_file(WORKBOARD)
@@ -1891,7 +2157,10 @@ def test_a_killed_lead_records_one_failure(
 
 
 def test_a_second_failure_stops_with_failed_twice_and_runs_no_further_lead(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop goes on past the section's second failure.
     queue = queue_file(WORKBOARD)
@@ -1907,7 +2176,10 @@ def test_a_second_failure_stops_with_failed_twice_and_runs_no_further_lead(
 
 
 def test_one_failure_in_each_of_several_sections_does_not_stop_the_loop(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop counts failures across sections instead of per section.
     queue = queue_file(M2)
@@ -1921,7 +2193,10 @@ def test_one_failure_in_each_of_several_sections_does_not_stop_the_loop(
 
 
 def test_a_failure_recorded_before_this_go_counts_toward_the_second(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop counts only the failures of this `relay go` in memory.
     queue = queue_file(WORKBOARD)
@@ -1969,7 +2244,10 @@ def test_a_budget_triggered_retire_ends_the_pass_with_budget_and_runs_no_fresh_l
 
 
 def test_a_context_triggered_retire_does_not_end_the_pass_with_budget(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop ends with BUDGET after any retire, not only a budget-triggered one.
     queue = queue_file(WORKBOARD)
@@ -2025,7 +2303,10 @@ def test_every_stop_sends_one_stopped_ping_before_run_returns(
 
 
 def test_a_budget_triggered_retire_sends_one_stopped_ping(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the BUDGET stop after a live-spend retire skips ping.stopped.
     queue = queue_file(WORKBOARD)
@@ -2039,7 +2320,10 @@ def test_a_budget_triggered_retire_sends_one_stopped_ping(
 
 
 def test_a_stop_file_while_waiting_sends_one_stopped_ping(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the STOP_FILE stop from the wait returns without calling ping.stopped.
     queue = queue_file(WORKBOARD)
@@ -2059,7 +2343,9 @@ def test_a_stop_file_while_waiting_sends_one_stopped_ping(
     assert pings[0][0].startswith("relay ")
 
 
-def _stopped_message(cfg: Config, base: Path, variant: str, scenario: Callable[[list[str]], Path]) -> str:
+def _stopped_message(
+    cfg: Config, base: Path, variant: str, scenario: Callable[[list[str]], Path]
+) -> str:
     """Run the WORKBOARD queue, in a directory of its own under `base`, to the stop `variant`
     names, and return its one stopped ping with that directory's path written as `<dir>`."""
     where = base / variant
@@ -2089,8 +2375,12 @@ def _stopped_message(cfg: Config, base: Path, variant: str, scenario: Callable[[
             state.stop_file.touch()
             loop.thread.join(15)
     else:
-        codes = {"stop-file": ExitCode.STOP_FILE, "budget": ExitCode.BUDGET,
-                 "queue-empty": ExitCode.QUEUE_EMPTY, "failed-twice": ExitCode.FAILED_TWICE}
+        codes = {
+            "stop-file": ExitCode.STOP_FILE,
+            "budget": ExitCode.BUDGET,
+            "queue-empty": ExitCode.QUEUE_EMPTY,
+            "failed-twice": ExitCode.FAILED_TWICE,
+        }
         scenario(_lines(NO_STATUS_LEAD if variant == "failed-twice" else DONE_LEAD))
         assert run(queue, _stop_on(variant, queue, cfg)) == codes[variant]
     pings = _pings(where)
@@ -2113,7 +2403,10 @@ def test_each_kind_of_stop_sends_a_stopped_ping_unlike_every_other_kinds(
         "queue-empty": ["queue-empty"],
         "failed-twice": ["failed-twice"],
     }
-    messages = {kind: [_stopped_message(cfg, tmp_path, v, scenario) for v in variants] for kind, variants in kinds.items()}
+    messages = {
+        kind: [_stopped_message(cfg, tmp_path, v, scenario) for v in variants]
+        for kind, variants in kinds.items()
+    }
     for kind, mine in messages.items():
         for other, theirs in messages.items():
             if other != kind:
@@ -2132,14 +2425,20 @@ _STARTED = r"relay go .+: started; .+"
 _PROGRESS = [
     re.compile(_STARTED),
     re.compile(r"lead \S+: started(?: fresh|, resuming \S+)(?:, with the owner's answer)?"),
-    re.compile(r"lead \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"),
+    re.compile(
+        r"lead \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"
+    ),
     # relay-cache-cost-design.md:156: empty inventories report their observation limit.
     re.compile(r".*no subagents observed.*"),
     re.compile(r"lead \S+: asked to retire(?: at \d+ context tokens|, budget spent)"),
     re.compile(r"lead \S+: killed at \d+ context tokens, past the hard ceiling"),
-    re.compile(r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"),
+    re.compile(
+        r"(?:lead|recut) \S+: agent \S+ (?:started|\S+ (?:in \S+|time unknown), context \d+): .+ \((?:lead|recut) \+ \d+ agents?\)"
+    ),
     re.compile(r"recut \S+: started: .+"),
-    re.compile(r"recut \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"),
+    re.compile(
+        r"recut \S+: finished .+ \(peak context \d+, \d+ tokens summed over turns, \$\d+\.\d{2}\)"
+    ),
     re.compile(r"section \S+: needs an answer: .+"),
     re.compile(r"section \S+: failed \(\d+ of 2\)"),
     re.compile(r"waiting for answers on .+"),
@@ -2185,7 +2484,8 @@ def _mark(
 
 
 def _every_run_agent(
-    monkeypatch: pytest.MonkeyPatch, replace: Callable[[Callable[..., object]], Callable[..., object]]
+    monkeypatch: pytest.MonkeyPatch,
+    replace: Callable[[Callable[..., object]], Callable[..., object]],
 ) -> None:
     """Put `replace(run_agent)` in place of `relay.runner.run_agent` in every loaded `relay`
     module that holds it, `relay.runner` itself included, so the stand-in is what runs however
@@ -2193,7 +2493,9 @@ def _every_run_agent(
     original = relay.runner.run_agent
     stand_in = replace(original)
     for name, module in list(sys.modules.items()):
-        if (name == "relay" or name.startswith("relay.")) and getattr(module, "run_agent", None) is original:
+        if (name == "relay" or name.startswith("relay.")) and getattr(
+            module, "run_agent", None
+        ) is original:
             monkeypatch.setattr(module, "run_agent", stand_in)
 
 
@@ -2350,7 +2652,9 @@ def test_a_go_writes_each_progress_line_in_the_order_the_run_produced_it_worded_
     ]
 
 
-AGENTS_LEAD = "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents and a shell task
+AGENTS_LEAD = (
+    "stream-agents.jsonl"  # "DONE", session "sess-agents-1", two subagents and a shell task
+)
 
 
 def test_a_lead_run_writes_one_line_per_subagent_start_and_finish_between_its_started_and_finished_lines(
@@ -2546,7 +2850,9 @@ def test_started_names_the_budgets_the_config_holds_or_that_there_is_none(
     texts = _texts(capsys.readouterr().out)
     started = [t for t in texts if re.fullmatch(_STARTED, t)]
     assert len(started) == 1, texts
-    assert re.fullmatch(re.escape(f"relay go {WORKBOARD}: started; ") + wording, started[0]), started
+    assert re.fullmatch(re.escape(f"relay go {WORKBOARD}: started; ") + wording, started[0]), (
+        started
+    )
 
 
 # Progress behavior 2b: a crash in the loop also writes the ended line, with reason `crashed`
@@ -2583,7 +2889,11 @@ def test_a_crash_in_a_leads_run_writes_ended_crashed_with_exit_error_just_after_
     ended = [t for t in texts if re.fullmatch(r"relay go .+: ended .+", t)]
     assert len(ended) == 1, texts
     assert texts[-2:] == ["<ping.stopped>", ended[0]], texts
-    wanted = re.escape(f"relay go {WORKBOARD}: ended crashed: ") + r".*" + re.escape(f" (exit {int(ExitCode.ERROR)})")
+    wanted = (
+        re.escape(f"relay go {WORKBOARD}: ended crashed: ")
+        + r".*"
+        + re.escape(f" (exit {int(ExitCode.ERROR)})")
+    )
     assert re.fullmatch(wanted, ended[0]), ended
 
 
@@ -2612,7 +2922,9 @@ def test_lead_started_naming_each_section_is_written_just_before_its_leads_run_h
     assert len(_runs(tmp_path, "lead")) == len(ids)
     at = [n for n, t in enumerate(texts) if t == "<run_agent>"]
     assert len(at) == len(ids), texts
-    expected = [f"lead {ids[0]}: started fresh"] + [f"lead {sid}: started, resuming sess-lead-1" for sid in ids[1:]]
+    expected = [f"lead {ids[0]}: started fresh"] + [
+        f"lead {sid}: started, resuming sess-lead-1" for sid in ids[1:]
+    ]
     assert [texts[n - 1] for n in at] == expected, texts
     assert [t for t in texts if t.startswith("lead ") and ": started" in t] == expected, texts
 
@@ -2658,7 +2970,9 @@ def test_lead_started_comes_just_before_the_lead_that_asks_for_a_recut_and_recut
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
-    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_SMALL_LEAD)], recuts=[_step(DIVVYER_RUN)]
+    )
     runs = _mark_run_agent(monkeypatch, "<run_agent>")
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
@@ -2710,7 +3024,11 @@ def test_needs_owner_writes_needs_an_answer_beside_the_needs_owner_ping(
 
 @pytest.mark.parametrize(
     ("failing", "context"),
-    [(_step(NO_STATUS_LEAD), None), (_step(DONE_LEAD, exit=1), None), (_step(DONE_LEAD), FIRST_CONTEXT)],
+    [
+        (_step(NO_STATUS_LEAD), None),
+        (_step(DONE_LEAD, exit=1), None),
+        (_step(DONE_LEAD), FIRST_CONTEXT),
+    ],
     ids=["no-status-line", "non-zero-exit", "killed"],
 )
 def test_a_lead_failure_writes_failed_with_the_count_one(
@@ -2780,7 +3098,9 @@ def test_a_recut_that_leaves_the_queue_unchanged_writes_failed_after_the_recut_l
     queue = queue_file(WORKBOARD)
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
-    cfg = _sequenced(cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_step(RECUT_LEAD), _step(DONE_LEAD)], recuts=[_step(DIVVYER_RUN)]
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
     assert _failed(texts) == [f"section {first}: failed (1 of 2)"]
@@ -2813,7 +3133,9 @@ def test_a_recut_with_a_non_zero_exit_writes_failed_with_the_new_count(
 def _between(texts: list[str], line: str, sid: str) -> None:
     """`line` lies after the first `lead <sid>: started` line and before the next `lead <sid>: finished` line."""
     started = next(n for n, t in enumerate(texts) if t.startswith(f"lead {sid}: started"))
-    finished = next(n for n, t in enumerate(texts) if n > started and t.startswith(f"lead {sid}: finished "))
+    finished = next(
+        n for n, t in enumerate(texts) if n > started and t.startswith(f"lead {sid}: finished ")
+    )
     assert started < texts.index(line) < finished, texts
 
 
@@ -2872,7 +3194,9 @@ def test_each_run_that_retires_writes_its_own_asked_to_retire_line_and_a_run_tha
     scenario(_lines(DONE_LEAD))
     first = _only_first_open(queue, cfg)
     cfg = dataclasses.replace(cfg, context_limit=RETIRED_CONTEXT)
-    cfg = _sequenced(cfg, tmp_path, [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_SMALL_LEAD)]
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     texts = _texts(capsys.readouterr().out)
     line = f"lead {first}: asked to retire at {RETIRED_CONTEXT} context tokens"
@@ -2915,7 +3239,11 @@ def test_a_run_killed_at_the_hard_ceiling_writes_its_killed_line_and_no_asked_to
 
 @pytest.mark.parametrize(
     ("exit", "rewrite", "outcome"),
-    [(0, False, "with the queue unchanged"), (0, True, "with the queue recut"), (1, True, "exit 1")],
+    [
+        (0, False, "with the queue unchanged"),
+        (0, True, "with the queue recut"),
+        (1, True, "exit 1"),
+    ],
     ids=["unchanged", "recut", "non-zero-exit"],
 )
 def test_recut_started_comes_before_the_recuts_run_and_recut_finished_after_it_however_the_loop_reaches_run_agent(
@@ -3139,7 +3467,9 @@ def _script_text(tmp_path: Path, exit: int, extra: str = "") -> str:
     return f'printf "%s ran\\n" "$1" >> "{ran}"\nprintf "check %s output\\n" "$1"\n{extra}exit {exit}\n'
 
 
-def _check_script(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit: int, extra: str = "") -> Path:
+def _check_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit: int, extra: str = ""
+) -> Path:
     """Write the check script, exiting `exit` after printing `extra`, and name it in `RELAY_CHECK_SCRIPT`."""
     script = tmp_path / "check.sh"
     script.write_text(_script_text(tmp_path, exit, extra))
@@ -3411,7 +3741,20 @@ def test_each_check_run_appends_one_check_line_to_the_ledger(
     entries = _check_entries(queue, cfg)
     assert len(entries) == 2
     fail, ok = entries
-    keys = {"time", "kind", "section", "session", "tokens", "dollars", "command", "exit", "timed_out", "verdict", "tail", "log"}
+    keys = {
+        "time",
+        "kind",
+        "section",
+        "session",
+        "tokens",
+        "dollars",
+        "command",
+        "exit",
+        "timed_out",
+        "verdict",
+        "tail",
+        "log",
+    }
     assert set(fail) == keys
     assert set(ok) == keys
     assert fail["section"] == "s1"
@@ -3548,7 +3891,11 @@ def test_failed_checks_below_the_limit_keep_the_section_open_for_its_resumed_lea
     queue = queue_file(CHECK_QUEUE)
     scenario(_lines(DONE_LEAD))
     script = _failing_check(tmp_path, monkeypatch)
-    leads = [_step(DONE_LEAD), _step(DONE_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    leads = [
+        _step(DONE_LEAD),
+        _step(DONE_LEAD),
+        _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script)),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads)
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     runs = _runs(tmp_path, "lead")
@@ -3564,7 +3911,9 @@ def test_failed_checks_below_the_limit_keep_the_section_open_for_its_resumed_lea
     assert state.section("s2").status == "done"
     texts = _texts(capsys.readouterr().out)
     failed = [t for t in texts if t.startswith("section s1: check failed")]
-    assert failed == ["section s1: check failed (1 of 3)", "section s1: check failed (2 of 3)"], texts
+    assert failed == ["section s1: check failed (1 of 3)", "section s1: check failed (2 of 3)"], (
+        texts
+    )
 
 
 # Check behavior 6: `take_check_feedback` feeds `lead_prompt`.
@@ -3583,7 +3932,11 @@ def test_the_check_feedback_goes_to_the_next_lead_only(
     scenario(_lines(DONE_LEAD))
     _done_in_state(queue, cfg, "s2")
     script = _failing_check(tmp_path, monkeypatch)
-    leads = [_step(DONE_LEAD), _step(NO_STATUS_LEAD), _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script))]
+    leads = [
+        _step(DONE_LEAD),
+        _step(NO_STATUS_LEAD),
+        _step(DONE_SMALL_LEAD, write=(_passing_source(tmp_path), script)),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads)
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     prompts = [str(r["prompt"]) for r in _runs(tmp_path, "lead")]
@@ -3654,7 +4007,9 @@ def _usage(context: int) -> dict[str, int]:
     }
 
 
-def _climb_step(tmp_path: Path, session: str, second_context: int, gate: Path | None = None) -> dict[str, object]:
+def _climb_step(
+    tmp_path: Path, session: str, second_context: int, gate: Path | None = None
+) -> dict[str, object]:
     """A climbing lead's plan step: a first stream (init, one message at FLAG_CONTEXT) and a
     second (one message at `second_context`, then a result ending DONE), in session `session`."""
     streams = tmp_path / "streams"
@@ -3670,7 +4025,14 @@ def _climb_step(tmp_path: Path, session: str, second_context: int, gate: Path | 
         }
         return json.dumps({"type": "assistant", "message": body, "session_id": session})
 
-    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": session,
+        "cwd": "/work",
+        "model": "claude-opus",
+        "tools": ["Bash"],
+    }
     result = {
         "type": "result",
         "subtype": "success",
@@ -3829,7 +4191,9 @@ def test_past_the_hard_ceiling_a_lead_is_killed_as_a_failure_not_retired_idle(
     retired = _retired_idle("s1", IDLE_CONTEXT)
     killed = f"lead s1: killed at {PAST_HARD_CONTEXT} context tokens, past the hard ceiling"
     assert [t for t in texts if ": retired at " in t] == [retired], texts
-    assert [t for t in texts if ": killed at " in t and str(PAST_HARD_CONTEXT) in t] == [killed], texts
+    assert [t for t in texts if ": killed at " in t and str(PAST_HARD_CONTEXT) in t] == [killed], (
+        texts
+    )
     assert texts.index(retired) < texts.index(killed)
     section = State.open(queue, cfg).section("s1")
     assert section.failures == 1
@@ -3895,7 +4259,10 @@ def _on_parent_only(prompt: str) -> bool:
 
 def _design_change_leads(tmp_path: Path) -> list[dict[str, object]]:
     """A lead on s1 ending `DESIGN: <problem>`, then a lead with no status line."""
-    return [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    return [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(NO_STATUS_LEAD),
+    ]
 
 
 def _answer_and_rerun(queue: Path, cfg: Config) -> None:
@@ -3943,7 +4310,10 @@ def test_a_recut_into_nested_ids_is_put_back_and_the_next_lead_runs_on_the_paren
 
 
 def test_a_design_change_recut_into_nested_ids_parks_the_parent_with_a_question_giving_the_kept_cut(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a design-change recut rejected for nested ids leaves `s1` open or drops it from
     # the queue, parks it with "the recut made no usable change" or a question that names neither
@@ -3999,14 +4369,24 @@ MAPPED_FILES = ("relay/git.py", "relay/loop.py", "relay/research.py")
 # relay-cache-cost-design.md:76,154 adds unavailable measurement defaults.
 LEAD_AGENTS = [
     {
-        "name": "builder", "task_id": "a1", "total_tokens": 21844,
-        "models": [], "efforts": [], "cost_dollars": None,
-        "cost_basis": "none", "cost_unavailable": "not reported",
+        "name": "builder",
+        "task_id": "a1",
+        "total_tokens": 21844,
+        "models": [],
+        "efforts": [],
+        "cost_dollars": None,
+        "cost_basis": "none",
+        "cost_unavailable": "not reported",
     },
     {
-        "name": "test-writer", "task_id": "a2", "total_tokens": 41000,
-        "models": [], "efforts": [], "cost_dollars": None,
-        "cost_basis": "none", "cost_unavailable": "not reported",
+        "name": "test-writer",
+        "task_id": "a2",
+        "total_tokens": 41000,
+        "models": [],
+        "efforts": [],
+        "cost_dollars": None,
+        "cost_basis": "none",
+        "cost_unavailable": "not reported",
     },
 ]
 
@@ -4060,7 +4440,10 @@ def _run_entries(queue: Path, cfg: Config) -> list[dict[str, object]]:
 
 @pytest.mark.parametrize("provenance", ["old", "foreign"])
 def test_matching_bytes_do_not_reuse_an_unowned_map_or_researcher(
-    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    provenance: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: matching digests let an old or foreign map bypass a full remap.
@@ -4069,15 +4452,22 @@ def test_matching_bytes_do_not_reuse_an_unowned_map_or_researcher(
     state = State.open(queue, cfg)
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
-    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    mapped = stamp(
+        Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()
+    )
     if provenance == "foreign":
         mapped = attribute(mapped, git_repo.root / "other-queue.md")
     save(mapped, state.map_path("s1"))
     state.set_research_session("s1", "unverified-researcher")
     seen = tmp_path / "replacement.map"
-    cfg = _researched(cfg, tmp_path, [
-        _step(RETIRED_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD),
-    ])
+    cfg = _researched(
+        cfg,
+        tmp_path,
+        [
+            _step(RETIRED_LEAD, write=(state.map_path("s1"), seen)),
+            _step(DONE_LEAD),
+        ],
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     records = _research_runs(tmp_path)
     assert len(records) == 1
@@ -4088,11 +4478,17 @@ def test_matching_bytes_do_not_reuse_an_unowned_map_or_researcher(
     assert replacement is not None
     assert owned(replacement, queue)
     assert replacement.commit == commit
-    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [
+        commit,
+        commit,
+    ]
 
 
 def test_new_map_ownership_and_commit_are_saved_before_a_moving_research_head(
-    cfg: Config, tmp_path: Path, git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: new maps lack provenance or research/byte-identical reuse relabels their commit.
     queue = _research_queue(git_repo)
@@ -4102,13 +4498,25 @@ def test_new_map_ownership_and_commit_are_saved_before_a_moving_research_head(
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
     seen = tmp_path / "attributed.map"
-    cfg = _researched(cfg, tmp_path, [
-        _step(RETIRED_LEAD), _step(DONE_LEAD, write=(state.map_path("s1"), seen)),
-    ])
+    cfg = _researched(
+        cfg,
+        tmp_path,
+        [
+            _step(RETIRED_LEAD),
+            _step(DONE_LEAD, write=(state.map_path("s1"), seen)),
+        ],
+    )
     move_head = [*_GIT, "commit", "--allow-empty", "-q", "-m", "research moved HEAD"]
-    cfg = dataclasses.replace(cfg, research_command=_plan(
-        tmp_path, cfg.lead_command[0], "research", [_step(RESEARCH_RUN, then=move_head)], False,
-    ))
+    cfg = dataclasses.replace(
+        cfg,
+        research_command=_plan(
+            tmp_path,
+            cfg.lead_command[0],
+            "research",
+            [_step(RESEARCH_RUN, then=move_head)],
+            False,
+        ),
+    )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     assert git_repo.git("rev-parse", "HEAD", cwd=tree).strip() != commit
     assert len(_research_runs(tmp_path)) == 1
@@ -4116,25 +4524,40 @@ def test_new_map_ownership_and_commit_are_saved_before_a_moving_research_head(
     assert mapped is not None
     assert owned(mapped, queue)
     assert mapped.commit == commit
-    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [commit, commit]
+    assert [entry["map"] for entry in _run_entries(queue, cfg) if entry["kind"] == "lead"] == [
+        commit,
+        commit,
+    ]
 
 
 @pytest.mark.parametrize("provenance", ["old", "foreign"])
 def test_ask_drops_an_unowned_map_and_session_before_followup(
-    provenance: str, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    provenance: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # Breaks when: ask resumes a researcher attached to an unverified map.
     commit = _mapped_worktree(git_repo)
     queue = _research_queue(git_repo)
     state = State.open(queue, cfg)
-    mapped = stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns())
+    mapped = stamp(
+        Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()
+    )
     if provenance == "foreign":
         mapped = attribute(mapped, git_repo.root / "other-queue.md")
     save(mapped, state.map_path("s1"))
     state.set_research_session("s1", "unverified-researcher")
-    cfg = dataclasses.replace(cfg, research_command=_plan(
-        tmp_path, cfg.lead_command[0], "research", [_step("stream-ask.jsonl")], False,
-    ))
+    cfg = dataclasses.replace(
+        cfg,
+        research_command=_plan(
+            tmp_path,
+            cfg.lead_command[0],
+            "research",
+            [_step("stream-ask.jsonl")],
+            False,
+        ),
+    )
     with pytest.raises(relay.loop.ResearchError, match="(?i)refresh"):
         ask(queue, cfg, "s1", "Which files describe this section?")
     assert not state.map_path("s1").exists()
@@ -4145,14 +4568,21 @@ def test_ask_drops_an_unowned_map_and_session_before_followup(
 @pytest.mark.parametrize("operation", ["research", "ask"])
 @pytest.mark.parametrize("additional_read", [False, True])
 def test_unowned_map_storage_is_loaded_and_invalidated_under_the_research_lock(
-    operation: str, additional_read: bool, cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    operation: str,
+    additional_read: bool,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: map loading or invalidation escapes the existing research lock.
     commit = _mapped_worktree(git_repo)
     queue = _research_queue(git_repo)
     state = State.open(queue, cfg)
-    save(stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()), state.map_path("s1"))
+    save(
+        stamp(Map("s1", commit, MAPPED_FILES, MAP_BODY), git_repo.worktrees["s1"], time.time_ns()),
+        state.map_path("s1"),
+    )
     state.set_research_session("s1", "unverified-researcher")
     events: list[str] = []
     original_load = load
@@ -4199,9 +4629,7 @@ def test_unowned_map_storage_is_loaded_and_invalidated_under_the_research_lock(
     assert events[0] == "load"
     assert "drop" in events
     assert all(
-        events.index("drop") < index
-        for index, event in enumerate(events)
-        if event == "save"
+        events.index("drop") < index for index, event in enumerate(events) if event == "save"
     )
 
 
@@ -4331,7 +4759,10 @@ def test_a_fresh_lead_after_a_retire_refreshes_only_the_changed_mapped_file(
     changed = (edited, wt / "relay" / "git.py")
     # The retired lead commits its edit in the `lead/s1` worktree, so HEAD moves on.
     committed = [*_GIT, "-C", str(wt), "commit", "-q", "-a", "-m", "lead edit"]
-    leads_plan = [_step(RETIRED_LEAD, write=changed, then=committed if edit == "committed" else None), _step(DONE_LEAD)]
+    leads_plan = [
+        _step(RETIRED_LEAD, write=changed, then=committed if edit == "committed" else None),
+        _step(DONE_LEAD),
+    ]
     cfg = _researched(cfg, tmp_path, leads_plan)
     refreshes = [_step(RESEARCH_RUN), _step("stream-research-refresh.jsonl")]
     cfg = dataclasses.replace(
@@ -4344,7 +4775,9 @@ def test_a_fresh_lead_after_a_retire_refreshes_only_the_changed_mapped_file(
     assert len(research) == 2
     for record in research:
         assert Path(str(record["cwd"])).resolve() == git_repo.worktrees["s1"]
-    kept = Map("s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip())
+    kept = Map(
+        "s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip()
+    )
     assert block(kept) in str(research[1]["prompt"])
     assert "relay/git.py" in str(research[1]["prompt"])
     assert "relay/loop.py" not in str(research[1]["prompt"])
@@ -4372,11 +4805,22 @@ def test_a_map_drawn_in_main_is_reused_in_a_new_lead_worktree_with_matching_byte
     queue = _research_queue(git_repo)
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
-    create = [*_GIT, "-C", str(git_repo.root), "worktree", "add", "-q", "-b", section_branch(queue, "s1"), str(wt)]
+    create = [
+        *_GIT,
+        "-C",
+        str(git_repo.root),
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        section_branch(queue, "s1"),
+        str(wt),
+    ]
     seen = tmp_path / "main-map-seen.map"
     state = State.open(queue, cfg)
     cfg = _researched(
-        cfg, tmp_path,
+        cfg,
+        tmp_path,
         [_step(RETIRED_LEAD, then=create), _step(DONE_LEAD, write=(state.map_path("s1"), seen))],
     )
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
@@ -4433,10 +4877,14 @@ def test_a_retained_file_edited_after_freshness_check_is_unknown_and_refreshed_n
     monkeypatch.setattr("relay.research.changed", edit_after_check)
     seen = tmp_path / "first-refresh.map"
     cfg = _researched(
-        cfg, tmp_path,
+        cfg,
+        tmp_path,
         [_step(RETIRED_LEAD, write=(state.map_path("s1"), seen)), _step(DONE_LEAD)],
     )
-    refreshes = [_step("stream-research-refresh.jsonl"), _step("stream-research-empty-refresh.jsonl")]
+    refreshes = [
+        _step("stream-research-refresh.jsonl"),
+        _step("stream-research-empty-refresh.jsonl"),
+    ]
     cfg = dataclasses.replace(
         cfg, research_command=_plan(tmp_path, cfg.lead_command[0], "research", refreshes, False)
     )
@@ -4487,7 +4935,9 @@ def test_an_unsuccessful_refresh_keeps_the_saved_map_and_rechecks_it_on_the_next
     leads = [_step(RETIRED_LEAD), _step(RETIRED_LEAD), _step(DONE_LEAD)]
     cfg = _researched(cfg, tmp_path, leads)
     bad = _step(
-        "stream-research-invalid-refresh.jsonl" if failure == "invalid" else "stream-research-refresh.jsonl",
+        "stream-research-invalid-refresh.jsonl"
+        if failure == "invalid"
+        else "stream-research-refresh.jsonl",
         exit=1 if failure == "failed" else 0,
     )
     refreshes = [bad, bad, _step("stream-research-empty-refresh.jsonl")]
@@ -4497,7 +4947,9 @@ def test_an_unsuccessful_refresh_keeps_the_saved_map_and_rechecks_it_on_the_next
     assert run(queue, cfg) == ExitCode.QUEUE_EMPTY
     records = _research_runs(tmp_path)
     assert len(records) == 3
-    kept = Map("s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip())
+    kept = Map(
+        "s1", commit, ("relay/research.py",), (FIXTURES / "research-kept.txt").read_text().strip()
+    )
     assert all(block(kept) in str(record["prompt"]) for record in records)
     leads = _runs(tmp_path, "lead")
     assert len(leads) == 3
@@ -4519,7 +4971,9 @@ RESEARCH_CONTEXT = 2 + 150 + 800
 def _without_map(cfg: Config, how: str) -> tuple[Config, int]:
     """`cfg` changed so the research run fails `how`, and the exit code of its plan step."""
     if how == "killed":
-        return dataclasses.replace(cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT), 0
+        return dataclasses.replace(
+            cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT
+        ), 0
     if how == "over-lines":
         return dataclasses.replace(cfg, map_max_lines=4), 0
     if how == "over-chars":
@@ -4764,9 +5218,27 @@ def _status_lead(tmp_path: Path, session: str, status: str) -> Path:
     """A scripted lead in session `session` whose result ends with the status line `status`."""
     streams = tmp_path / "streams"
     streams.mkdir(exist_ok=True)
-    usage = {"input_tokens": 6, "cache_creation_input_tokens": 200, "cache_read_input_tokens": 1000, "output_tokens": 30}
-    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
-    body = {"id": f"msg_{session}", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Stuck."}], "usage": usage}
+    usage = {
+        "input_tokens": 6,
+        "cache_creation_input_tokens": 200,
+        "cache_read_input_tokens": 1000,
+        "output_tokens": 30,
+    }
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": session,
+        "cwd": "/work",
+        "model": "claude-opus",
+        "tools": ["Bash"],
+    }
+    body = {
+        "id": f"msg_{session}",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Stuck."}],
+        "usage": usage,
+    }
     message = {"type": "assistant", "message": body, "session_id": session}
     result = {
         "type": "result",
@@ -4788,7 +5260,9 @@ def _with_architect(cfg: Config, tmp_path: Path, steps: list[dict[str, object]])
     """`cfg` with each architect run taking the next step of its plan, recorded as role "design".
     The fake comes from `design_command`, which `_sequenced` leaves as `fake_cfg` set it: after
     `_sequenced`, `lead_command[0]` is the plan's interpreter, not the fake."""
-    return dataclasses.replace(cfg, design_command=_plan(tmp_path, cfg.design_command[0], "design", steps, False))
+    return dataclasses.replace(
+        cfg, design_command=_plan(tmp_path, cfg.design_command[0], "design", steps, False)
+    )
 
 
 def _entries(queue: Path, cfg: Config, kind: str) -> list[dict[str, Any]]:
@@ -4804,7 +5278,9 @@ def _stop_on_ping(cfg: Config, queue: Path) -> Config:
     sends no ping)."""
     stop = State.open(queue, cfg).stop_file
     touch = "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()"
-    return dataclasses.replace(cfg, ping_command=[sys.executable, "-I", "-S", "-c", touch, str(stop), "{message}"])
+    return dataclasses.replace(
+        cfg, ping_command=[sys.executable, "-I", "-S", "-c", touch, str(stop), "{message}"]
+    )
 
 
 def _record_and_stop_on_ping(cfg: Config, queue: Path, tmp_path: Path) -> Config:
@@ -4825,7 +5301,10 @@ def _record_and_stop_on_ping(cfg: Config, queue: Path, tmp_path: Path) -> Config
 
 
 def test_rung_1_a_recut_on_a_section_no_recut_made_runs_the_divvyer_not_the_architect_and_its_ledger_line_carries_rung_1(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the recut's ledger line carries no rung, or rung 2; or a first RECUT on a
     # section whose queue names a design goes to the architect instead of the divvyer.
@@ -4877,7 +5356,10 @@ def test_rung_2_runs_the_architect_without_the_guess_then_the_divvyer_with_the_d
     if how == "design":
         asker = "s1"
         asking = "sess-design"
-        leads = [_step(str(_status_lead(tmp_path, asking, f"DESIGN: {reason}"))), _step(NO_STATUS_LEAD)]
+        leads = [
+            _step(str(_status_lead(tmp_path, asking, f"DESIGN: {reason}"))),
+            _step(NO_STATUS_LEAD),
+        ]
         after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
         recuts = [_step(DIVVYER_RUN, write=(after, queue))]
         rungs = [2]
@@ -4891,7 +5373,10 @@ def test_rung_2_runs_the_architect_without_the_guess_then_the_divvyer_with_the_d
             _step(str(_status_lead(tmp_path, asking, f"RECUT: {reason}"))),
             _step(NO_STATUS_LEAD),
         ]
-        recuts = [_step(DIVVYER_RUN, write=(first, queue)), _step(DIVVYER_RUN, write=(after, queue))]
+        recuts = [
+            _step(DIVVYER_RUN, write=(first, queue)),
+            _step(DIVVYER_RUN, write=(after, queue)),
+        ]
         rungs = [1, 2]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=recuts)
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
@@ -4914,7 +5399,9 @@ def test_rung_2_runs_the_architect_without_the_guess_then_the_divvyer_with_the_d
     # lead's run log, plus the section's last check log only when one exists (none ran here).
     assert "under this design's Order 1, 2, cannot go on" in brief
     state = State.open(queue, cfg)
-    named = sorted(set(re.findall(re.escape(str(state.run_dir).rstrip("/")) + r"/\d+\.jsonl", brief)))
+    named = sorted(
+        set(re.findall(re.escape(str(state.run_dir).rstrip("/")) + r"/\d+\.jsonl", brief))
+    )
     assert len(named) == 1, named
     lead_log = Path(named[0])
     assert lead_log.exists()
@@ -4954,13 +5441,20 @@ ARCHITECT_UNAPPROVED = "stream-architect-unapproved.jsonl"
 DESIGN_PATH = f"docs/superpowers/specs/{LADDER_DESIGN}"
 # The decision lines of ARCHITECT_DECISION's report, as written under DECISIONS.
 DECISION_1 = "1 | Should two() return 2 when one.py is absent? | recommend: no, fail loudly | alternative: return 2"
-DECISION_2 = "2 | Should three() ship in this release? | recommend: yes | alternative: hold it for the next"
+DECISION_2 = (
+    "2 | Should three() ship in this release? | recommend: yes | alternative: hold it for the next"
+)
 
 
 def _failed_design(sid: str) -> str:
     """`ladder.failed_text`'s form for the ladder design, with any `what`
     (relay-ladder-design.md, `relay/ladder.py`)."""
-    return re.escape(f"the design change for {sid} in ") + r"\S*" + re.escape(f"{DESIGN_PATH} did not land: ") + r".+"
+    return (
+        re.escape(f"the design change for {sid} in ")
+        + r"\S*"
+        + re.escape(f"{DESIGN_PATH} did not land: ")
+        + r".+"
+    )
 
 
 def _section_spent(queue: Path, cfg: Config, sid: str, dollars: float) -> None:
@@ -5002,7 +5496,10 @@ def test_rung_3_a_rejected_or_unapproved_design_report_hands_the_section_back_to
     # guidance naming what went wrong (relay-codex-architect-design.md:98-103).
     queue = _ladder(queue_file, cfg, tmp_path)
     scenario(_lines(DONE_LEAD))
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    leads = [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(NO_STATUS_LEAD),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads)
     cfg = _with_architect(cfg, tmp_path, [_step(report)])
     cfg = _stop_on_ping(cfg, queue)
@@ -5036,7 +5533,10 @@ REPORTLESS_AGAIN = "Still blocked: Order 3 already covers step 21; the lead shou
 
 
 def test_a_reportless_architect_is_rerun_with_its_message_then_the_section_goes_back_to_its_lead_unparked(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when (owner's ruling, 29 Oct; Gauntlet s2, runs 24-29): an owner answer the lead took
     # never reaches the architect; the brief lacks the section's text or the lead's branch and head
@@ -5087,7 +5587,9 @@ def test_a_reportless_architect_is_rerun_with_its_message_then_the_section_goes_
     assert "its final message had no BRIEF … END DESIGN block" in added
 
     # The one ping is the go's own stop; none asks the owner anything.
-    assert [" ".join(p) for p in _pings(tmp_path)] == ["relay ladder-queue.md: stopped failed twice: section s1 failed twice"]
+    assert [" ".join(p) for p in _pings(tmp_path)] == [
+        "relay ladder-queue.md: stopped failed twice: section s1 failed twice"
+    ]
     assert _runs(tmp_path, "recut") == []
     leads_run = _runs(tmp_path, "lead")
     assert REPORTLESS_AGAIN in str(leads_run[1]["prompt"])
@@ -5102,16 +5604,26 @@ def test_a_reportless_architect_is_rerun_with_its_message_then_the_section_goes_
 
 
 def test_an_architect_that_files_a_report_on_its_rerun_lands_the_design_change(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: an approved report on the architect's rerun is not acted on as one on its first
     # run would be (the divvyer recuts from the amended design), or the architect runs a third time.
     queue = _ladder(queue_file, cfg, tmp_path)
     scenario(_lines(DONE_LEAD))
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    leads = [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(NO_STATUS_LEAD),
+    ]
     after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
-    cfg = _with_architect(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS))), _step(ARCHITECT_APPROVED)])
+    cfg = _with_architect(
+        cfg,
+        tmp_path,
+        [_step(str(_status_lead(tmp_path, "sess-arch", REPORTLESS))), _step(ARCHITECT_APPROVED)],
+    )
     cfg = _stop_on_ping(cfg, queue)
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
     assert len(_runs(tmp_path, "design")) == 2
@@ -5131,16 +5643,43 @@ STOPPED_FAILED_TWICE = "relay ladder-queue.md: stopped failed twice: section s1 
 
 
 def _architect_run(
-    tmp_path: Path, session: str, text: str, *, is_error: bool = False, context: int = 1206, result: bool = True
+    tmp_path: Path,
+    session: str,
+    text: str,
+    *,
+    is_error: bool = False,
+    context: int = 1206,
+    result: bool = True,
 ) -> Path:
     """A scripted architect run in session `session`: one assistant message at `context` context
     tokens, then, when `result`, a result event carrying `text`, marked an error when `is_error`."""
     streams = tmp_path / "streams"
     streams.mkdir(exist_ok=True)
-    usage = {"input_tokens": 6, "cache_creation_input_tokens": 200, "cache_read_input_tokens": context - 206, "output_tokens": 30}
-    init = {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work", "model": "claude-opus", "tools": ["Bash"]}
-    body = {"id": f"msg_{session}", "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Reading."}], "usage": usage}
-    lines: list[dict[str, object]] = [init, {"type": "assistant", "message": body, "session_id": session}]
+    usage = {
+        "input_tokens": 6,
+        "cache_creation_input_tokens": 200,
+        "cache_read_input_tokens": context - 206,
+        "output_tokens": 30,
+    }
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": session,
+        "cwd": "/work",
+        "model": "claude-opus",
+        "tools": ["Bash"],
+    }
+    body = {
+        "id": f"msg_{session}",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "Reading."}],
+        "usage": usage,
+    }
+    lines: list[dict[str, object]] = [
+        init,
+        {"type": "assistant", "message": body, "session_id": session},
+    ]
     if result:
         lines.append(
             {
@@ -5161,13 +5700,19 @@ def _architect_run(
 
 
 def _architect_goes_wrong(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], architects: list[dict[str, object]]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    architects: list[dict[str, object]],
 ) -> tuple[Path, Config]:
     """The ladder queue whose lead on s1 asks for DESIGN, then ends with no status line every run
     after; each architect run takes the next of `architects`; every ping is recorded and stops
     the go. Return (queue, cfg)."""
     queue = _ladder(queue_file, cfg, tmp_path)
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    leads = [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(NO_STATUS_LEAD),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads)
     cfg = _with_architect(cfg, tmp_path, architects)
     return queue, _record_and_stop_on_ping(cfg, queue, tmp_path)
@@ -5198,10 +5743,16 @@ def _seed_design_failures(queue: Path, cfg: Config, count: int) -> None:
     path.write_text(json.dumps(data))
 
 
-@pytest.mark.parametrize("outcome", ["reportless", "killed", "exit", "error", "zero", "rejected", "unapproved"])
+@pytest.mark.parametrize(
+    "outcome", ["reportless", "killed", "exit", "error", "zero", "rejected", "unapproved"]
+)
 def test_two_unusable_architect_cycles_stop_without_a_budget_or_cap(
-    outcome: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
-    scenario: Callable[[list[str]], Path], capsys: pytest.CaptureFixture[str],
+    outcome: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: child invocations count as cycles, or repeated unusable cycles spend forever.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -5214,9 +5765,14 @@ def test_two_unusable_architect_cycles_stop_without_a_budget_or_cap(
         architect = _step(ARCHITECT_REJECTED if outcome == "rejected" else ARCHITECT_UNAPPROVED)
         expected_runs = 2
     else:
-        path = _architect_run(tmp_path, "unusable", "API Error: overloaded" if outcome == "error" else REPORTLESS,
-                              is_error=outcome == "error", context=cfg.hard_ceiling if outcome == "killed" else 1206,
-                              result=outcome != "zero")
+        path = _architect_run(
+            tmp_path,
+            "unusable",
+            "API Error: overloaded" if outcome == "error" else REPORTLESS,
+            is_error=outcome == "error",
+            context=cfg.hard_ceiling if outcome == "killed" else 1206,
+            result=outcome != "zero",
+        )
         if outcome == "zero":
             path.write_text(path.read_text().splitlines()[0] + "\n")
         architect = _step(str(path), exit=1 if outcome == "exit" else 0)
@@ -5235,15 +5791,25 @@ def test_two_unusable_architect_cycles_stop_without_a_budget_or_cap(
     assert _runs(tmp_path, "recut") == []
     messages = [" ".join(p) for p in _pings(tmp_path)]
     assert len(messages) == 1
-    for detail in ("architect failed repeatedly", "s1", "2", section.design_failure, "relay answer"):
+    for detail in (
+        "architect failed repeatedly",
+        "s1",
+        "2",
+        section.design_failure,
+        "relay answer",
+    ):
         assert detail in messages[0]
     assert "architect failed repeatedly" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("usable", ["decisions", "unfiled", "approved"])
 def test_usable_architect_progress_clears_failures_before_park_or_failed_recut(
-    usable: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
-    scenario: Callable[[list[str]], Path], monkeypatch: pytest.MonkeyPatch,
+    usable: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: usable progress retains the earlier failure, including when its recut fails.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -5260,10 +5826,17 @@ def test_usable_architect_progress_clears_failures_before_park_or_failed_recut(
     request = _step(str(_status_lead(tmp_path, "request", f"DESIGN: {PROBLEM}")))
     before_recut = tmp_path / "state-before-recut.json"
     state_path = State.open(queue, cfg).stop_file.parent / "state.json"
-    cfg = _sequenced(cfg, tmp_path, [request], recuts=[_step(DIVVYER_RUN, exit=1, write=(state_path, before_recut))])
+    cfg = _sequenced(
+        cfg,
+        tmp_path,
+        [request],
+        recuts=[_step(DIVVYER_RUN, exit=1, write=(state_path, before_recut))],
+    )
     report = ARCHITECT_APPROVED if usable == "approved" else ARCHITECT_DECISION
     if usable == "unfiled":
-        events = [json.loads(line) for line in (FIXTURES / ARCHITECT_DECISION).read_text().splitlines()]
+        events = [
+            json.loads(line) for line in (FIXTURES / ARCHITECT_DECISION).read_text().splitlines()
+        ]
         text = events[-1]["result"]
         text = text.replace(f"  {DECISION_1}\n", "")
         text = text.replace(f"  {DECISION_2}\n", "")
@@ -5280,12 +5853,18 @@ def test_usable_architect_progress_clears_failures_before_park_or_failed_recut(
     assert len(_runs(tmp_path, "recut")) == (1 if usable == "approved" else 0)
     if usable == "approved":
         section_before_recut = json.loads(before_recut.read_text())["sections"]["s1"]
-        assert (section_before_recut["design_failures"], section_before_recut["design_failure"]) == (0, None)
+        assert (
+            section_before_recut["design_failures"],
+            section_before_recut["design_failure"],
+        ) == (0, None)
 
 
 @pytest.mark.parametrize("report", [ARCHITECT_APPROVED, ARCHITECT_DECISION])
 def test_zero_token_usable_architect_reports_retry_then_reach_persistent_cycle_bound(
-    report: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    report: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when valid report text overrides zero-token failure or clears its cycle count.
@@ -5317,8 +5896,12 @@ def test_zero_token_usable_architect_reports_retry_then_reach_persistent_cycle_b
 
 @pytest.mark.parametrize("answered", [False, True])
 def test_restart_at_architect_bound_launches_nothing_until_explicit_answer(
-    answered: bool, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
-    scenario: Callable[[list[str]], Path], fake_run,
+    answered: bool,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+    fake_run,
 ) -> None:
     # Breaks when: a restart launches any agent at the bound, or relay answer cannot recover it.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -5342,7 +5925,10 @@ def test_restart_at_architect_bound_launches_nothing_until_explicit_answer(
 
 
 def test_answered_design_failure_propagates_architect_stop(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the answered-decision path loses an architect stop or launches another lead.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -5364,7 +5950,10 @@ def test_answered_design_failure_propagates_architect_stop(
 
 
 def test_lead_retirement_keeps_the_previous_architect_cycle_failure(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: retiring a lead clears its section's earlier architect cycle failure.
     queue = _ladder(queue_file, cfg, tmp_path)
@@ -5383,7 +5972,9 @@ def test_lead_retirement_keeps_the_previous_architect_cycle_failure(
 
 
 def test_restart_at_architect_bound_stops_before_research_launch(
-    cfg: Config, tmp_path: Path, git_repo: GitRepo,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
 ) -> None:
     # Breaks when: the persisted bound is checked after a runnable section starts research.
     _mapped_worktree(git_repo)
@@ -5434,11 +6025,15 @@ def test_a_failed_architect_run_reruns_once_with_its_error_line_then_goes_back_t
     scenario(_lines(DONE_LEAD))
     text = "Blocked: the cited Relay log is outside the repository."
     if how == "killed":
-        architect = _step(str(_architect_run(tmp_path, "sess-arch", text, context=cfg.hard_ceiling)))
+        architect = _step(
+            str(_architect_run(tmp_path, "sess-arch", text, context=cfg.hard_ceiling))
+        )
     elif how == "nonzero-exit":
         architect = _step(str(_architect_run(tmp_path, "sess-arch", text)), exit=1)
     else:
-        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
+        architect = _step(
+            str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True))
+        )
     queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
 
@@ -5459,9 +6054,18 @@ def test_a_failed_architect_run_reruns_once_with_its_error_line_then_goes_back_t
     if said is not None:
         assert said in prompt[prompt.index(HANDBACK) :].split("\n", 1)[1], prompt
     texts = _texts(capsys.readouterr().out)
-    retrying = [t for t in texts if t.startswith("design s1: it failed: ") and t.endswith("; running the architect again")]
+    retrying = [
+        t
+        for t in texts
+        if t.startswith("design s1: it failed: ") and t.endswith("; running the architect again")
+    ]
     assert len(retrying) == 1, texts
-    back = [t for t in texts if t.startswith("design s1: it failed: ") and t.endswith("; back to the lead with the architect's message")]
+    back = [
+        t
+        for t in texts
+        if t.startswith("design s1: it failed: ")
+        and t.endswith("; back to the lead with the architect's message")
+    ]
     assert len(back) == 1, texts
 
 
@@ -5504,16 +6108,22 @@ def test_a_reportless_architect_run_reruns_once_then_goes_back_to_the_lead_with_
         # A run cut off mid-turn may be judged failed or reportless; either way it is rerun once
         # and handed back.
         assert no_block or re.search(r"it failed: \S", added), added
-        assert HANDBACK + "it filed no report)" in prompt or HANDBACK + "it failed: " in prompt, prompt
+        assert HANDBACK + "it filed no report)" in prompt or HANDBACK + "it failed: " in prompt, (
+            prompt
+        )
         whats = ["it filed no report", "it failed: "]
     retrying = [
-        t for t in texts
-        if any(t.startswith(f"design s1: {w}") for w in whats) and t.endswith("; running the architect again")
+        t
+        for t in texts
+        if any(t.startswith(f"design s1: {w}") for w in whats)
+        and t.endswith("; running the architect again")
     ]
     assert len(retrying) == 1, texts
     back = [
-        t for t in texts
-        if any(t.startswith(f"design s1: {w}") for w in whats) and t.endswith("; back to the lead with the architect's message")
+        t
+        for t in texts
+        if any(t.startswith(f"design s1: {w}") for w in whats)
+        and t.endswith("; back to the lead with the architect's message")
     ]
     assert len(back) == 1, texts
 
@@ -5522,10 +6132,13 @@ def test_a_reportless_architect_run_reruns_once_then_goes_back_to_the_lead_with_
 # still park, a rerun's included; and no rerun once the section cap or the budget is spent
 # (relay-codex-architect-design.md, `relay/loop.py` `_architect`, `_design_outcome`; Order 5).
 
-_WHATS = {ARCHITECT_REJECTED: "it rejected the brief as steering", ARCHITECT_UNAPPROVED: "it did not approve the design"}
+_WHATS = {
+    ARCHITECT_REJECTED: "it rejected the brief as steering",
+    ARCHITECT_UNAPPROVED: "it did not approve the design",
+}
 # A line of each fixture's final message, which the hand-back carries as guidance.
 _SAIDS = {
-    ARCHITECT_REJECTED: "\"lead's guess, free to ignore: make two() return 2\"",
+    ARCHITECT_REJECTED: '"lead\'s guess, free to ignore: make two() return 2"',
     ARCHITECT_UNAPPROVED: "Amended the design, but its approve: line does not quote the standing ruling.",
 }
 CAP_TEXT = re.compile(
@@ -5584,7 +6197,9 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
     # false hand-back guidance is emitted; or the failed first run is never rerun.
     scenario(_lines(DONE_LEAD))
     failed = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
-    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [failed, _step(ARCHITECT_DECISION)])
+    queue, cfg = _architect_goes_wrong(
+        cfg, tmp_path, queue_file, [failed, _step(ARCHITECT_DECISION)]
+    )
     assert run(queue, cfg) == ExitCode.STOP_FILE
 
     assert len(_runs(tmp_path, "design")) == 2
@@ -5607,7 +6222,9 @@ def test_a_failed_architect_run_whose_rerun_files_decisions_still_parks_with_the
     assert section.failures == 0
     assert (section.design_failures, section.design_failure) == (0, None)
     texts = _texts(capsys.readouterr().out)
-    assert all(not t.endswith("; back to the lead with the architect's message") for t in texts), texts
+    assert all(not t.endswith("; back to the lead with the architect's message") for t in texts), (
+        texts
+    )
 
 
 @pytest.mark.parametrize("how", ["nonzero-exit", "backend-error"])
@@ -5626,8 +6243,12 @@ def test_an_architect_run_that_spends_the_section_cap_is_not_rerun_and_the_next_
     if how == "nonzero-exit":
         architect = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
     else:
-        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
-    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)])
+        architect = _step(
+            str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True))
+        )
+    queue, cfg = _architect_goes_wrong(
+        cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)]
+    )
     # s1's `cap: $5` is under its spend before the lead ($4.985) and after it ($4.995), and
     # spent once the architect's $0.01 lands ($5.005).
     _section_spent(queue, cfg, "s1", 4.985)
@@ -5663,8 +6284,12 @@ def test_an_architect_run_that_spends_the_budget_is_not_rerun_and_the_go_stops_o
     if how == "nonzero-exit":
         architect = _step(str(_architect_run(tmp_path, "sess-arch", "Blocked.")), exit=1)
     else:
-        architect = _step(str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True)))
-    queue, cfg = _architect_goes_wrong(cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)])
+        architect = _step(
+            str(_architect_run(tmp_path, "sess-arch", "API Error: overloaded", is_error=True))
+        )
+    queue, cfg = _architect_goes_wrong(
+        cfg, tmp_path, queue_file, [architect, _step(ARCHITECT_APPROVED)]
+    )
     # The lead spends $0.01, under the budget; the architect's $0.01 more passes it.
     cfg = dataclasses.replace(cfg, dollar_budget=0.015)
     assert run(queue, cfg) == ExitCode.BUDGET
@@ -5693,7 +6318,10 @@ def test_rung_3_a_design_decision_parks_with_its_recommendation_and_relay_answer
     queue = _ladder(queue_file, cfg, tmp_path)
     scenario(_lines(DONE_LEAD))
     after = _renamed(queue, "s1", "s1b", tmp_path / "amended.md")
-    leads = [_step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)]
+    leads = [
+        _step(str(_status_lead(tmp_path, "sess-design", f"DESIGN: {PROBLEM}"))),
+        _step(NO_STATUS_LEAD),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads, recuts=[_step(DIVVYER_RUN, write=(after, queue))])
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_DECISION), _step(ARCHITECT_APPROVED)])
     state = State.open(queue, cfg)
@@ -5910,7 +6538,14 @@ def _stop_lead(queue: Path, cfg: Config) -> dict[str, object]:
     line, so a loop that runs one lead more than the behavior allows stops with `STOP_FILE` and
     the test's count of lead runs fails, instead of the plan's last step running forever."""
     stop = State.open(queue, cfg).stop_file
-    touch = [sys.executable, "-I", "-S", "-c", "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()", str(stop)]
+    touch = [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()",
+        str(stop),
+    ]
     return _step(NO_STATUS_LEAD, then=touch)
 
 
@@ -5942,7 +6577,9 @@ def test_waiting_holds_the_section_on_its_blocker_with_no_ping_while_the_loop_go
     # open so its lead runs again before its blocker lands; or no "waiting on" line is written.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     scenario(_lines(DONE_LEAD))
-    cfg = _sequenced(cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(NEEDS_OWNER_LEAD)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", "s2"), _step(NEEDS_OWNER_LEAD)]
+    )
     state = State.open(queue, cfg)
     loop = _Background(queue, cfg)
     try:
@@ -6076,13 +6713,17 @@ def test_waiting_on_an_unknown_self_landed_or_dependent_blocker_parks_the_sectio
     # is the section itself, has already landed, or depends on the section, instead of parking
     # it for the owner with a ping and a reason.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
-    waits_for = {"unknown": "s9", "self": "s1", "landed": "s2", "depends-on-the-section": "s2"}[blocker]
+    waits_for = {"unknown": "s9", "self": "s1", "landed": "s2", "depends-on-the-section": "s2"}[
+        blocker
+    ]
     if blocker == "landed":
         State.open(queue, cfg).mark_done("s2")
     if blocker == "depends-on-the-section":
         _with_depends(queue, {"s2": "s1"})
     scenario(_lines(DONE_LEAD))
-    cfg = _sequenced(cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", waits_for), _stop_lead(queue, cfg)])
+    cfg = _sequenced(
+        cfg, tmp_path, [_waiting_lead(tmp_path, "sess-wait", waits_for), _stop_lead(queue, cfg)]
+    )
     cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
     stop_after(queue, cfg)
     assert run(queue, cfg) == ExitCode.STOP_FILE
@@ -6108,7 +6749,10 @@ def test_waiting_on_a_section_that_waits_on_it_parks_the_second_waiter_with_a_pi
     # on s2 and neither ever wakes.
     queue = _queue_of(tmp_path / "queue.md", "s1", "s2")
     scenario(_lines(DONE_LEAD))
-    leads = [_waiting_lead(tmp_path, "sess-wait-1", "s2"), _waiting_lead(tmp_path, "sess-wait-2", "s1")]
+    leads = [
+        _waiting_lead(tmp_path, "sess-wait-1", "s2"),
+        _waiting_lead(tmp_path, "sess-wait-2", "s1"),
+    ]
     cfg = _sequenced(cfg, tmp_path, leads + [_stop_lead(queue, cfg)])
     cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
     stop_after(queue, cfg)
@@ -6144,7 +6788,9 @@ def test_waiting_on_a_blocker_recut_out_of_the_queue_whose_recut_section_needs_t
     # s2a first where it is to wait on s1.
     s1 = "section s1 | lead | steps: 1\n  s1 work\n"
     if through == "depends_on":
-        recut.write_text(s1 + "section s2a | lead | steps: 1 | from: s2 | depends: s1\n  s2a work\n")
+        recut.write_text(
+            s1 + "section s2a | lead | steps: 1 | from: s2 | depends: s1\n  s2a work\n"
+        )
     else:
         recut.write_text("section s2a | lead | steps: 1 | from: s2\n  s2a work\n" + s1)
     scenario(_lines(DONE_LEAD))
@@ -6169,6 +6815,8 @@ def test_waiting_on_a_blocker_recut_out_of_the_queue_whose_recut_section_needs_t
     # The last ping is the stop's own; s1's park ping comes before it and carries its reason.
     parked = [p for p in _pings(tmp_path)[:-1] if cycled.question in p[0]]
     assert len(parked) == 1
+
+
 # Order 17, behavior 5: run a lead with `resume` set to the section's `last_session`, or else
 # `last_session_any`, and `report` set to the section's own `last_report`. A report from another
 # section is never passed, even when `resume` comes from `last_session_any`.
@@ -6199,7 +6847,10 @@ def _last_report(queue: Path, cfg: Config, sid: str) -> object:
 
 
 def test_the_lead_is_given_its_sections_own_last_report(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop passes no report, or another section's, though the section has its own.
     queue = queue_file(WORKBOARD)
@@ -6218,7 +6869,10 @@ def test_the_lead_is_given_its_sections_own_last_report(
 
 
 def test_a_report_from_another_section_is_never_passed_when_resume_comes_from_last_session_any(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop takes the report from the section whose session it resumes.
     queue = queue_file(WORKBOARD)
@@ -6234,7 +6888,10 @@ def test_a_report_from_another_section_is_never_passed_when_resume_comes_from_la
 
 
 def test_a_fresh_lead_after_a_retired_one_is_given_the_retired_leads_final_report(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the loop never records the result text, or never passes it to the next lead.
     queue = queue_file(WORKBOARD)
@@ -6276,7 +6933,10 @@ def test_a_failed_lead_runs_result_text_is_recorded_too(
 
 
 def test_a_run_with_no_result_text_replaces_the_sections_last_report_with_a_stopped_leads_handoff(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a killed run, which has no result text, leaves the earlier lead's report in place.
     # relay-run-overhead-design.md:114: the record is handoff(result, None), "Its last reply: none".
@@ -6301,8 +6961,12 @@ def test_a_run_with_no_result_text_replaces_the_sections_last_report_with_a_stop
 # last reply: <result_text or 'none'>\nIts agents, as Relay saw them: <one line per agent: name,
 # description, status or 'running when it stopped'>."
 
-WITH_STATUS_HANDOFF = "The previous lead's final report (that session's last reply, so you need not recall it):\n"
-AGENTS_LEAD_FILE = "stream-agents.jsonl"  # two subagents: a1 "Build s2.d1 stub", a2 "s2.d2 red tests"
+WITH_STATUS_HANDOFF = (
+    "The previous lead's final report (that session's last reply, so you need not recall it):\n"
+)
+AGENTS_LEAD_FILE = (
+    "stream-agents.jsonl"  # two subagents: a1 "Build s2.d1 stub", a2 "s2.d2 red tests"
+)
 STOPPED_REPLY = "Still running; waiting for its report."
 
 
@@ -6340,7 +7004,10 @@ def test_a_lead_with_no_status_is_stored_as_stopped_without_a_final_report_with_
 
 
 def test_a_killed_lead_with_no_reply_hands_the_next_lead_last_reply_none(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: a killed lead's run clears last_report, or its handoff omits "Its last reply: none".
     queue = queue_file(WORKBOARD)
@@ -6367,7 +7034,11 @@ def test_a_lead_with_no_status_hands_on_one_line_per_agent_with_its_status(
     # agent with no finish notice as anything but "running when it stopped".
     queue = queue_file(WORKBOARD)
     events = [json.loads(line) for line in _lines(AGENTS_LEAD_FILE)]
-    kept = [e for e in events if not (e.get("subtype") == "task_notification" and e.get("task_id") == "a2")]
+    kept = [
+        e
+        for e in events
+        if not (e.get("subtype") == "task_notification" and e.get("task_id") == "a2")
+    ]
     kept[-1]["result"] = STOPPED_REPLY
     scenario([json.dumps(e) for e in kept])
     assert run(queue, cfg) == ExitCode.FAILED_TWICE
@@ -6411,7 +7082,11 @@ _FAILED_RESEARCH = {
         "api overloaded, retry later",
     ),
     "exit-nonzero-bare": (_step(RESEARCH_RUN, exit=9), False, "exit 9"),
-    "killed-with-stderr": (_step(RESEARCH_RUN, then=_stderr("reader pool exhausted\n")), True, "reader pool exhausted"),
+    "killed-with-stderr": (
+        _step(RESEARCH_RUN, then=_stderr("reader pool exhausted\n")),
+        True,
+        "reader pool exhausted",
+    ),
     "no-tokens": (dict(_step(RESEARCH_RUN), scenario=os.devnull), False, "used no tokens"),
 }
 
@@ -6435,7 +7110,9 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     _done_in_state(queue, cfg, "s2")
     _check_script(tmp_path, monkeypatch, 0)
     if killed:
-        cfg = dataclasses.replace(cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT)
+        cfg = dataclasses.replace(
+            cfg, context_limit=RESEARCH_CONTEXT - 50, hard_ceiling=RESEARCH_CONTEXT
+        )
     fake = cfg.lead_command[0]
     cfg = _sequenced(cfg, tmp_path, [_step(DONE_SMALL_LEAD)])
     research = _plan(tmp_path, fake, "research", [step], False)
@@ -6452,7 +7129,11 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     assert section.status == "done"
     texts = _texts(capsys.readouterr().out)
     # The section's "mapping in <cwd>" line is set aside: pytest's tmp_path carries this test's name.
-    finished = [t for t in texts if t.startswith("research s1: ") and not t.startswith("research s1: mapping in ")]
+    finished = [
+        t
+        for t in texts
+        if t.startswith("research s1: ") and not t.startswith("research s1: mapping in ")
+    ]
     reported = [t for t in finished if "fail" in t]
     assert len(reported) == 1, texts
     # The spend tail reads "(peak context <n>, <n> tokens summed over turns, $<d>)"
@@ -6464,11 +7145,15 @@ def test_a_research_run_that_fails_reports_its_error_line_in_progress_and_a_ping
     assert re.fullmatch(form, reported[0]), texts
     assert not any(t.startswith("research s1: no usable map ") for t in texts), texts
     pings = [p[0] for p in _pings(tmp_path) if "research s1" in p[0] or "fail" in p[0]]
-    assert pings == [f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"], _pings(tmp_path)
+    assert pings == [
+        f"relay {queue.name}: research s1 failed: {error}; the lead starts without a map"
+    ], _pings(tmp_path)
 
 
 def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_replay(
-    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    cfg: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: the loop relies on lead-written cost rows, loses final descendants,
@@ -6485,17 +7170,27 @@ def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_
     folder.mkdir(parents=True)
     for sid, row in sessions.items():
         counts = {
-            "input_tokens": row["input"], "cached_input_tokens": row["cached"],
-            "cache_write_input_tokens": 0, "output_tokens": row["output"],
-            "reasoning_output_tokens": 0, "total_tokens": row["input"] + row["output"],
+            "input_tokens": row["input"],
+            "cached_input_tokens": row["cached"],
+            "cache_write_input_tokens": 0,
+            "output_tokens": row["output"],
+            "reasoning_output_tokens": 0,
+            "total_tokens": row["input"] + row["output"],
         }
         records = [
             {"type": "session_meta", "payload": {"id": sid}},
             {"type": "turn_context", "payload": {"model": row["model"], "effort": row["effort"]}},
-            {"type": "event_msg", "payload": {"type": "token_count", "info": {
-                "total_token_usage": counts, "last_token_usage": counts,
-                "model_context_window": 258400,
-            }}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": counts,
+                        "last_token_usage": counts,
+                        "model_context_window": 258400,
+                    },
+                },
+            },
         ]
         (folder / f"rollout-2026-10-29T01-52-00-{sid}.jsonl").write_text(
             "".join(json.dumps(record) + "\n" for record in records)
@@ -6514,9 +7209,15 @@ def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_
             state = super().poll(state, force_scan=force_scan)
             polls.append((self.sid, force_scan))
             if self.sid in sessions:
-                self.usage = tuple(dataclasses.replace(
-                    usage, cache_write_30m=0, cache_write_12h=0, unavailable=None,
-                ) for usage in self.usage)
+                self.usage = tuple(
+                    dataclasses.replace(
+                        usage,
+                        cache_write_30m=0,
+                        cache_write_12h=0,
+                        unavailable=None,
+                    )
+                    for usage in self.usage
+                )
                 self.unavailable = None
                 self.children = tuple(sessions[self.sid]["children"])
             return state
@@ -6533,36 +7234,76 @@ def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_
         log.write_text("")
         backend = CodexBackend()
         state = StreamState(None, 0, Spend(0, 0.0), None, False)
-        state = backend.parse(state, json.dumps({"type": "thread.started", "thread_id": fixture["lead"]}))
-        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
-            "id": "synthetic-discovery", "type": "collab_tool_call", "tool": "spawn_agent",
-            "sender_thread_id": fixture["lead"],
-            "receiver_thread_ids": [fixture["worker"], fixture["missing"]],
-            "prompt": "Synthetic fixture work", "status": "completed",
-            "agents_states": {fixture["worker"]: {"status": "completed", "message": None}},
-        }}))
+        state = backend.parse(
+            state, json.dumps({"type": "thread.started", "thread_id": fixture["lead"]})
+        )
+        state = backend.parse(
+            state,
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "synthetic-discovery",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "sender_thread_id": fixture["lead"],
+                        "receiver_thread_ids": [fixture["worker"], fixture["missing"]],
+                        "prompt": "Synthetic fixture work",
+                        "status": "completed",
+                        "agents_states": {
+                            fixture["worker"]: {"status": "completed", "message": None}
+                        },
+                    },
+                }
+            ),
+        )
         state = backend.poll(state)
-        state = backend.parse(state, json.dumps({"type": "item.completed", "item": {
-            "id": "synthetic-descendant-status", "type": "collab_tool_call", "tool": "spawn_agent",
-            "sender_thread_id": fixture["worker"], "receiver_thread_ids": [fixture["descendant"]],
-            "prompt": "", "status": "completed",
-            "agents_states": {fixture["descendant"]: {"status": "failed", "message": "Synthetic failure"}},
-        }}))
+        state = backend.parse(
+            state,
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "synthetic-descendant-status",
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "sender_thread_id": fixture["worker"],
+                        "receiver_thread_ids": [fixture["descendant"]],
+                        "prompt": "",
+                        "status": "completed",
+                        "agents_states": {
+                            fixture["descendant"]: {
+                                "status": "failed",
+                                "message": "Synthetic failure",
+                            }
+                        },
+                    },
+                }
+            ),
+        )
         # Failed is normalized lifecycle evidence, not a claim about CLI status spelling.
-        state = dataclasses.replace(state, activity=dataclasses.replace(
-            state.activity,
-            agents=tuple(dataclasses.replace(agent, status="failed")
-                         if agent.task_id == fixture["descendant"] else agent
-                         for agent in state.activity.agents),
-            live=state.activity.live - {fixture["descendant"]},
-        ))
+        state = dataclasses.replace(
+            state,
+            activity=dataclasses.replace(
+                state.activity,
+                agents=tuple(
+                    dataclasses.replace(agent, status="failed")
+                    if agent.task_id == fixture["descendant"]
+                    else agent
+                    for agent in state.activity.agents
+                ),
+                live=state.activity.live - {fixture["descendant"]},
+            ),
+        )
         output_file = run_dir / "final.txt"
         output_file.write_text("All work finished.\nDONE")
         state = backend.finish(state, output_file)
         state = dataclasses.replace(state, spend=Spend(3300, dollars(cfg, state.usage)))
         final_states.append(state)
         log.with_suffix(".backend.json").write_text(json.dumps({"backend": "codex"}))
-        log.with_suffix(".telemetry.json").write_text(json.dumps(dataclasses.asdict(state), default=list))
+        log.with_suffix(".telemetry.json").write_text(
+            json.dumps(dataclasses.asdict(state), default=list)
+        )
         assert on_event(state) == "go"
         return relay.runner.RunResult(0, False, state, log)
 
@@ -6596,20 +7337,34 @@ def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_
             assert "API-equivalent estimate" in row and "not subscription billing" in row, row
             amount = re.search(r"\$([0-9.eE+-]+)", row)
             assert amount is not None
-            assert float(amount.group(1)) == pytest.approx(expected_costs[agent.task_id]), (row, expected_costs)
+            assert float(amount.group(1)) == pytest.approx(expected_costs[agent.task_id]), (
+                row,
+                expected_costs,
+            )
     entries = _run_entries(queue, cfg)
     leads = [entry for entry in entries if entry["kind"] == "lead"]
     assert len(leads) == 1
     expected_total = sum(expected_costs.values())
     assert leads[0]["tokens"] == 3300
     assert leads[0]["dollars"] == pytest.approx(expected_total), leads[0]
-    assert leads[0]["dollars"] != pytest.approx((1000 * 2 + 100 * 10 + 2000 * 1 + 200 * 5) / 1_000_000)
+    assert leads[0]["dollars"] != pytest.approx(
+        (1000 * 2 + 100 * 10 + 2000 * 1 + 200 * 5) / 1_000_000
+    )
     assert len(leads[0]["agents"]) == len(expected)
     assert [row["task_id"] for row in leads[0]["agents"]] == expected_ids
     for row, agent in zip(leads[0]["agents"], expected):
-        for field in ("task_id", "models", "efforts", "cost_dollars", "cost_basis", "cost_unavailable"):
+        for field in (
+            "task_id",
+            "models",
+            "efforts",
+            "cost_dollars",
+            "cost_basis",
+            "cost_unavailable",
+        ):
             value = getattr(agent, field)
-            assert field in row and row[field] == (list(value) if isinstance(value, tuple) else value)
+            assert field in row and row[field] == (
+                list(value) if isinstance(value, tuple) else value
+            )
         if agent.task_id in expected_costs:
             assert row["cost_dollars"] == pytest.approx(expected_costs[agent.task_id])
     state = State.open(queue, cfg)
@@ -6620,7 +7375,8 @@ def test_cached_lead_final_state_drives_complete_output_and_ledger_and_survives_
     assert len(logs) == 1
     restored = relay.backends.replay(logs[0])
     relay.progress.lead_finished(
-        "cached-section", relay.runner.RunResult(0, False, restored, logs[0]),
+        "cached-section",
+        relay.runner.RunResult(0, False, restored, logs[0]),
         relay.status.LeadStatus(kind="DONE", text=""),
     )
     replayed_rows = [line for line in _texts(capsys.readouterr().out) if "final cost" in line]
@@ -6719,9 +7475,12 @@ def test_drain_request_marks_the_live_run_and_announces_once(
     assert record.pid == os.getpid()
     assert record.draining is True
     assert before <= record.draining_since <= time.time()
-    assert _texts(capsys.readouterr().out).count(
-        "drain requested: finishing the running agent, starting nothing new"
-    ) == 1
+    assert (
+        _texts(capsys.readouterr().out).count(
+            "drain requested: finishing the running agent, starting nothing new"
+        )
+        == 1
+    )
     assert not state.run_record.exists()
 
 
@@ -6744,7 +7503,9 @@ def test_drain_at_pass_top_precedes_stop_file_and_sends_the_drained_stop(
     assert fake_run.calls == []
     assert len(_pings(tmp_path)) == 1
     assert "drained" in _pings(tmp_path)[0][0]
-    assert "a drain was requested; running work finished and was recorded" in capsys.readouterr().out
+    assert (
+        "a drain was requested; running work finished and was recorded" in capsys.readouterr().out
+    )
     _untouched(queue, cfg)
 
 
@@ -6811,7 +7572,9 @@ def test_drain_before_section_dispatch_preserves_pending_and_answer_and_starts_n
     else:
         queue = _ladder(queue_file, cfg, tmp_path)
     state = State.open(queue, cfg)
-    pending = relay.loop.Pending(kind="climb", lead_log="held-lead.log", problem="Retain this dispatch")
+    pending = relay.loop.Pending(
+        kind="climb", lead_log="held-lead.log", problem="Retain this dispatch"
+    )
     if dispatch == "pending":
         state.set_pending("s1", pending)
     elif dispatch == "design-answer":
@@ -6821,7 +7584,9 @@ def test_drain_before_section_dispatch_preserves_pending_and_answer_and_starts_n
     for name in ("take_pending", "take_answer"):
         original = getattr(State, name)
 
-        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+        def observed(
+            self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any
+        ) -> Any:
             taken.append(_name)
             return _original(self, *args, **kwargs)
 
@@ -6874,7 +7639,9 @@ def test_drain_after_research_takes_no_lead_inputs_and_starts_no_lead(
     for name in ("take_answer", "take_check_feedback", "take_guidance"):
         original = getattr(State, name)
 
-        def observed(self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any) -> Any:
+        def observed(
+            self: State, *args: Any, _name: str = name, _original: Any = original, **kwargs: Any
+        ) -> Any:
             if requested:
                 taken.append(_name)
             return _original(self, *args, **kwargs)
@@ -6905,14 +7672,21 @@ def test_draining_progress_prints_the_documented_message_once(
 
 @pytest.mark.parametrize("status", ["RECUT", "DESIGN"])
 def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
-    status: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    status: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: the finished lead climbs during drain, loses its exact status text/log,
     # or restart runs another lead instead of the saved climb.
     queue = _ladder(queue_file, cfg, tmp_path)
     report = f"{status}: {PROBLEM}"
-    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", report))), _step(NO_STATUS_LEAD)])
+    cfg = _sequenced(
+        cfg,
+        tmp_path,
+        [_step(str(_status_lead(tmp_path, "held-lead", report))), _step(NO_STATUS_LEAD)],
+    )
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_UNAPPROVED)])
     with monkeypatch.context() as patch:
         _every_run_agent(patch, _drain_after_role("lead"))
@@ -6938,6 +7712,7 @@ def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
         def dispatched(*args, **kwargs):
             order.append(kwargs.get("role", "lead"))
             return original(*args, **kwargs)
+
         return dispatched
 
     _every_run_agent(monkeypatch, record)
@@ -6948,7 +7723,10 @@ def test_drain_defers_the_leads_climb_and_restart_runs_the_saved_dispatch(
 
 @pytest.mark.parametrize("failed", [False, True], ids=["reportless", "failed"])
 def test_drain_saves_the_built_architect_retry_and_restart_dispatches_it_verbatim(
-    failed: bool, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    failed: bool,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: retry starts during drain, its built brief is lost, or restart
@@ -6956,7 +7734,9 @@ def test_drain_saves_the_built_architect_retry_and_restart_dispatches_it_verbati
     queue = _ladder(queue_file, cfg, tmp_path)
     lead = _step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}")))
     cfg = _sequenced(cfg, tmp_path, [lead, _step(NO_STATUS_LEAD)])
-    architect = _step(str(_architect_run(tmp_path, "held-architect", "No final report.")), exit=int(failed))
+    architect = _step(
+        str(_architect_run(tmp_path, "held-architect", "No final report.")), exit=int(failed)
+    )
     cfg = _with_architect(cfg, tmp_path, [architect, _step(ARCHITECT_UNAPPROVED)])
     with monkeypatch.context() as patch:
         _every_run_agent(patch, _drain_after_role("design"))
@@ -6984,13 +7764,22 @@ def test_drain_saves_the_built_architect_retry_and_restart_dispatches_it_verbati
 
 
 def test_drain_records_design_approval_before_holding_its_recut_and_resumes_that_recut(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: approval is not recorded before deferral, the recut still starts,
     # or restart reruns the architect or a lead ahead of the pending rung-2 recut.
     queue = _ladder(queue_file, cfg, tmp_path)
-    cfg = _sequenced(cfg, tmp_path, [_step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}"))), _step(NO_STATUS_LEAD)])
+    cfg = _sequenced(
+        cfg,
+        tmp_path,
+        [
+            _step(str(_status_lead(tmp_path, "held-lead", f"DESIGN: {PROBLEM}"))),
+            _step(NO_STATUS_LEAD),
+        ],
+    )
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
     with monkeypatch.context() as patch:
         _every_run_agent(patch, _drain_after_role("design"))
@@ -7012,6 +7801,7 @@ def test_drain_records_design_approval_before_holding_its_recut_and_resumes_that
         def dispatched(*args, **kwargs):
             order.append(kwargs.get("role", "lead"))
             return original(*args, **kwargs)
+
         return dispatched
 
     _every_run_agent(monkeypatch, record)
@@ -7023,9 +7813,14 @@ def test_drain_records_design_approval_before_holding_its_recut_and_resumes_that
     assert state.section("s1").status == "parked"
 
 
-@pytest.mark.parametrize("ending", ["DONE", "WAITING: s2", "NEEDS-OWNER: Which choice?", "RETIRED", "invalid", "budget"])
+@pytest.mark.parametrize(
+    "ending", ["DONE", "WAITING: s2", "NEEDS-OWNER: Which choice?", "RETIRED", "invalid", "budget"]
+)
 def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
-    ending: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    ending: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: drain skips ordinary result processing, or replaces a returned
@@ -7041,7 +7836,13 @@ def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
     _every_run_agent(monkeypatch, _drain_after_role("lead", during=True))
     code = run(queue, cfg)
     section = state.section("s1")
-    expected = ExitCode.FAILED_TWICE if ending == "invalid" else ExitCode.BUDGET if ending == "budget" else ExitCode.DRAINED
+    expected = (
+        ExitCode.FAILED_TWICE
+        if ending == "invalid"
+        else ExitCode.BUDGET
+        if ending == "budget"
+        else ExitCode.DRAINED
+    )
     assert code == expected
     assert len(_runs(tmp_path, "lead")) == 1
     if ending != "budget":
@@ -7070,7 +7871,9 @@ def test_drain_finishes_recording_the_leads_result_and_preserves_section_stops(
 
 
 def test_drain_keeps_the_finished_architects_rung_three_decision_and_owner_ping(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: drain suppresses the architect's product-choice park or ping,
@@ -7095,7 +7898,10 @@ def test_drain_keeps_the_finished_architects_rung_three_decision_and_owner_ping(
 
 @pytest.mark.parametrize("guard", ["cap", "design-failures"])
 def test_pending_climb_keeps_the_design_guards_when_resumed(
-    guard: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    guard: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: a resumed climb bypasses the cap or repeated architect failure
@@ -7106,7 +7912,10 @@ def test_pending_climb_keeps_the_design_guards_when_resumed(
     cfg = _sequenced(cfg, tmp_path, [_step(NO_STATUS_LEAD)])
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
     state = State.open(queue, cfg)
-    state.set_pending("s1", Pending(kind="climb", lead_log="held.log", problem=PROBLEM, status="DESIGN", text=PROBLEM))
+    state.set_pending(
+        "s1",
+        Pending(kind="climb", lead_log="held.log", problem=PROBLEM, status="DESIGN", text=PROBLEM),
+    )
     take = State.take_pending
 
     def taken(self, sid):
@@ -7129,7 +7938,9 @@ def test_pending_climb_keeps_the_design_guards_when_resumed(
 
 
 def test_drain_in_the_dispatch_window_still_runs_the_child_and_saves_its_followup(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: a late drain consumes guidance but cancels its lead, or lets
@@ -7192,8 +8003,12 @@ def test_drain_preserves_a_running_real_child_until_its_result_is_recorded(
 @pytest.mark.parametrize("refresh", [False, True], ids=["initial", "refresh"])
 @pytest.mark.parametrize("preparation", ["lock", "brief"])
 def test_drain_during_research_preparation_preserves_map_and_session(
-    refresh: bool, preparation: str, cfg: Config, tmp_path: Path,
-    git_repo: GitRepo, monkeypatch: pytest.MonkeyPatch,
+    refresh: bool,
+    preparation: str,
+    cfg: Config,
+    tmp_path: Path,
+    git_repo: GitRepo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: acquisition or brief preparation authorizes research despite a
     # drain received during preparation, or held refresh replaces its saved map.
@@ -7210,7 +8025,10 @@ def test_drain_during_research_preparation_preserves_map_and_session(
         state.set_research_session("s1", "saved-research-session")
         mapped = parse_map("s1", commit, _MAP_TEXT, cfg)
         assert mapped is not None
-        save(attribute(stamp(mapped, git_repo.worktrees["s1"], time.time_ns()), queue), state.map_path("s1"))
+        save(
+            attribute(stamp(mapped, git_repo.worktrees["s1"], time.time_ns()), queue),
+            state.map_path("s1"),
+        )
         (git_repo.worktrees["s1"] / "relay/git.py").write_text("# needs refresh\n")
     before_map = state.map_path("s1").read_bytes() if refresh else None
     before_session = state.section("s1").research_session
@@ -7249,14 +8067,19 @@ def test_drain_during_research_preparation_preserves_map_and_session(
     assert _runs(tmp_path, "lead") == []
     assert code == ExitCode.DRAINED
     assert state.section("s1").research_session == before_session
-    assert (state.map_path("s1").read_bytes() if state.map_path("s1").exists() else None) == before_map
+    assert (
+        state.map_path("s1").read_bytes() if state.map_path("s1").exists() else None
+    ) == before_map
 
 
 @pytest.mark.parametrize(
     "dispatch", ["lead", "design-answer", "climb", "design-retry", "design-recut"]
 )
 def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
-    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    dispatch: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: blocking brief preparation is treated as the late-signal window,
@@ -7281,7 +8104,9 @@ def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
         state.set_last_log("s1", _status_lead(tmp_path, "earlier-lead", f"DESIGN: {PROBLEM}"))
     elif dispatch != "lead":
         pending = relay.loop.Pending(
-            kind=dispatch, lead_log="held-lead.log", problem=PROBLEM,
+            kind=dispatch,
+            lead_log="held-lead.log",
+            problem=PROBLEM,
             status="RECUT" if dispatch == "climb" else None,
             text=PROBLEM if dispatch == "climb" else None,
             design=str((tmp_path / DESIGN_PATH).resolve()) if dispatch != "climb" else None,
@@ -7289,8 +8114,10 @@ def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
         )
         state.set_pending("s1", pending)
     name = {
-        "lead": "lead_prompt", "design-answer": "design_answer_brief",
-        "climb": "recut_brief", "design-retry": "design_brief",
+        "lead": "lead_prompt",
+        "design-answer": "design_answer_brief",
+        "climb": "recut_brief",
+        "design-retry": "design_brief",
         "design-recut": "recut_brief",
     }[dispatch]
     original = getattr(relay.loop, name)
@@ -7335,7 +8162,10 @@ def test_drain_during_dispatch_preparation_retains_inputs_for_restart(
 
 @pytest.mark.parametrize("dispatch", ["design", "climb", "design-recut"])
 def test_drain_during_new_ladder_preparation_saves_the_followup(
-    dispatch: str, cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path],
+    dispatch: str,
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Breaks when: new ladder work launches after blocking brief preparation, or
@@ -7344,9 +8174,9 @@ def test_drain_during_new_ladder_preparation_saves_the_followup(
 
     queue = _ladder(queue_file, cfg, tmp_path)
     status = "RECUT" if dispatch == "climb" else "DESIGN"
-    cfg = _sequenced(cfg, tmp_path, [
-        _step(str(_status_lead(tmp_path, "finished-lead", f"{status}: {PROBLEM}")))
-    ])
+    cfg = _sequenced(
+        cfg, tmp_path, [_step(str(_status_lead(tmp_path, "finished-lead", f"{status}: {PROBLEM}")))]
+    )
     cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
     cfg = _stop_on_ping(cfg, queue)
     name = "design_brief" if dispatch == "design" else "recut_brief"
@@ -7365,7 +8195,9 @@ def test_drain_during_new_ladder_preparation_saves_the_followup(
     state = State.open(queue, cfg)
     assert prepared == [True], "new ladder preparation hook was not reached exactly once"
     assert len(_runs(tmp_path, "lead")) == 1
-    assert len(_runs(tmp_path, "design")) == int(dispatch == "design-recut"), "architect launched after drain during preparation"
+    assert len(_runs(tmp_path, "design")) == int(dispatch == "design-recut"), (
+        "architect launched after drain during preparation"
+    )
     assert _runs(tmp_path, "recut") == [], "recut launched after drain during preparation"
     assert code == ExitCode.DRAINED
     section = state.section("s1")
@@ -7390,7 +8222,10 @@ SUBAGENT_SMALLER_CONTEXT = 6 + 0 + 90000
 
 
 def test_a_subagents_context_past_context_limit_creates_no_retire_flag(
-    cfg: Config, tmp_path: Path, queue_file: Callable[[str], Path], scenario: Callable[[list[str]], Path]
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
 ) -> None:
     # Breaks when: the watcher weighs a subagent event's context against context_limit.
     queue = queue_file(WORKBOARD)

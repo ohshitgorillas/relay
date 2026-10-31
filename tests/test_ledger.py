@@ -16,7 +16,9 @@ from relay.ledger import Ledger, Spend
 from relay.backends.base import Capabilities
 
 
-def test_completed_inventory_persists_measurements_without_changing_aggregate_spend(tmp_path: Path) -> None:
+def test_completed_inventory_persists_measurements_without_changing_aggregate_spend(
+    tmp_path: Path,
+) -> None:
     # Breaks when: ledger rows omit measured detail, drop unmeasured or failed agents,
     # or count a worker's cached charge a second time in the aggregate.
     saved = json.loads(
@@ -58,8 +60,12 @@ def test_completed_inventory_persists_measurements_without_changing_aggregate_sp
     ids=["generic", "codex-dollars", "codex-tokens", "claude-dollars"],
 )
 def test_budget_capabilities_gate_historical_and_live_spend(
-    tmp_path: Path, fake_cfg: Config, live: bool,
-    capabilities: Capabilities, spend: Spend, expected: str | None,
+    tmp_path: Path,
+    fake_cfg: Config,
+    live: bool,
+    capabilities: Capabilities,
+    spend: Spend,
+    expected: str | None,
 ) -> None:
     # Breaks when unsupported budget kinds stop a backend or supported kinds are ignored.
     cfg = dataclasses.replace(fake_cfg, token_budget=100, dollar_budget=1.0)
@@ -183,7 +189,9 @@ def _call(method, *args):
     try:
         return method(*args)
     except Exception as exc:  # noqa: BLE001 - any raise breaks "no ledger method raises"
-        raise AssertionError(f"ledger method raised on the file's content: {type(exc).__name__}") from exc
+        raise AssertionError(
+            f"ledger method raised on the file's content: {type(exc).__name__}"
+        ) from exc
 
 
 def _raw(path: Path, text: str) -> None:
@@ -236,7 +244,9 @@ def _ledger_around(path: Path, bad: str) -> Ledger:
 # ledger method raises on the file's content.
 
 
-def test_no_ledger_method_raises_on_corrupt_or_torn_content(tmp_path: Path, fake_cfg: Config) -> None:
+def test_no_ledger_method_raises_on_corrupt_or_torn_content(
+    tmp_path: Path, fake_cfg: Config
+) -> None:
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)
     ledger.append("lead", "s1", "sess-a", Spend(tokens=5, dollars=0.5))
@@ -363,7 +373,9 @@ def test_over_sums_readable_lines_past_unreadable_ones(tmp_path: Path, fake_cfg:
     assert _call(ledger.over, cfg, Spend(tokens=0, dollars=0.0), None) == "tokens"
 
 
-def test_over_dollars_sums_readable_lines_past_unreadable_ones(tmp_path: Path, fake_cfg: Config) -> None:
+def test_over_dollars_sums_readable_lines_past_unreadable_ones(
+    tmp_path: Path, fake_cfg: Config
+) -> None:
     cfg = _budget_cfg(fake_cfg)
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)
@@ -438,13 +450,19 @@ def test_unreadable_is_empty_for_a_clean_ledger(tmp_path: Path) -> None:
     # integer `dollars`, float `tokens`, integer `time`, and an object with no keys but the three.
     now = time.time()
     _raw(tmp_path / "ledger.jsonl", json.dumps({"time": now, "tokens": 5, "dollars": 1}) + "\n")
-    _raw(tmp_path / "ledger.jsonl", json.dumps({"time": now, "tokens": 2.5, "dollars": 0.125}) + "\n")
-    _raw(tmp_path / "ledger.jsonl", json.dumps({"time": int(now), "tokens": 1, "dollars": 0}) + "\n")
+    _raw(
+        tmp_path / "ledger.jsonl", json.dumps({"time": now, "tokens": 2.5, "dollars": 0.125}) + "\n"
+    )
+    _raw(
+        tmp_path / "ledger.jsonl", json.dumps({"time": int(now), "tokens": 1, "dollars": 0}) + "\n"
+    )
     assert ledger.unreadable() == []
 
 
 @pytest.mark.parametrize("kind", list(UNREADABLE))
-def test_unreadable_names_each_unreadable_line_kind_by_its_number(tmp_path: Path, kind: str) -> None:
+def test_unreadable_names_each_unreadable_line_kind_by_its_number(
+    tmp_path: Path, kind: str
+) -> None:
     ledger = _ledger_around(tmp_path / "ledger.jsonl", _unreadable_line(kind))
     assert ledger.unreadable() == [2]
 
@@ -545,7 +563,9 @@ def test_sessions_of_a_missing_ledger_is_empty(tmp_path: Path) -> None:
 def _check(verdict: str = "fail", exit_code: int | None = 1) -> CheckResult:
     """A check result of the given verdict, shaped as the design's `CheckResult` fields say."""
     if verdict == "none":
-        return CheckResult(command=None, exit_code=None, timed_out=False, tail="", log=None, verdict="none")
+        return CheckResult(
+            command=None, exit_code=None, timed_out=False, tail="", log=None, verdict="none"
+        )
     return CheckResult(
         command="make test",
         exit_code=exit_code,
@@ -591,7 +611,9 @@ CHECK_LINE_CASES = {
 
 
 @pytest.mark.parametrize("case", list(CHECK_LINE_CASES))
-def test_append_check_line_holds_each_field_of_the_result_and_section(tmp_path: Path, case: str) -> None:
+def test_append_check_line_holds_each_field_of_the_result_and_section(
+    tmp_path: Path, case: str
+) -> None:
     # Breaks when: a check line drops or misnames a field, writes the wrong section, kind or
     # session, stringifies `exit` or `log`, or holds spend other than 0 tokens and $0.
     section, verdict, exit_code = CHECK_LINE_CASES[case]
@@ -754,7 +776,9 @@ def _subagents() -> tuple:
     """The two subagents of the agents fixture stream: builder a1 at 21844 tokens, test-writer
     a2 at 41000, folded as `relay/agents.py` folds a run's stream."""
     activity = agents.Activity()
-    for line in (Path(__file__).parent / "fixtures" / "stream-agents.jsonl").read_text().splitlines():
+    for line in (
+        (Path(__file__).parent / "fixtures" / "stream-agents.jsonl").read_text().splitlines()
+    ):
         event = json.loads(line)
         if event.get("type") == "system":
             activity = agents.feed(activity, event)
@@ -764,24 +788,38 @@ def _subagents() -> tuple:
 # relay-cache-cost-design.md:76,154: legacy observations retain unavailable measurements.
 SUBAGENT_RECORDS = [
     {
-        "name": "builder", "task_id": "a1", "total_tokens": 21844,
-        "models": [], "efforts": [], "cost_dollars": None,
-        "cost_basis": "none", "cost_unavailable": "not reported",
+        "name": "builder",
+        "task_id": "a1",
+        "total_tokens": 21844,
+        "models": [],
+        "efforts": [],
+        "cost_dollars": None,
+        "cost_basis": "none",
+        "cost_unavailable": "not reported",
     },
     {
-        "name": "test-writer", "task_id": "a2", "total_tokens": 41000,
-        "models": [], "efforts": [], "cost_dollars": None,
-        "cost_basis": "none", "cost_unavailable": "not reported",
+        "name": "test-writer",
+        "task_id": "a2",
+        "total_tokens": 41000,
+        "models": [],
+        "efforts": [],
+        "cost_dollars": None,
+        "cost_basis": "none",
+        "cost_unavailable": "not reported",
     },
 ]
 
 
 @pytest.mark.parametrize("kind", RUN_KINDS)
-def test_a_run_line_carries_its_kind_map_commit_and_each_subagents_tokens(tmp_path: Path, kind: str) -> None:
+def test_a_run_line_carries_its_kind_map_commit_and_each_subagents_tokens(
+    tmp_path: Path, kind: str
+) -> None:
     # Breaks when: a run line drops the map commit or the agents, names their fields otherwise,
     # or a research or ask run is refused or written under another kind.
     path = tmp_path / "ledger.jsonl"
-    Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
+    Ledger(path).append(
+        kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents()
+    )
     lines = path.read_text().splitlines()
     assert len(lines) == 1
     entry = json.loads(lines[0])
@@ -791,7 +829,9 @@ def test_a_run_line_carries_its_kind_map_commit_and_each_subagents_tokens(tmp_pa
 
 
 @pytest.mark.parametrize("kind", RUN_KINDS)
-def test_a_run_line_with_no_map_and_no_agents_holds_null_and_an_empty_list(tmp_path: Path, kind: str) -> None:
+def test_a_run_line_with_no_map_and_no_agents_holds_null_and_an_empty_list(
+    tmp_path: Path, kind: str
+) -> None:
     # Breaks when: a run without a map omits `map` or writes other than null, or omits `agents`.
     path = tmp_path / "ledger.jsonl"
     Ledger(path).append(kind, "s1", "sess-a", Spend(tokens=40, dollars=0.5))
@@ -805,7 +845,12 @@ def test_a_run_line_by_keyword_keeps_the_map_and_agents_given(tmp_path: Path) ->
     # Breaks when: `map_commit` and `agents` are not the keyword names, or are swapped.
     path = tmp_path / "ledger.jsonl"
     Ledger(path).append(
-        "research", "s2", "sess-r", Spend(tokens=9, dollars=0.125), agents=_subagents()[:1], map_commit=None
+        "research",
+        "s2",
+        "sess-r",
+        Spend(tokens=9, dollars=0.125),
+        agents=_subagents()[:1],
+        map_commit=None,
     )
     entry = json.loads(path.read_text().splitlines()[0])
     assert "map" in entry and entry["map"] is None
@@ -828,8 +873,12 @@ def _ledger_with_research(path: Path) -> Ledger:
     """Four run lines, one of each kind, with maps and agents: 52 tokens, $1.875."""
     ledger = Ledger(path)
     ledger.append("lead", "s1", "sess-lead", Spend(tokens=40, dollars=0.5), "4f2a9c1", _subagents())
-    ledger.append("research", "s1", "sess-research", Spend(tokens=7, dollars=1.0), "4f2a9c1", _subagents())
-    ledger.append("ask", "s1", "sess-research", Spend(tokens=3, dollars=0.25), None, _subagents()[1:])
+    ledger.append(
+        "research", "s1", "sess-research", Spend(tokens=7, dollars=1.0), "4f2a9c1", _subagents()
+    )
+    ledger.append(
+        "ask", "s1", "sess-research", Spend(tokens=3, dollars=0.25), None, _subagents()[1:]
+    )
     ledger.append("recut", "s1", "sess-recut", Spend(tokens=2, dollars=0.125), "4f2a9c1", ())
     _new_shape(path)
     return ledger
@@ -846,9 +895,13 @@ def test_total_since_counts_only_research_and_ask_lines_after_it(tmp_path: Path)
     # Breaks when: a research or ask line's time is not read as a lead line's is.
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)
-    ledger.append("research", "s1", "sess-old", Spend(tokens=1_000, dollars=4.0), "4f2a9c1", _subagents())
+    ledger.append(
+        "research", "s1", "sess-old", Spend(tokens=1_000, dollars=4.0), "4f2a9c1", _subagents()
+    )
     start = _tick()
-    ledger.append("research", "s2", "sess-new", Spend(tokens=30, dollars=0.5), "9b0d3e7", _subagents())
+    ledger.append(
+        "research", "s2", "sess-new", Spend(tokens=30, dollars=0.5), "9b0d3e7", _subagents()
+    )
     ledger.append("ask", "s2", "sess-new", Spend(tokens=5, dollars=0.25), None, ())
     _new_shape(path)
     assert _call(ledger.total, start) == Spend(tokens=35, dollars=0.75)
@@ -924,8 +977,12 @@ def test_a_line_with_a_rung_is_otherwise_the_line_written_without_one(tmp_path: 
     # Breaks when: giving a rung changes or drops any other field of the line.
     plain = tmp_path / "plain.jsonl"
     ranked = tmp_path / "ranked.jsonl"
-    Ledger(plain).append("recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents())
-    Ledger(ranked).append("recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents(), rung=2)
+    Ledger(plain).append(
+        "recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents()
+    )
+    Ledger(ranked).append(
+        "recut", "s3", "sess-r", Spend(tokens=5, dollars=0.75), "9b0d3e7", _subagents(), rung=2
+    )
     without = json.loads(plain.read_text())
     with_rung = json.loads(ranked.read_text())
     assert with_rung.get("rung") == 2
@@ -972,7 +1029,14 @@ def test_section_spend_sums_only_that_sections_lines(tmp_path: Path) -> None:
 def test_section_spend_counts_lines_from_every_earlier_run(tmp_path: Path) -> None:
     # Breaks when: `section_spend` counts only lines after some start time, as `total(since)` does.
     path = tmp_path / "ledger.jsonl"
-    old = {"time": 1, "kind": "lead", "section": "s1", "session": "sess-old", "tokens": 100, "dollars": 3.0}
+    old = {
+        "time": 1,
+        "kind": "lead",
+        "section": "s1",
+        "session": "sess-old",
+        "tokens": 100,
+        "dollars": 3.0,
+    }
     _raw(path, json.dumps(old) + "\n")
     ledger = Ledger(path)
     ledger.append("lead", "s1", "sess-mid", Spend(tokens=20, dollars=1.0))
@@ -983,7 +1047,9 @@ def test_section_spend_counts_lines_from_every_earlier_run(tmp_path: Path) -> No
 
 def test_section_spend_of_an_unknown_section_or_a_missing_ledger_is_zero(tmp_path: Path) -> None:
     # Breaks when: `section_spend` raises on a missing file or a section with no lines.
-    assert _call(Ledger(tmp_path / "absent.jsonl").section_spend, "s1") == Spend(tokens=0, dollars=0.0)
+    assert _call(Ledger(tmp_path / "absent.jsonl").section_spend, "s1") == Spend(
+        tokens=0, dollars=0.0
+    )
     ledger = Ledger(tmp_path / "ledger.jsonl")
     ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
     assert _call(ledger.section_spend, "s9") == Spend(tokens=0, dollars=0.0)
@@ -1006,7 +1072,10 @@ def test_section_spend_skips_unreadable_lines_that_name_the_section(tmp_path: Pa
     ledger = Ledger(path)
     ledger.append("lead", "s1", "sess-a", Spend(tokens=40, dollars=0.5))
     _raw(path, json.dumps({"time": time.time(), "section": "s1", "tokens": 1_000_000}) + "\n")
-    _raw(path, json.dumps({"time": time.time(), "section": "s1", "tokens": True, "dollars": 900.0}) + "\n")
+    _raw(
+        path,
+        json.dumps({"time": time.time(), "section": "s1", "tokens": True, "dollars": 900.0}) + "\n",
+    )
     _raw(path, json.dumps({"section": "s1", "tokens": 1_000_000, "dollars": 900.0}) + "\n")
     _raw(path, "\n")
     ledger.append("recut", "s1", None, Spend(tokens=2, dollars=0.25))

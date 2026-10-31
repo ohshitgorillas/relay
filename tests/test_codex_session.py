@@ -17,10 +17,16 @@ def test_context_uses_last_usage_and_can_fall_after_compaction(tmp_path: Path) -
     folder = tmp_path / "sessions" / "2026" / "10" / "29"
     folder.mkdir(parents=True)
     path = folder / f"rollout-2026-10-29T01-52-00-{sid}.jsonl"
-    identity = {"type": "session_meta", "payload": {
-        "id": sid, "session_id": "01a1855b-7ba6-79d3-bf98-98c251634b5b",
-    }}
-    event = json.loads((Path(__file__).parent / "fixtures/codex-real/token-count.jsonl").read_text())
+    identity = {
+        "type": "session_meta",
+        "payload": {
+            "id": sid,
+            "session_id": "01a1855b-7ba6-79d3-bf98-98c251634b5b",
+        },
+    }
+    event = json.loads(
+        (Path(__file__).parent / "fixtures/codex-real/token-count.jsonl").read_text()
+    )
     # Mutated usage is synthetic; the source capture has equal last/total usage.
     info = event["payload"]["info"]
     info["last_token_usage"]["total_tokens"] = 12000
@@ -101,7 +107,8 @@ def _billing_rollout(tmp_path: Path, sid: str) -> tuple[Path, dict]:
 
 @pytest.mark.parametrize("writes", [0, 400])
 def test_billing_retains_known_counts_without_guessing_settings_or_write_duration(
-    tmp_path: Path, writes: int,
+    tmp_path: Path,
+    writes: int,
 ) -> None:
     # Breaks when absent settings erase counts or undifferentiated writes get a guessed duration.
     sid = "01a1855b-7ba6-79d3-bf98-98c251634b5a"
@@ -117,7 +124,9 @@ def test_billing_retains_known_counts_without_guessing_settings_or_write_duratio
     assert len(reader.usage) == 1
     usage = reader.usage[0]
     assert (usage.thread, usage.cached_input, usage.output) == (
-        sid, 7168, 11,
+        sid,
+        7168,
+        11,
     )
     assert reader.unavailable or usage.unavailable
     if writes:
@@ -153,7 +162,8 @@ def test_billing_resume_prices_only_new_cumulative_delta(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("problem", ["missing_cached", "counter_reset"])
 def test_billing_incomplete_dimensions_or_reset_remain_unavailable(
-    tmp_path: Path, problem: str,
+    tmp_path: Path,
+    problem: str,
 ) -> None:
     # Breaks when missing cached reads or unexplained resets become a complete numeric bill.
     sid = "01a1855b-7ba6-79d3-bf98-98c251634b5a"
@@ -174,9 +184,13 @@ def test_billing_incomplete_dimensions_or_reset_remain_unavailable(
     assert reader.usage
     assert reader.unavailable
     assert all(row.input >= 0 and row.output >= 0 for row in reader.usage)
-    reason = " ".join([reader.unavailable, *(row.unavailable or "" for row in reader.usage)]).lower()
-    assert "cache" in reason if problem == "missing_cached" else any(
-        word in reason for word in ("reset", "counter", "baseline")
+    reason = " ".join(
+        [reader.unavailable, *(row.unavailable or "" for row in reader.usage)]
+    ).lower()
+    assert (
+        "cache" in reason
+        if problem == "missing_cached"
+        else any(word in reason for word in ("reset", "counter", "baseline"))
     )
 
 
@@ -190,7 +204,9 @@ def test_billing_resume_without_baseline_is_explicitly_unavailable(tmp_path: Pat
     reader.poll(StreamState(sid, 0, Spend(0, 0.0), None, False))
     assert hasattr(reader, "unavailable"), "reader must expose missing resume baselines"
     assert reader.unavailable
-    reason = " ".join([reader.unavailable, *(row.unavailable or "" for row in reader.usage)]).lower()
+    reason = " ".join(
+        [reader.unavailable, *(row.unavailable or "" for row in reader.usage)]
+    ).lower()
     assert "baseline" in reason
 
 
@@ -207,13 +223,19 @@ def test_billing_model_transitions_attribute_only_cumulative_deltas(tmp_path: Pa
     reader = SessionReader(tmp_path, sid, boundary={})
     state = reader.poll(StreamState(sid, 0, Spend(0, 0.0), None, False))
     total.update(input_tokens=1500, cached_input_tokens=900, output_tokens=150, total_tokens=1650)
-    second_context = {"type": "turn_context", "payload": {"model": "gpt-6-astra", "effort": "medium"}}
+    second_context = {
+        "type": "turn_context",
+        "payload": {"model": "gpt-6-astra", "effort": "medium"},
+    }
     with path.open("a") as stream:
-        stream.write(json.dumps(second_context) + "\n" + json.dumps(event) + "\n" + json.dumps(event) + "\n")
+        stream.write(
+            json.dumps(second_context) + "\n" + json.dumps(event) + "\n" + json.dumps(event) + "\n"
+        )
     state = reader.poll(state)
     assert hasattr(reader, "usage"), "reader must expose per-model usage"
     assert [(row.model, row.input, row.cached_input, row.output) for row in reader.usage] == [
-        ("gpt-6.1-sol", 1000, 800, 100), ("gpt-6-astra", 500, 100, 50),
+        ("gpt-6.1-sol", 1000, 800, 100),
+        ("gpt-6-astra", 500, 100, 50),
     ]
     assert reader.models == ("gpt-6.1-sol", "gpt-6-astra")
     assert reader.efforts == ("high", "medium")
@@ -228,7 +250,12 @@ def test_billing_missing_turn_setting_keeps_explicit_unavailable_marker(tmp_path
     sid = "01a1855b-7ba6-79d3-bf98-98c251634b5a"
     path, event = _billing_rollout(tmp_path, sid)
     with path.open("a") as stream:
-        stream.write(json.dumps({"type": "turn_context", "payload": {"model": "gpt-6.1-sol", "effort": "high"}}) + "\n")
+        stream.write(
+            json.dumps(
+                {"type": "turn_context", "payload": {"model": "gpt-6.1-sol", "effort": "high"}}
+            )
+            + "\n"
+        )
         stream.write(json.dumps(event) + "\n")
     reader = SessionReader(tmp_path, sid, boundary={})
     state = reader.poll(StreamState(sid, 0, Spend(0, 0.0), None, False))
@@ -244,12 +271,17 @@ def test_billing_missing_turn_setting_keeps_explicit_unavailable_marker(tmp_path
     assert reader.unavailable or any(row.unavailable for row in reader.usage)
 
 
-@pytest.mark.parametrize("missing,dimension", [
-    ("cached_input_tokens", "cache"),
-    ("output_tokens", "output"),
-])
+@pytest.mark.parametrize(
+    "missing,dimension",
+    [
+        ("cached_input_tokens", "cache"),
+        ("output_tokens", "output"),
+    ],
+)
 def test_incomplete_billing_keeps_running_total_token_observations(
-    tmp_path: Path, missing: str, dimension: str,
+    tmp_path: Path,
+    missing: str,
+    dimension: str,
 ) -> None:
     # Breaks when an unavailable billing dimension freezes otherwise valid live total-token accounting.
     sid = "01a1855b-7ba6-79d3-bf98-98c251634b5a"
@@ -266,8 +298,12 @@ def test_incomplete_billing_keeps_running_total_token_observations(
     with path.open("a") as stream:
         stream.write(json.dumps(event) + "\n")
     state = reader.poll(state)
-    assert state.spend.tokens == 28227, "incomplete billing must retain the valid cumulative token total"
+    assert state.spend.tokens == 28227, (
+        "incomplete billing must retain the valid cumulative token total"
+    )
     assert reader.unavailable
-    reasons = " ".join([reader.unavailable, *(row.unavailable or "" for row in reader.usage)]).lower()
+    reasons = " ".join(
+        [reader.unavailable, *(row.unavailable or "" for row in reader.usage)]
+    ).lower()
     assert dimension in reasons
     assert reader.poll(state).spend.tokens == 28227

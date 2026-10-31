@@ -27,9 +27,7 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="relay")
-    commands = parser.add_subparsers(
-        dest="command", required=True, parser_class=_Parser
-    )
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     go = commands.add_parser("go")
     go.add_argument("queue", type=Path)
     go.add_argument("--token-budget", type=int)
@@ -92,7 +90,11 @@ def _answer(args: argparse.Namespace) -> int:
 
 
 def _ask(args: argparse.Namespace) -> int:
-    print(loop.ask(args.queue.resolve(), _config({"backend": args.backend}), args.section, args.question))
+    print(
+        loop.ask(
+            args.queue.resolve(), _config({"backend": args.backend}), args.section, args.question
+        )
+    )
     return ExitCode.QUEUE_EMPTY
 
 
@@ -165,7 +167,14 @@ def _status(args: argparse.Namespace) -> int:
     return ExitCode.QUEUE_EMPTY
 
 
-_COMMANDS = {"go": _go, "stop": _stop, "answer": _answer, "status": _status, "ask": _ask, "stats": _stats}
+_COMMANDS = {
+    "go": _go,
+    "stop": _stop,
+    "answer": _answer,
+    "status": _status,
+    "ask": _ask,
+    "stats": _stats,
+}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -37,7 +37,9 @@ def test_recut_carries_its_reason_as_text() -> None:
 
 def test_needs_owner_carries_its_question_as_text() -> None:
     # Breaks when: the NEEDS-OWNER question is dropped or not taken from after "NEEDS-OWNER: ".
-    status = parse_status("Blocked on a product choice.\nNEEDS-OWNER: Ship the CLI under the name relay?")
+    status = parse_status(
+        "Blocked on a product choice.\nNEEDS-OWNER: Ship the CLI under the name relay?"
+    )
     assert status == LeadStatus(kind="NEEDS-OWNER", text="Ship the CLI under the name relay?")
 
 
@@ -154,7 +156,9 @@ def test_the_earlier_text_names_are_kept() -> None:
 
 def test_design_carries_its_problem_as_text() -> None:
     # Breaks when: parse_status does not recognise a final "DESIGN: <problem>" line.
-    status = parse_status("The design has no step for it.\nDESIGN: no module owns the cache; Order 3")
+    status = parse_status(
+        "The design has no step for it.\nDESIGN: no module owns the cache; Order 3"
+    )
     assert status == LeadStatus(kind="DESIGN", text="no module owns the cache; Order 3")
 
 

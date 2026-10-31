@@ -1,4 +1,4 @@
-GATES :=
+GATES := format
 
 .PHONY: check check-all lock exemptions test format lint types filepawl hooks hooks-installed
 

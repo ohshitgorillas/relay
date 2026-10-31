@@ -55,18 +55,21 @@ def measured(
 ) -> Activity:
     agents = tuple(
         _measure(agent, models, efforts, cost_dollars, cost_basis, cost_unavailable)
-        if agent.task_id == task_id else agent
+        if agent.task_id == task_id
+        else agent
         for agent in activity.agents
     )
     return replace(activity, agents=agents) if agents != activity.agents else activity
 
 
 def restore_agent(value: dict) -> Agent:
-    return Agent(**{
-        **value,
-        "models": tuple(value.get("models", ())),
-        "efforts": tuple(value.get("efforts", ())),
-    })
+    return Agent(
+        **{
+            **value,
+            "models": tuple(value.get("models", ())),
+            "efforts": tuple(value.get("efforts", ())),
+        }
+    )
 
 
 def _measure(
@@ -159,12 +162,17 @@ def merge(first: Activity, later: Activity) -> Activity:
         old = previous.get(agent.task_id)
         if old is not None:
             measurements = _measure(
-                old, agent.models, agent.efforts, agent.cost_dollars,
+                old,
+                agent.models,
+                agent.efforts,
+                agent.cost_dollars,
                 agent.cost_basis,
                 None if agent.cost_unavailable == "not reported" else agent.cost_unavailable,
             )
             agent = replace(
-                agent, models=measurements.models, efforts=measurements.efforts,
+                agent,
+                models=measurements.models,
+                efforts=measurements.efforts,
                 cost_dollars=measurements.cost_dollars,
                 cost_basis=measurements.cost_basis,
                 cost_unavailable=measurements.cost_unavailable,

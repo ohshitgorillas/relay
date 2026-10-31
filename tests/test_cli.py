@@ -132,7 +132,16 @@ def test_go_passes_budget_and_context_limit_options_as_overrides(
 ) -> None:
     calls: list[tuple[Path, Config]] = []
     _patch_run(monkeypatch, _recording_run(calls, ExitCode.BUDGET))
-    argv = ["go", str(queue), "--token-budget", "5000", "--dollar-budget", "2.5", "--context-limit", "60000"]
+    argv = [
+        "go",
+        str(queue),
+        "--token-budget",
+        "5000",
+        "--dollar-budget",
+        "2.5",
+        "--context-limit",
+        "60000",
+    ]
     assert _exit(argv) == 3
     assert len(calls) == 1
     cfg = calls[0][1]
@@ -172,7 +181,13 @@ def test_a_bad_config_file_exits_with_usage(queue: Path, home: Path) -> None:
         ["go", "QUEUE", "--token-budget", "lots"],
         ["answer", "QUEUE", "s2"],
     ],
-    ids=["no-command", "go-without-queue", "unknown-command", "non-number-budget", "answer-without-text"],
+    ids=[
+        "no-command",
+        "go-without-queue",
+        "unknown-command",
+        "non-number-budget",
+        "answer-without-text",
+    ],
 )
 def test_bad_arguments_exit_with_usage_and_never_run_the_loop(
     argv: list[str], queue: Path, monkeypatch: pytest.MonkeyPatch
@@ -301,8 +316,17 @@ def _ledger_path(queue: Path, cfg: Config) -> Path:
 def _write_entries(path: Path, entries: list[tuple[float, int, float]]) -> None:
     path.write_text(
         "".join(
-            json.dumps({"kind": "lead", "section": "s1.1.1", "session": None,
-                        "time": stamp, "tokens": tokens, "dollars": dollars}) + "\n"
+            json.dumps(
+                {
+                    "kind": "lead",
+                    "section": "s1.1.1",
+                    "session": None,
+                    "time": stamp,
+                    "tokens": tokens,
+                    "dollars": dollars,
+                }
+            )
+            + "\n"
             for stamp, tokens, dollars in entries
         )
     )
@@ -418,10 +442,20 @@ def test_status_files_a_resumed_sessions_runs_under_each_section_in_turn(
     state.run_dir.mkdir(parents=True)
     (state.run_dir / "1.jsonl").write_bytes(AGENTS_LOG.read_bytes())
     (state.run_dir / "2.jsonl").write_text(
-        AGENTS_LOG.read_text().splitlines()[0] + "\n"
-        + json.dumps({"type": "system", "subtype": "task_started", "task_id": "c1",
-                      "description": "Review", "subagent_type": "diff-reviewer",
-                      "task_type": "local_agent", "session_id": "sess-agents-1"}) + "\n"
+        AGENTS_LOG.read_text().splitlines()[0]
+        + "\n"
+        + json.dumps(
+            {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "c1",
+                "description": "Review",
+                "subagent_type": "diff-reviewer",
+                "task_type": "local_agent",
+                "session_id": "sess-agents-1",
+            }
+        )
+        + "\n"
     )
     ledger = Ledger(state.ledger_path)
     ledger.append("lead", "s2", "sess-agents-1", Spend(tokens=1, dollars=0.0))
@@ -543,7 +577,14 @@ def _ask_config(
     """Rewrite the fake home's config file with `cfg`'s values, `overrides` on top, and a
     research command that records each run to `record` and exits `exit_code` (or `research`)."""
     if research is None:
-        research = [sys.executable, "-c", _ASK_SHIM, str(record), cfg.lead_command[0], str(exit_code)]
+        research = [
+            sys.executable,
+            "-c",
+            _ASK_SHIM,
+            str(record),
+            cfg.lead_command[0],
+            str(exit_code),
+        ]
     values: dict[str, object] = {
         "context_limit": cfg.context_limit,
         "hard_ceiling": cfg.hard_ceiling,
@@ -592,7 +633,6 @@ def asked(
     State.open(queue, fake_cfg).set_research_session(ASK_SID, ASK_SESSION)
     scenario((FIXTURES_DIR / ASK_STREAM).read_text().splitlines())
     return record
-
 
 
 def test_ask_prints_the_answer_and_exits_0(
@@ -715,7 +755,12 @@ _FAILED_ASKS: dict[str, tuple[int, str, list[str] | None, str]] = {
         "researcher crashed: reader died",
     ),
     "exit-nonzero-bare": (3, "", None, "exit 3"),
-    "error-result": (0, "", (FIXTURES_DIR / ERROR_STREAM).read_text().splitlines(), "Prompt is too long"),
+    "error-result": (
+        0,
+        "",
+        (FIXTURES_DIR / ERROR_STREAM).read_text().splitlines(),
+        "Prompt is too long",
+    ),
     "error-result-with-stderr": (
         0,
         "api overloaded, retry later\n",
@@ -741,7 +786,15 @@ def test_ask_whose_researcher_run_fails_exits_1_and_names_its_error_line(
     # (all of stderr rather than its last non-empty line, the error result's text ahead of
     # stderr, "exit N" for an error result or a run that used no tokens).
     code, err, lines, error = _FAILED_ASKS[how]
-    research = [sys.executable, "-c", _ASK_STDERR_SHIM, str(asked), fake_cfg.lead_command[0], str(code), err]
+    research = [
+        sys.executable,
+        "-c",
+        _ASK_STDERR_SHIM,
+        str(asked),
+        fake_cfg.lead_command[0],
+        str(code),
+        err,
+    ]
     _ask_config(home, fake_cfg, asked, research=research)
     if lines is not None:
         scenario(lines)
@@ -951,7 +1004,10 @@ def test_status_prints_a_waiting_section_with_its_blocker(
 def _dead_pid() -> int:
     """The pid of a child that has exited and been reaped, so no live process is signalled."""
     child = subprocess.run(
-        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, check=True
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return int(child.stdout)
 
@@ -1150,20 +1206,47 @@ def _stats_log(state: State, number: int, session: str, context: int, result: st
     """Write run log `<number>.jsonl`: one run of `session` whose main thread reached `context`
     tokens of context and whose result text is `result`."""
     lines = [
-        {"type": "system", "subtype": "init", "session_id": session, "cwd": "/work",
-         "model": "claude-opus", "tools": ["Bash"]},
-        {"type": "assistant", "message": {
-            "id": f"msg-{session}", "type": "message", "role": "assistant",
-            "content": [{"type": "text", "text": "Working."}],
-            "usage": {"input_tokens": 2, "cache_creation_input_tokens": 1_000,
-                      "cache_read_input_tokens": context - 1_002, "output_tokens": 30}},
-         "parent_tool_use_id": None, "session_id": session},
-        {"type": "result", "subtype": "success", "is_error": False, "duration_ms": 500,
-         "num_turns": 1, "result": result, "session_id": session,
-         "total_cost_usd": 0.01, "usage": {"input_tokens": 1, "output_tokens": 2}},
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": session,
+            "cwd": "/work",
+            "model": "claude-opus",
+            "tools": ["Bash"],
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": f"msg-{session}",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Working."}],
+                "usage": {
+                    "input_tokens": 2,
+                    "cache_creation_input_tokens": 1_000,
+                    "cache_read_input_tokens": context - 1_002,
+                    "output_tokens": 30,
+                },
+            },
+            "parent_tool_use_id": None,
+            "session_id": session,
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 500,
+            "num_turns": 1,
+            "result": result,
+            "session_id": session,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        },
     ]
     state.run_dir.mkdir(parents=True, exist_ok=True)
-    (state.run_dir / f"{number}.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+    (state.run_dir / f"{number}.jsonl").write_text(
+        "".join(json.dumps(line) + "\n" for line in lines)
+    )
 
 
 def _stats_runs(state: State, runs: list[tuple[str, str, str, int, str]]) -> None:
@@ -1174,24 +1257,35 @@ def _stats_runs(state: State, runs: list[tuple[str, str, str, int, str]]) -> Non
         ledger.append(kind, section, session, Spend(tokens=1, dollars=0.0))
 
 
-def _two_queues(queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config) -> tuple[State, State]:
+def _two_queues(
+    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config
+) -> tuple[State, State]:
     first = State.open(queue, fake_cfg)
-    _stats_runs(first, [
-        ("lead", "s1.1.1", "sess-a1", 40_000, "Step committed.\nDONE"),
-        ("recut", "s3", "sess-a2", 7_000, "Cut into two steps."),
-    ])
+    _stats_runs(
+        first,
+        [
+            ("lead", "s1.1.1", "sess-a1", 40_000, "Step committed.\nDONE"),
+            ("recut", "s3", "sess-a2", 7_000, "Cut into two steps."),
+        ],
+    )
     second = State.open(queue_file(SECOND_QUEUE), fake_cfg)
-    _stats_runs(second, [
-        ("lead", "s1", "sess-b1", 60_000, "Step committed.\nDONE"),
-        ("lead", "s2", "sess-b2", 90_000, "Safe point.\nRETIRED"),
-        ("lead", "s3", "sess-b3", 80_000, "Safe point.\nRETIRED"),
-        ("lead", "s4", "sess-b4", 60_000, "Step committed.\nDONE"),
-    ])
+    _stats_runs(
+        second,
+        [
+            ("lead", "s1", "sess-b1", 60_000, "Step committed.\nDONE"),
+            ("lead", "s2", "sess-b2", 90_000, "Safe point.\nRETIRED"),
+            ("lead", "s3", "sess-b3", 80_000, "Safe point.\nRETIRED"),
+            ("lead", "s4", "sess-b4", 60_000, "Step committed.\nDONE"),
+        ],
+    )
     return first, second
 
 
 def test_stats_prints_each_roles_line_over_every_queue_under_the_state_root(
-    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+    queue: Path,
+    queue_file: Callable[[str], Path],
+    fake_cfg: Config,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: `stats` reads one state directory only, sizes runs by ledger tokens, prints
     # roles unsorted, prints a skipped line with nothing skipped, or exits other than QUEUE_EMPTY.
@@ -1217,23 +1311,28 @@ def _interleaved_runs(runs: list[tuple[State, str, str, str, int, str]]) -> None
 
 
 def test_stats_prints_a_roles_newest_five_overruns_last_in_the_order_they_ran_across_queues(
-    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+    queue: Path,
+    queue_file: Callable[[str], Path],
+    fake_cfg: Config,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: `stats` joins whole state directories one after another, in either order,
     # instead of keeping runs in the order they ran across every queue, so a role's overruns
     # from two queues print out of order or the wrong five are shown.
     first = State.open(queue, fake_cfg)
     second = State.open(queue_file(SECOND_QUEUE), fake_cfg)
-    _interleaved_runs([
-        (first, "lead", "s1", "sess-a1", 81_000, "Safe point.\nRETIRED"),
-        (second, "lead", "s1", "sess-b1", 82_000, "Safe point.\nRETIRED"),
-        (first, "lead", "s2", "sess-a2", 83_000, "Safe point.\nRETIRED"),
-        (second, "lead", "s2", "sess-b2", 84_000, "Safe point.\nRETIRED"),
-        (first, "lead", "s3", "sess-a3", 85_000, "Safe point.\nRETIRED"),
-        (second, "lead", "s3", "sess-b3", 86_000, "Safe point.\nRETIRED"),
-        (first, "lead", "s4", "sess-a4", 87_000, "Safe point.\nRETIRED"),
-        (second, "lead", "s4", "sess-b4", 50_000, "Step committed.\nDONE"),
-    ])
+    _interleaved_runs(
+        [
+            (first, "lead", "s1", "sess-a1", 81_000, "Safe point.\nRETIRED"),
+            (second, "lead", "s1", "sess-b1", 82_000, "Safe point.\nRETIRED"),
+            (first, "lead", "s2", "sess-a2", 83_000, "Safe point.\nRETIRED"),
+            (second, "lead", "s2", "sess-b2", 84_000, "Safe point.\nRETIRED"),
+            (first, "lead", "s3", "sess-a3", 85_000, "Safe point.\nRETIRED"),
+            (second, "lead", "s3", "sess-b3", 86_000, "Safe point.\nRETIRED"),
+            (first, "lead", "s4", "sess-a4", 87_000, "Safe point.\nRETIRED"),
+            (second, "lead", "s4", "sess-b4", 50_000, "Step committed.\nDONE"),
+        ]
+    )
     assert _exit(["stats"]) == ExitCode.QUEUE_EMPTY
     assert capsys.readouterr().out.splitlines() == [
         "lead: 1 finished, peak context median 50000, p90 50000, max 50000; 7 overruns",
@@ -1247,7 +1346,10 @@ def test_stats_prints_a_roles_newest_five_overruns_last_in_the_order_they_ran_ac
 
 
 def test_stats_ends_with_the_count_of_unreadable_run_logs(
-    queue: Path, queue_file: Callable[[str], Path], fake_cfg: Config, capsys: pytest.CaptureFixture[str]
+    queue: Path,
+    queue_file: Callable[[str], Path],
+    fake_cfg: Config,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Breaks when: an unreadable log stops `stats`, is not counted, or its line is not last.
     _, second = _two_queues(queue, queue_file, fake_cfg)

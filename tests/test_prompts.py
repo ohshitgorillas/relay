@@ -39,7 +39,7 @@ BODY = (
     "\n"
     "- step 8a: red tests for `relay/ledger.py`\n"
     "- step 8b: build `relay/ledger.py`  (two spaces kept)\n"
-    "\tTabbed line: \"quotes\" and {braces} and 100% verbatim\n"
+    '\tTabbed line: "quotes" and {braces} and 100% verbatim\n'
 )
 
 
@@ -48,7 +48,9 @@ def _section(sid: str = "s4", body: str = BODY) -> Section:
 
 
 def _lead(section: Section | None = None) -> str:
-    return lead_prompt(QUEUE, section or _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
+    return lead_prompt(
+        QUEUE, section or _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG
+    )
 
 
 # Behavior 3: `relay/prompts.py`: builds every text Relay sends to an agent.
@@ -95,14 +97,18 @@ def test_lead_prompt_holds_the_given_section_not_another() -> None:
 
 def test_lead_prompt_holds_resume_with_the_session_id_when_resume_is_set() -> None:
     # Breaks when: lead_prompt ignores `resume` or words it other than "resume <session id>".
-    prompt = lead_prompt(QUEUE, _section(), resume="sess-lead-7", report=None, answer=None, retire_flag=RETIRE_FLAG)
+    prompt = lead_prompt(
+        QUEUE, _section(), resume="sess-lead-7", report=None, answer=None, retire_flag=RETIRE_FLAG
+    )
     assert "resume sess-lead-7" in prompt
 
 
 def test_lead_prompt_holds_the_owners_answer_verbatim_when_set() -> None:
     # Breaks when: lead_prompt ignores `answer` or alters its text.
     answer = "Yes: ship it as `relay`.\n  Keep the old name as an alias."
-    prompt = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=answer, retire_flag=RETIRE_FLAG)
+    prompt = lead_prompt(
+        QUEUE, _section(), resume=None, report=None, answer=answer, retire_flag=RETIRE_FLAG
+    )
     assert answer in prompt
 
 
@@ -320,7 +326,9 @@ def _with_map(map_block: str | None = MAP_BLOCK) -> str:
     )
 
 
-def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_and_keeps_the_map_out_of_architect_briefs() -> None:
+def test_lead_prompt_with_a_map_routes_needs_through_relay_ask_and_keeps_the_map_out_of_architect_briefs() -> (
+    None
+):
     # Breaks when: the lead is not told to run `relay ask` with a 600000 ms timeout or in the
     # background, or the non-zero-exit fallback is left out, or the lead is still told to put
     # the map in the architect's brief, or is not told to put it in every other brief for the
@@ -429,7 +437,9 @@ def test_research_brief_states_the_map_form(fake_cfg: Config) -> None:
 
 def test_research_brief_holds_the_flag_rule(fake_cfg: Config) -> None:
     # Breaks when: the flag sentence is left out, worded otherwise or names another path.
-    sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    sentence = (
+        f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    )
     assert sentence in _research(fake_cfg)
 
 
@@ -463,7 +473,9 @@ def test_refresh_brief_lists_changed_paths_sorted(fake_cfg: Config) -> None:
     assert positions == sorted(positions)
 
 
-def test_refresh_brief_limits_mapping_to_changed_section_code_and_allows_new_paths(fake_cfg: Config) -> None:
+def test_refresh_brief_limits_mapping_to_changed_section_code_and_allows_new_paths(
+    fake_cfg: Config,
+) -> None:
     # Design: relay-research-reuse-design.md:85-90 makes these exact scope sentences contractual.
     # Breaks when: refresh alters or omits any of the three scope instruction sentences.
     brief = refresh_brief(
@@ -490,7 +502,9 @@ def test_refresh_brief_keeps_the_map_form_and_flag_rule(fake_cfg: Config) -> Non
     response = brief.replace(block(kept), "")
     for marker in ("MAP", "LINKS", "END MAP"):
         assert marker in response.splitlines()
-    sentence = f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    sentence = (
+        f"When the file {RESEARCH_FLAG} exists, send no more readers and return the map you have."
+    )
     assert sentence in response
 
 
@@ -545,7 +559,9 @@ PROBLEM = "`_verify` parks after one failed check, not three; tests/test_loop.py
 GUESS_FIX = "move CHECK_LIMIT into relay/config.py"
 
 
-def _stepped(steps: tuple[str, ...] = ("6", "7"), body: str = BODY, title: str = "Ledger recovery") -> Section:
+def _stepped(
+    steps: tuple[str, ...] = ("6", "7"), body: str = BODY, title: str = "Ledger recovery"
+) -> Section:
     return Section(
         id="s4",
         title=title,
@@ -603,7 +619,9 @@ def test_design_brief_carries_every_owner_answer_verbatim_as_new_lines() -> None
     # s2, runs 24-28: the answer went only to the lead), only the last is kept, one is reworded,
     # or they land after the approve line.
     answers = ["Compress the spec throughout, {keep} 100% of its contracts.", "Yes: the cap stays."]
-    lines = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, answers).splitlines()
+    lines = design_brief(
+        DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, answers
+    ).splitlines()
     assert lines[2:5] == [f"new: {answers[0]}", f"new: {answers[1]}", f"approve: {APPROVAL}"]
 
 
@@ -613,14 +631,18 @@ def test_design_brief_points_at_the_lead_code_by_branch_and_commit_not_by_worktr
     # is pointed at the lead's worktree path, which architect.md forbids it to read as outside
     # the repository, instead of `git show <sha>:<path>` / `git diff main...<sha>`.
     code = ("lead/m2-images", "54f611a5")
-    lead_new = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=code).splitlines()[1]
+    lead_new = design_brief(
+        DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=code
+    ).splitlines()[1]
     assert lead_new.startswith("lead new: ")
     assert "branch lead/m2-images at 54f611a5 in this repository" in lead_new
     assert "`git show 54f611a5:<path>`" in lead_new
     assert "`git diff main...54f611a5`" in lead_new
     assert "worktree" not in lead_new
     assert "repo-wt" not in lead_new
-    no_commit = design_brief(DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", None))
+    no_commit = design_brief(
+        DESIGN, QUEUE, _stepped(), PROBLEM, EVIDENCE, APPROVAL, code=("lead/m2-images", None)
+    )
     assert "`git show lead/m2-images:<path>`" in no_commit
     assert "`git diff main...lead/m2-images`" in no_commit
 
@@ -634,7 +656,13 @@ def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
     said = "The design already covers step 21; the lead misread Order 3."
     guidance = handback_text("it filed no report", said)
     given = lead_prompt(
-        QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG, guidance=guidance
+        QUEUE,
+        _section(),
+        resume=None,
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        guidance=guidance,
     )
     assert said in given
     assert "filed no design change" in given
@@ -644,11 +672,15 @@ def test_lead_prompt_carries_the_architect_guidance_only_when_given() -> None:
     # inside that paragraph (design §Homes: no guidance worded in `prompts.py`).
     paragraphs = [part.strip("\n") for part in re.split(r"\n[ \t]*\n", given)]
     assert guidance.strip("\n") in paragraphs
-    plain = lead_prompt(QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG)
+    plain = lead_prompt(
+        QUEUE, _section(), resume=None, report=None, answer=None, retire_flag=RETIRE_FLAG
+    )
     assert "filed no design change" not in plain
 
 
-def test_design_brief_with_no_steps_says_steps_unnamed_on_a_lead_new_line_with_the_section_text() -> None:
+def test_design_brief_with_no_steps_says_steps_unnamed_on_a_lead_new_line_with_the_section_text() -> (
+    None
+):
     # Breaks when: an empty `steps:` gives an empty Order or is worded other than "steps unnamed",
     # or the section's text is left off that `lead new:` line (appended as free lines instead),
     # or is not its last part, written `Section text: <body>` with each whitespace run one space.
@@ -666,7 +698,9 @@ def test_design_brief_carries_the_given_design_queue_and_approval() -> None:
     # Breaks when: the design, queue or approval words are fixed rather than taken from the call.
     design = Path("/other/docs/superpowers/specs/relay-ping-design.md")
     queue = Path("/other/docs/baley-queue.md")
-    brief = design_brief(design, queue, _stepped(steps=("2",)), PROBLEM, EVIDENCE[:1], "approved by the owner")
+    brief = design_brief(
+        design, queue, _stepped(steps=("2",)), PROBLEM, EVIDENCE[:1], "approved by the owner"
+    )
     lines = brief.splitlines()
     assert lines[0] == f"rulings {design}"
     assert f"at {queue}, under this design's Order 2, " in lines[1]
@@ -751,7 +785,9 @@ def test_recut_brief_without_a_design_leaves_the_sentence_out() -> None:
     # Breaks when: the amended sentence is written though design is None or left at its default,
     # or is never written at all.
     assert AMENDED in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG, design=DESIGN)
-    assert "was amended for this problem" not in recut_brief(QUEUE, _section(), "three modules", LEAD_LOG)
+    assert "was amended for this problem" not in recut_brief(
+        QUEUE, _section(), "three modules", LEAD_LOG
+    )
     assert "was amended for this problem" not in recut_brief(
         QUEUE, _section(), "three modules", LEAD_LOG, design=None
     )
@@ -772,6 +808,8 @@ def test_recut_brief_with_a_design_keeps_everything_else() -> None:
     assert str(QUEUE) in brief
     assert brief.count(AMENDED) == 1
     assert brief.replace(AMENDED, " ").split() == plain.split()
+
+
 # Order 17, behavior 4: "resume <session id>" when resume is set; when report is set, next to
 # that line, the report verbatim. relay-run-overhead-design.md:110 moves the heading out: report
 # is handoff()'s text and is printed as given, with no heading added.
@@ -787,9 +825,13 @@ ANSWER = "Use port 8080."
 HEADING = "previous lead's final report"
 
 
-def _with_report(report: str | None, resume: str | None = "sess-lead-7", answer: str | None = ANSWER) -> str:
+def _with_report(
+    report: str | None, resume: str | None = "sess-lead-7", answer: str | None = ANSWER
+) -> str:
     assert "report" in inspect.signature(lead_prompt).parameters, "lead_prompt has no `report`"
-    return lead_prompt(QUEUE, _section(), resume=resume, report=report, answer=answer, retire_flag=RETIRE_FLAG)
+    return lead_prompt(
+        QUEUE, _section(), resume=resume, report=report, answer=answer, retire_flag=RETIRE_FLAG
+    )
 
 
 def test_lead_prompt_holds_the_report_verbatim_when_set() -> None:
@@ -822,7 +864,8 @@ def test_lead_prompt_without_a_report_holds_no_report_heading() -> None:
 # handoff()'s text and is printed as given, with no heading added. The two texts below take
 # handoff()'s documented forms, with a status and with none.
 HANDOFF_WITH_STATUS = (
-    "The previous lead's final report (that session's last reply, so you need not recall it):\n" + REPORT
+    "The previous lead's final report (that session's last reply, so you need not recall it):\n"
+    + REPORT
 )
 HANDOFF_STOPPED = (
     "The previous lead stopped without a final report (killed). Its last reply: none. "
@@ -835,7 +878,9 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-@pytest.mark.parametrize("report", [HANDOFF_WITH_STATUS, HANDOFF_STOPPED], ids=["status", "stopped"])
+@pytest.mark.parametrize(
+    "report", [HANDOFF_WITH_STATUS, HANDOFF_STOPPED], ids=["status", "stopped"]
+)
 def test_lead_prompt_prints_the_report_as_given_and_adds_nothing_around_it(report: str) -> None:
     # Breaks when: lead_prompt adds a heading or any text with the report, or alters the report.
     prompt = _with_report(report)
@@ -859,8 +904,13 @@ def test_prerendered_handoff_replaces_default_resume_text_and_keeps_report() -> 
     # Breaks when: a backend hint is ignored, altered, or accompanied by Claude's default resume line.
     hint = "Prior thread: thread-42.\n  The supplied report is the handoff."
     prompt = lead_prompt(
-        QUEUE, _section(), resume="thread-42", report=REPORT, answer=ANSWER,
-        retire_flag=RETIRE_FLAG, handoff_hint=hint,
+        QUEUE,
+        _section(),
+        resume="thread-42",
+        report=REPORT,
+        answer=ANSWER,
+        retire_flag=RETIRE_FLAG,
+        handoff_hint=hint,
     )
     assert hint in prompt
     assert "resume thread-42" not in prompt
@@ -873,16 +923,30 @@ def test_prerendered_handoff_is_optional_and_does_not_replace_default_on_later_c
     # Breaks when: selecting a backend hint changes the default handoff for subsequent prompts.
     hint = "Prior thread: thread-73; use the supplied handoff."
     custom = lead_prompt(
-        QUEUE, _section(), resume="thread-73", report=None, answer=None,
-        retire_flag=RETIRE_FLAG, handoff_hint=hint,
+        QUEUE,
+        _section(),
+        resume="thread-73",
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        handoff_hint=hint,
     )
     default = lead_prompt(
-        QUEUE, _section(), resume="sess-lead-7", report=None, answer=None,
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        report=None,
+        answer=None,
         retire_flag=RETIRE_FLAG,
     )
     explicit_default = lead_prompt(
-        QUEUE, _section(), resume="sess-lead-7", report=None, answer=None,
-        retire_flag=RETIRE_FLAG, handoff_hint=None,
+        QUEUE,
+        _section(),
+        resume="sess-lead-7",
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        handoff_hint=None,
     )
     assert hint in custom
     assert "resume thread-73" not in custom
@@ -895,8 +959,13 @@ def test_prerendered_handoff_is_optional_and_does_not_replace_default_on_later_c
 # `relay/prompts.py` and Homes; Order 3): every architect brief line is in a legal form.
 
 LEGAL_LINE = re.compile(r"(rulings |\d+: |new: |lead new: |approve: )")
-PROBLEM_ML = "`_verify` parks after one failed check;\n  tests/test_loop.py fails on it\n\n\tsee the run log"
-ANSWERS_ML = ["Compress the spec.\n  Keep {braces} 100% of its contracts.", "Yes:\n\n\tthe cap stays."]
+PROBLEM_ML = (
+    "`_verify` parks after one failed check;\n  tests/test_loop.py fails on it\n\n\tsee the run log"
+)
+ANSWERS_ML = [
+    "Compress the spec.\n  Keep {braces} 100% of its contracts.",
+    "Yes:\n\n\tthe cap stays.",
+]
 SAID_ML = "Blocked: the cited log\n  is outside the repository.\n\nNothing filed."
 CODE = ("lead/m2-images", "54f611a5")
 
@@ -910,7 +979,9 @@ def _illegal(brief: str) -> list[str]:
 
 
 def _ml_design_brief() -> str:
-    return design_brief(DESIGN, QUEUE, _stepped(), PROBLEM_ML, EVIDENCE, APPROVAL, ANSWERS_ML, code=CODE)
+    return design_brief(
+        DESIGN, QUEUE, _stepped(), PROBLEM_ML, EVIDENCE, APPROVAL, ANSWERS_ML, code=CODE
+    )
 
 
 # Behavior 1: every line of each architect brief is `rulings `, `<n>: `, `new: `, `lead new: `
@@ -925,7 +996,11 @@ def test_design_brief_with_multiline_problem_answers_and_section_is_only_ruling_
     lines = brief.splitlines()
     assert lines[0] == f"rulings {DESIGN}"
     assert lines[1].startswith("lead new: ")
-    assert lines[2:] == [f"new: {_flat(ANSWERS_ML[0])}", f"new: {_flat(ANSWERS_ML[1])}", f"approve: {APPROVAL}"]
+    assert lines[2:] == [
+        f"new: {_flat(ANSWERS_ML[0])}",
+        f"new: {_flat(ANSWERS_ML[1])}",
+        f"approve: {APPROVAL}",
+    ]
 
 
 def test_design_brief_puts_the_section_text_and_problem_on_its_lead_new_line() -> None:
@@ -946,7 +1021,9 @@ def test_design_retry_brief_with_multiline_message_is_only_ruling_lines() -> Non
 
 def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_numbered_line() -> None:
     # Breaks when: an unnumbered multi-line answer to one decision becomes `<n>:` plus bare lines.
-    brief = design_answer_brief(DESIGN, (3,), "go with the\nrecommendation\n\n  but keep the cap", APPROVAL)
+    brief = design_answer_brief(
+        DESIGN, (3,), "go with the\nrecommendation\n\n  but keep the cap", APPROVAL
+    )
     assert _illegal(brief) == []
     assert brief.splitlines() == [
         f"rulings {DESIGN}",
@@ -959,7 +1036,11 @@ def test_design_answer_brief_fallback_with_a_multiline_answer_is_one_new_line() 
     # Breaks when: an unnumbered multi-line answer to several decisions becomes `new:` plus bare lines.
     brief = design_answer_brief(DESIGN, (1, 2), "do both\n\tthe cheap way", APPROVAL)
     assert _illegal(brief) == []
-    assert brief.splitlines() == [f"rulings {DESIGN}", "new: do both the cheap way", f"approve: {APPROVAL}"]
+    assert brief.splitlines() == [
+        f"rulings {DESIGN}",
+        "new: do both the cheap way",
+        f"approve: {APPROVAL}",
+    ]
 
 
 # Behavior 2: the retry reason sits in a `lead new:` line before `approve:`.
@@ -1037,12 +1118,19 @@ def test_lead_prompt_map_rule_excludes_architect_briefs() -> None:
     ids=["new-qualified", "resumed-legacy"],
 )
 def test_lead_prompt_assigns_the_supplied_branch_and_exact_absolute_path(
-    branch: str, path: Path, resume: str | None,
+    branch: str,
+    path: Path,
+    resume: str | None,
 ) -> None:
     # Breaks when: rendering ignores the selected binding or rewrites a legacy name/location.
     prompt = lead_prompt(
-        QUEUE, _section(), resume=resume, report=None, answer=None,
-        retire_flag=RETIRE_FLAG, worktree=git.SectionWorktree(branch, path),
+        QUEUE,
+        _section(),
+        resume=resume,
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        worktree=git.SectionWorktree(branch, path),
     )
     assert branch in prompt
     assert str(path) in prompt
@@ -1054,14 +1142,20 @@ def test_lead_prompt_instructs_creation_when_absent_and_final_branch_report() ->
     # Breaks when: a fresh lead is not told to create the assigned worktree or report its binding.
     binding = git.SectionWorktree("custom/selected", Path("/work/exact-assignment"))
     prompt = lead_prompt(
-        QUEUE, _section(), resume=None, report=None, answer=None,
-        retire_flag=RETIRE_FLAG, worktree=binding,
+        QUEUE,
+        _section(),
+        resume=None,
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        worktree=binding,
     )
     creation = r"\bcreat\w*\b"
     absence = r"\b(?:absent|missing|not exist|doesn't exist)\b"
     assert re.search(
         rf"(?:{creation}[^.\n]*{absence}|{absence}[^.\n]*{creation})",
-        prompt, re.IGNORECASE,
+        prompt,
+        re.IGNORECASE,
     )
     assert f"BRANCH {binding.branch} {binding.path}" in prompt
     assert re.search(r"\bfinal\s+report\b", prompt, re.IGNORECASE)
@@ -1073,8 +1167,13 @@ def test_lead_prompt_assignment_takes_precedence_over_section_and_recalled_sessi
     report = "BRANCH lead/old-name /work/recalled-worktree\nRETIRED"
     binding = git.SectionWorktree("custom/current-assignment", Path("/work/current-assignment"))
     prompt = lead_prompt(
-        QUEUE, _section(body=body), resume="old-session", report=report, answer=None,
-        retire_flag=RETIRE_FLAG, worktree=binding,
+        QUEUE,
+        _section(body=body),
+        resume="old-session",
+        report=report,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        worktree=binding,
     )
     assert body in prompt
     assert report in prompt
@@ -1083,7 +1182,8 @@ def test_lead_prompt_assignment_takes_precedence_over_section_and_recalled_sessi
         r"\b(?:this\s+)?(?:worktree\s+)?assignment\s+"
         r"(?:takes\s+(?:precedence|priority)\s+over|has\s+priority\s+over|overrides?)\s+"
         r"([^\n.]+)",
-        prompt, re.IGNORECASE,
+        prompt,
+        re.IGNORECASE,
     )
     assert priority is not None
     assert re.search(r"\bsection\b", priority.group(1), re.IGNORECASE)
@@ -1104,8 +1204,13 @@ def test_lead_prompt_renders_the_assignment_without_selecting_names(
     monkeypatch.setattr(git, "section_path", forbidden)
     binding = git.SectionWorktree("custom/render-only", Path("/work/render-only"))
     prompt = lead_prompt(
-        QUEUE, _section(), resume=None, report=None, answer=None,
-        retire_flag=RETIRE_FLAG, worktree=binding,
+        QUEUE,
+        _section(),
+        resume=None,
+        report=None,
+        answer=None,
+        retire_flag=RETIRE_FLAG,
+        worktree=binding,
     )
     assert calls == []
     assert f"BRANCH {binding.branch} {binding.path}" in prompt
@@ -1122,9 +1227,7 @@ def _flat_lower(text: str) -> str:
 def _run_overhead_brief(cfg: Config, which: str) -> str:
     if which == "research":
         return research_brief(QUEUE, _section(), RESEARCH_FLAG, cfg)
-    return refresh_brief(
-        QUEUE, _section(), _kept_map(), ("relay/prompts.py",), RESEARCH_FLAG, cfg
-    )
+    return refresh_brief(QUEUE, _section(), _kept_map(), ("relay/prompts.py",), RESEARCH_FLAG, cfg)
 
 
 # ENTRY_RULE, appended by _map_form: each entry names what lies at its lines (a symbol, table,
@@ -1215,12 +1318,12 @@ def test_lead_prompt_map_paragraph_holds_only_the_rule_route_and_block_text() ->
         if line.strip():
             assert MAP_RULE in line or MAP_RULING_ONLY in line, line
     sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", rule_text.strip()) if s.strip()]
-    last_rule = max(
-        i for i, s in enumerate(sentences) if MAP_RULE in s or MAP_RULING_ONLY in s
-    )
+    last_rule = max(i for i, s in enumerate(sentences) if MAP_RULE in s or MAP_RULING_ONLY in s)
     assert sentences[last_rule + 1 :] == []
     outside = rule_text.replace(MAP_RULE, " ").replace(MAP_RULING_ONLY, " ")
     assert not re.search(r"\b(?:open|skip|search|read|grep)(?:s|es|ing)?\b", outside, re.I)
+
+
 # Run-overhead design (docs/superpowers/specs/relay-run-overhead-design.md, Modules
 # `relay/prompts.py` `WORKER_RULE`; Order 6): the worker-reply contract stands in
 # lead_prompt after the retire contract.
@@ -1248,7 +1351,9 @@ def test_lead_prompt_ends_with_recut_and_the_report_on_an_overloaded_worker() ->
     assert _sentence(text, r"\bOVERLOADED\b", r"\bend\b", r"\bsession\b", r"RECUT: ", r"\breport\b")
 
 
-def test_lead_prompt_ends_with_recut_and_the_report_on_a_worker_stopped_heavy_with_work_left() -> None:
+def test_lead_prompt_ends_with_recut_and_the_report_on_a_worker_stopped_heavy_with_work_left() -> (
+    None
+):
     # Breaks when: a worker that stops heavy with work left is not routed to RECUT: with its report.
     text = _worker_rule_text()
     assert _sentence(text, r"\bheavy\b", r"\bwork left\b", r"\bend\b", r"RECUT: ", r"\breport\b")
@@ -1276,7 +1381,9 @@ def test_lead_prompt_resends_the_same_brief_once_on_a_steering_rejection() -> No
 def test_lead_prompt_resends_with_the_quoted_lines_struck_and_nothing_added() -> None:
     # Breaks when: the resend keeps the quoted lines or lets the lead add to the brief.
     text = _worker_rule_text()
-    assert _sentence(text, r"REJECTED: STEERING", r"\bquoted lines\b", r"\bstruck\b", r"\bnothing added\b")
+    assert _sentence(
+        text, r"REJECTED: STEERING", r"\bquoted lines\b", r"\bstruck\b", r"\bnothing added\b"
+    )
 
 
 # Behavior 4: No assayer runs on a rejection.
@@ -1291,7 +1398,9 @@ def test_lead_prompt_runs_no_assayer_on_a_rejection() -> None:
 # Behavior 5: A second rejection of the same step ends the session with RECUT: <both rejections>.
 
 
-def test_lead_prompt_ends_with_recut_and_both_rejections_on_a_second_rejection_of_the_same_step() -> None:
+def test_lead_prompt_ends_with_recut_and_both_rejections_on_a_second_rejection_of_the_same_step() -> (
+    None
+):
     # Breaks when: a second rejection of the same step is not routed to RECUT: carrying both
     # rejections (left out, met by another resend, or carrying only the latest rejection).
     text = _worker_rule_text()

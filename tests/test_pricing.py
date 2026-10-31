@@ -42,8 +42,10 @@ def test_mixed_categories_and_inclusive_reasoning_are_charged_once(fake_cfg):
 def test_rows_sum_with_their_own_model_and_thread_rates(fake_cfg):
     # Breaks when a later model's rate replaces earlier rows or only one thread counts.
     cfg = replace(fake_cfg, prices={"first": Rate(3, 1, 5), "second": Rate(13, 2, 17)})
-    rows = (Usage("lead", "first", 1_000_000, 200_000, 100_000),
-            Usage("child", "second", 500_000, 100_000, 200_000))
+    rows = (
+        Usage("lead", "first", 1_000_000, 200_000, 100_000),
+        Usage("child", "second", 500_000, 100_000, 200_000),
+    )
     assert dollars(cfg, rows) == pytest.approx(11.9)
 
 
@@ -52,7 +54,9 @@ def test_custom_rate_precedence_and_legacy_construction(fake_cfg):
     custom = Rate(3, 1, 5)
     cfg = replace(fake_cfg, prices={"gpt-6.1-sol": custom})
     assert rate(cfg, "gpt-6.1-sol") == custom
-    assert dollars(cfg, (Usage("t", "gpt-6.1-sol", 1_000_000, 200_000, 100_000),)) == pytest.approx(3.1)
+    assert dollars(cfg, (Usage("t", "gpt-6.1-sol", 1_000_000, 200_000, 100_000),)) == pytest.approx(
+        3.1
+    )
     free = replace(fake_cfg, prices={"free": Rate(0, 0, 0, 0, 0)})
     assert dollars(free, (Usage("t", "free", 10, 2, 3, 2, 2),)) == 0
 
@@ -83,9 +87,13 @@ def test_nonzero_writes_require_the_corresponding_rate(fake_cfg):
 def test_unavailable_billing_dimensions_never_become_numeric_cost(fake_cfg):
     # Breaks when missing read/write evidence or an unknown billing regime is assumed zero.
     base = Usage("t", "gpt-6.1-sol", 10, 0, 2)
-    for fields in ({"cached_input": None}, {"cache_write_30m": None},
-                   {"cache_write_12h": None}, {"unavailable": "unknown write bucket"},
-                   {"unavailable": "unsupported long-context regime"}):
+    for fields in (
+        {"cached_input": None},
+        {"cache_write_30m": None},
+        {"cache_write_12h": None},
+        {"unavailable": "unknown write bucket"},
+        {"unavailable": "unsupported long-context regime"},
+    ):
         with pytest.raises(Unpriced, match=".+"):
             dollars(fake_cfg, (replace(base, **fields),))
 
@@ -101,8 +109,7 @@ def test_counts_are_nonnegative_integers_excluding_booleans(fake_cfg):
 
 def test_input_categories_cannot_overlap_or_exceed_input(fake_cfg):
     # Breaks when excess cached categories are clamped or a negative uncached charge is allowed.
-    for usage in (Usage("t", "gpt-6.1-sol", 10, 11, 0),
-                  Usage("t", "gpt-6.1-sol", 10, 5, 0, 4, 2)):
+    for usage in (Usage("t", "gpt-6.1-sol", 10, 11, 0), Usage("t", "gpt-6.1-sol", 10, 5, 0, 4, 2)):
         with pytest.raises(Unpriced, match=".+"):
             dollars(fake_cfg, (usage,))
 
@@ -119,7 +126,9 @@ def test_direct_rates_must_be_finite_nonnegative_numbers(fake_cfg):
 
 def test_one_unpriceable_row_prevents_a_partial_numeric_total(fake_cfg):
     # Breaks when invalid rows are skipped while a misleading partial total is returned.
-    rows = (Usage("valid", "gpt-6.1-sol", 100, 0, 1),
-            Usage("missing", "gpt-6.1-sol", 100, 0, 1, None))
+    rows = (
+        Usage("valid", "gpt-6.1-sol", 100, 0, 1),
+        Usage("missing", "gpt-6.1-sol", 100, 0, 1, None),
+    )
     with pytest.raises(Unpriced, match=".+"):
         dollars(fake_cfg, rows)

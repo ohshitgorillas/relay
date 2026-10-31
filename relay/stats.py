@@ -22,7 +22,9 @@ class Sized:
     section: str
     label: str  # the run's session, or the subagent's description
     peak: int  # peak context of this one run
-    overrun: str | None  # None when finished; else "retired", "killed", "stopped" or "over context limit"
+    overrun: (
+        str | None
+    )  # None when finished; else "retired", "killed", "stopped" or "over context limit"
 
 
 @dataclass(frozen=True)
@@ -61,7 +63,9 @@ def _subagent(run: Run, agent: Agent, cfg: Config) -> Sized | None:
         overrun = None
     else:
         return None
-    return Sized(role=agent.name, section=run.section, label=agent.description, peak=peak, overrun=overrun)
+    return Sized(
+        role=agent.name, section=run.section, label=agent.description, peak=peak, overrun=overrun
+    )
 
 
 def sized(history: History, cfg: Config) -> list[Sized]:
@@ -107,5 +111,7 @@ def lines(stats: list[RoleStats]) -> list[str]:
         if len(entry.overruns) > _SHOWN:
             out.append(f"  {entry.role}: {len(entry.overruns) - _SHOWN} earlier overruns not shown")
         for item in entry.overruns[-_SHOWN:]:
-            out.append(f"  {item.role} overrun: {item.section} {item.label} peak {item.peak} ({item.overrun})")
+            out.append(
+                f"  {item.role} overrun: {item.section} {item.label} peak {item.peak} ({item.overrun})"
+            )
     return out

@@ -45,11 +45,7 @@ def section_worktree(
         return None
     for record in out.split("\n\n"):
         fields = record.splitlines()
-        paths = [
-            Path(line[len("worktree ") :])
-            for line in fields
-            if line.startswith("worktree ")
-        ]
+        paths = [Path(line[len("worktree ") :]) for line in fields if line.startswith("worktree ")]
         branches = [
             line[len("branch refs/heads/") :]
             for line in fields
