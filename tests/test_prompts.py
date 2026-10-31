@@ -769,10 +769,7 @@ def test_design_answer_brief_with_no_numbers_says_new() -> None:
 
 # Behavior 9: recut_brief: as now, plus when design is set, the amended-design sentence.
 
-AMENDED = (
-    f"The design {DESIGN} was amended for this problem. "
-    "Cut this section's work again from it, its new Order steps included."
-)
+AMENDED = f"The design {DESIGN} was amended for this problem; its Order steps changed."
 
 
 def test_recut_brief_with_a_design_says_it_was_amended() -> None:

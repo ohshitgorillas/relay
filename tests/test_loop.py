@@ -4309,6 +4309,33 @@ def test_a_recut_into_nested_ids_is_put_back_and_the_next_lead_runs_on_the_paren
     assert _on_parent_only(leads[1])
 
 
+REJECTED_RECUT = 'REJECTED: STEERING\n"Cut this section\'s work again from it."'
+
+
+def test_a_design_change_recut_that_replies_rejected_parks_the_section_with_that_reply_verbatim(
+    cfg: Config,
+    tmp_path: Path,
+    queue_file: Callable[[str], Path],
+    scenario: Callable[[list[str]], Path],
+) -> None:
+    # Breaks when: a recut whose reply opens `REJECTED:` leaves the queue unchanged and `_recut`
+    # reports "the recut made no usable change" instead of the reply, or quotes it altered.
+    queue = _ladder(queue_file, cfg, tmp_path)
+    before = queue.read_text()
+    scenario(_lines(DONE_LEAD))
+    recuts = [_step(str(_scripted_run(tmp_path, "sess-recut-rejected", REJECTED_RECUT)))]
+    cfg = _sequenced(cfg, tmp_path, _design_change_leads(tmp_path), recuts=recuts)
+    cfg = _with_architect(cfg, tmp_path, [_step(ARCHITECT_APPROVED)])
+    cfg = _record_and_stop_on_ping(cfg, queue, tmp_path)
+    run(queue, cfg)
+    assert queue.read_text() == before
+    parked = State.open(queue, cfg).section("s1")
+    assert parked.status == "parked"
+    assert parked.question is not None
+    assert parked.question.endswith(f"did not land: {REJECTED_RECUT}"), parked.question
+    assert NO_USABLE_CHANGE not in parked.question
+
+
 def test_a_design_change_recut_into_nested_ids_parks_the_parent_with_a_question_giving_the_kept_cut(
     cfg: Config,
     tmp_path: Path,
@@ -5216,6 +5243,11 @@ def _renamed(source: Path, old: str, new: str, out: Path) -> Path:
 
 def _status_lead(tmp_path: Path, session: str, status: str) -> Path:
     """A scripted lead in session `session` whose result ends with the status line `status`."""
+    return _scripted_run(tmp_path, session, f"Stuck.\n{status}")
+
+
+def _scripted_run(tmp_path: Path, session: str, reply: str) -> Path:
+    """A scripted run in session `session` whose result is `reply`."""
     streams = tmp_path / "streams"
     streams.mkdir(exist_ok=True)
     usage = {
@@ -5246,7 +5278,7 @@ def _status_lead(tmp_path: Path, session: str, status: str) -> Path:
         "is_error": False,
         "duration_ms": 800,
         "num_turns": 1,
-        "result": f"Stuck.\n{status}",
+        "result": reply,
         "session_id": session,
         "total_cost_usd": 0.01,
         "usage": usage,

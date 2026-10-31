@@ -139,8 +139,7 @@ def recut_brief(
         f"The lead's run log: {lead_log}\n\n"
         f"Section body:\n{section.body}\n"
         + (
-            f"\nThe design {design} was amended for this problem. "
-            "Cut this section's work again from it, its new Order steps included.\n"
+            f"\nThe design {design} was amended for this problem; its Order steps changed.\n"
             if design is not None
             else ""
         )

@@ -214,8 +214,8 @@ def design_answer_brief(design: Path, numbers: tuple[int, ...], answer: str, app
     Then `approve: <approval>`."""
 
 def recut_brief(queue, section, reason, lead_log, design: Path | None = None) -> str:
-    """As now, plus when design is set: "The design <design> was amended for this problem. Cut this
-    section's work again from it, its new Order steps included.""""
+    """As now, plus when design is set: "The design <design> was amended for this problem; its
+    Order steps changed." Context only: the divvyer refuses a brief line that prescribes its cut.""""
 ```
 
 The guess never reaches `design_brief` or `recut_brief`: `loop.py` passes only `split_reason(...)[0]`.

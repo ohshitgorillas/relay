@@ -1165,6 +1165,15 @@ def _design_outcome(
         _park(cfg, queue, state, sid, ladder.failed_text(sid, design, failed))
 
 
+def _recut_refusal(text: str | None) -> str | None:
+    """The recut's whole reply, stripped, when its first non-blank line opens `REJECTED:` or
+    `REFUSED:`; else None."""
+    if not text:
+        return None
+    first = next((x.strip() for x in text.splitlines() if x.strip()), "")
+    return text.strip() if first.startswith(("REJECTED:", "REFUSED:")) else None
+
+
 def _recut(
     queue: Path,
     cfg: Config,
@@ -1194,6 +1203,7 @@ def _recut(
     known = {s.id: s for s in before}
     nested: list[str] = []
     kept: Path | None = None
+    refusal: str | None = None
     try:
         result, _ = _run(
             cfg,
@@ -1210,7 +1220,10 @@ def _recut(
             rung,
         )
         failed = run_failed(result, require_tokens=False)
-        if not failed:
+        refusal = None if failed else _recut_refusal(result.stream.result_text)
+        if refusal is not None:
+            failed = True
+        elif not failed:
             try:
                 after = parse_queue(queue)
             except QueueFormatError:
@@ -1237,6 +1250,8 @@ def _recut(
         progress.recut_finished(section.id, result, False, why)
         return f"{why}; the rejected cut is kept in {kept}"
     progress.recut_finished(section.id, result, changed)
+    if refusal is not None:
+        return refusal
     if failed:
         return "the recut made no usable change"
     if section.id not in {s.id for s in after}:
